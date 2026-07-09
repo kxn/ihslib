@@ -108,6 +108,17 @@ bool IHS_SessionConnect(IHS_Session *session) {
 }
 
 void IHS_SessionDisconnect(IHS_Session *session) {
+    /* Tell the host we are done before dropping the transport. Without the
+     * StopRequest it only sees a client that stopped answering, and leaves the
+     * streaming session up until its own timeout: Steam stays in streaming mode,
+     * the game keeps running, and the next connection lands mid-session.
+     * Queued before the disconnect packet, so the send worker emits it first. */
+    IHS_SessionChannel *control = IHS_SessionChannelFor(session, IHS_SessionChannelIdControl);
+    if (control != NULL) {
+        CStopRequest stop = CSTOP_REQUEST__INIT;
+        IHS_SessionChannelControlSend(control, k_EStreamControlStopRequest, (const ProtobufCMessage *) &stop,
+                                      IHS_PACKET_ID_NEXT);
+    }
     IHS_SessionChannel *discovery = IHS_SessionChannelFor(session, IHS_SessionChannelIdDiscovery);
     IHS_SessionChannelDiscoveryDisconnect(discovery);
 }
