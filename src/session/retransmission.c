@@ -68,6 +68,12 @@ bool IHS_RetransmissionQueue(IHS_SessionRetransmission *retransmission, IHS_Sess
     assert(packet->body.data != NULL);
     assert(packet->body.offset == IHS_PACKET_HEADER_SIZE);
     if (packet->header.retransmitCount >= RETRANSMISSION_ATTEMPTS) {
+        /* Twenty unacknowledged copies of one packet is not a lossy link, it is a
+         * packet the peer never accepts. Say so, instead of falling silent. */
+        IHS_SessionLog(retransmission->session, IHS_LogLevelWarn, "Retransmission",
+                       "Giving up on Packet(channelId=%u, packetId=%u, fragmentId=%u) after %u attempts",
+                       packet->header.channelId, packet->header.packetId, packet->header.fragmentId,
+                       RETRANSMISSION_ATTEMPTS);
         return false;
     }
     PendingRetransmission *pending = IHS_QueueItemObtain(retransmission->queue);
@@ -94,20 +100,30 @@ bool IHS_RetransmissionCancel(IHS_SessionRetransmission *retransmission, IHS_Ses
             .packetId = packetId,
             .fragmentId = fragmentId,
     };
-    IHS_MutexLock(retransmission->lock);
-    PendingRetransmission *match = IHS_QueuePollBy(retransmission->queue, RetransmissionPacketPredicate, &query);
-    IHS_MutexUnlock(retransmission->lock);
-    if (match == NULL) {
-        return false;
-    } else if (match->task != NULL) {
-        IHS_SessionLog(retransmission->session, IHS_LogLevelVerbose, "Retransmission",
-                       "Cancelling Packet(channelId=%u, packetId=%u, fragmentId=%u), retransmitCount=%u",
-                       channelId, packetId, fragmentId, match->packet.header.retransmitCount);
-        IHS_TimerTask *task = match->task;
-        match->task = NULL;
-        IHS_TimerTaskStopImmediate(task);
+    /* Cancel every match, not just the first. A packet awaiting retransmission has
+     * two entries in the queue for a moment: RetransmissionTimerRun re-queues the
+     * packet with retransmitCount+1 before RetransmissionTimerEnd removes the old
+     * entry. An ACK landing in that window used to cancel one twin and leave the
+     * other retransmitting until it hit the attempt limit. */
+    bool cancelled = false;
+    for (;;) {
+        IHS_MutexLock(retransmission->lock);
+        PendingRetransmission *match = IHS_QueuePollBy(retransmission->queue, RetransmissionPacketPredicate, &query);
+        IHS_MutexUnlock(retransmission->lock);
+        if (match == NULL) {
+            break;
+        }
+        cancelled = true;
+        if (match->task != NULL) {
+            IHS_SessionLog(retransmission->session, IHS_LogLevelVerbose, "Retransmission",
+                           "Cancelling Packet(channelId=%u, packetId=%u, fragmentId=%u), retransmitCount=%u",
+                           channelId, packetId, fragmentId, match->packet.header.retransmitCount);
+            IHS_TimerTask *task = match->task;
+            match->task = NULL;
+            IHS_TimerTaskStopImmediate(task);
+        }
     }
-    return true;
+    return cancelled;
 }
 
 static void RetransmissionQueueItemDestroy(PendingRetransmission *item, void *context) {

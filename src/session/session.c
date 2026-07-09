@@ -25,6 +25,8 @@
 
 #include <stdlib.h>
 #include <memory.h>
+#include <string.h>
+#include <errno.h>
 
 #include "ihslib/session.h"
 #include "ihslib/common.h"
@@ -299,7 +301,14 @@ static void SessionSendWorker(void *context) {
         }
         IHS_MutexUnlock(session->sendQueueMutex);
 
-        IHS_SessionSendPacket(session, &queued->packet);
+        if (!IHS_SessionSendPacket(session, &queued->packet)) {
+            /* A packet the socket refuses looks exactly like a packet the peer
+             * ignores: both retransmit twenty times and vanish. Tell them apart. */
+            IHS_SessionLog(session, IHS_LogLevelWarn, "Session",
+                           "Failed to send Packet(channelId=%u, packetId=%u, fragmentId=%u): %s",
+                           queued->packet.header.channelId, queued->packet.header.packetId,
+                           queued->packet.header.fragmentId, strerror(errno));
+        }
 
         if (queued->retransmit) {
             IHS_RetransmissionQueue(&session->retransmission, &queued->packet);
