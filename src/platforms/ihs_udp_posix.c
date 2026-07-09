@@ -27,6 +27,7 @@
 #include "ihs_thread.h"
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <unistd.h>
 #include <string.h>
 
@@ -52,6 +53,20 @@ IHS_UDPSocket *IHS_UDPSocketOpen(bool broadcast) {
     assert(s->fd >= 0);
     s->mutex = IHS_MutexCreate();
     assert(s->mutex != NULL);
+    /* A 1440p keyframe arrives as a burst of hundreds of datagrams. The default
+     * receive buffer (~208 KiB) overflows mid-frame and the kernel drops the
+     * remainder, so frames never reassemble. SO_RCVBUF is clamped to
+     * net.core.rmem_max; SO_RCVBUFFORCE ignores the clamp but needs CAP_NET_ADMIN. */
+    int rcvbuf = 4 * 1024 * 1024;
+    if (setsockopt(s->fd, SOL_SOCKET, SO_RCVBUFFORCE, &rcvbuf, sizeof(rcvbuf)) != 0) {
+        setsockopt(s->fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    }
+    int actual = 0;
+    socklen_t actualLen = sizeof(actual);
+    if (getsockopt(s->fd, SOL_SOCKET, SO_RCVBUF, &actual, &actualLen) == 0 && actual < rcvbuf) {
+        fprintf(stderr, "IHS_UDPSocketOpen: SO_RCVBUF capped at %d bytes (wanted %d); "
+                        "raise net.core.rmem_max to avoid dropped video packets\n", actual, rcvbuf);
+    }
     if (broadcast) {
         uint32_t opt = 1;
         setsockopt(s->fd, SOL_SOCKET, SO_BROADCAST, (char *) &opt, sizeof(opt));
@@ -72,10 +87,28 @@ int IHS_UDPSocketReceive(IHS_UDPSocket *s, IHS_UDPPacket *packet) {
     IHS_BufferEnsureMaxSize(&packet->buffer, 2048);
     if ((len = recvfrom(s->fd, IHS_BufferPointer(&packet->buffer), IHS_BufferMaxSize(&packet->buffer),
                         0, (struct sockaddr *) &sender, &senderlen)) <= 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT) {
-            return 0;
+        if (len == 0) return 0; /* empty datagram, nothing to deliver */
+        switch (errno) {
+            case EAGAIN:
+#if EWOULDBLOCK != EAGAIN
+            case EWOULDBLOCK:
+#endif
+            case ETIMEDOUT:  /* recv timeout tick */
+            case EINTR:
+            /* Stray ICMP errors from a prior unicast send (e.g. the host's
+             * ephemeral broadcast port is closed) surface on the next recv.
+             * Steam's client ignores these; tearing down the worker here would
+             * abort authorization/streaming handshakes. */
+            case ECONNREFUSED:
+            case ECONNRESET:
+            case ENETUNREACH:
+            case EHOSTUNREACH:
+                return 0;
+            default:
+                fprintf(stderr, "IHS_UDPSocketReceive: fatal recvfrom errno=%d (%s)\n",
+                        errno, strerror(errno));
+                return -1;
         }
-        return -1;
     }
     packet->buffer.size = len;
     AddressFromSys(&packet->address, &sender);
