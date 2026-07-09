@@ -85,6 +85,10 @@ struct IHS_Session {
      * sending k_EStreamControlStartVideoData (observed with desktop streaming). */
     int negotiatedVideoCodec;
     uint32_t captureWidth, captureHeight;
+    /* Set while IHS_SessionDisconnect waits for the host to acknowledge its
+     * StopRequest. -1 when no stop is outstanding; packet 0 is a legitimate id. */
+    int32_t stopPacketId;
+    volatile bool stopAcked;
     uint8_t numChannels;
     IHS_SessionChannel *channels[16];
     IHS_Thread *sendThread;
