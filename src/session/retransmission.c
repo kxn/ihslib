@@ -28,6 +28,8 @@
 
 #define RETRANSMISSION_INTERVAL 10
 #define RETRANSMISSION_ATTEMPTS 20
+#define CANCELLED_RING_SIZE (sizeof(((IHS_SessionRetransmission *) 0)->cancelled) / \
+                             sizeof(((IHS_SessionRetransmission *) 0)->cancelled[0]))
 
 typedef struct IHS_QueueItem {
     IHS_SessionPacket packet;
@@ -70,6 +72,28 @@ bool IHS_RetransmissionQueue(IHS_SessionRetransmission *retransmission, IHS_Sess
     if (packet->header.retransmitCount >= RETRANSMISSION_ATTEMPTS) {
         return false; /* RetransmissionTimerRun already warned */
     }
+    if (packet->header.retransmitCount > 0) {
+        /* A twin whose predecessor was ACKed while this one was in the send queue.
+         * Drop it here, where it finally becomes visible to Cancel. */
+        IHS_MutexLock(retransmission->lock);
+        bool drop = false;
+        for (size_t i = 0; i < CANCELLED_RING_SIZE; i++) {
+            IHS_RetransmissionCancelled *c = &retransmission->cancelled[i];
+            if (c->valid && c->channelId == packet->header.channelId &&
+                c->packetId == packet->header.packetId && c->fragmentId == packet->header.fragmentId) {
+                c->valid = false;
+                drop = true;
+                break;
+            }
+        }
+        IHS_MutexUnlock(retransmission->lock);
+        if (drop) {
+            IHS_SessionLog(retransmission->session, IHS_LogLevelVerbose, "Retransmission",
+                           "Dropping cancelled Packet(channelId=%u, packetId=%u, fragmentId=%u)",
+                           packet->header.channelId, packet->header.packetId, packet->header.fragmentId);
+            return false;
+        }
+    }
     PendingRetransmission *pending = IHS_QueueItemObtain(retransmission->queue);
     pending->packet = *packet;
     pending->retransmission = retransmission;
@@ -107,6 +131,14 @@ bool IHS_RetransmissionCancel(IHS_SessionRetransmission *retransmission, IHS_Ses
      * next run sees the flag, sends nothing, and ends, freeing the item on the thread
      * that owns it. Cost is one RETRANSMISSION_INTERVAL of lingering, not a segfault. */
     bool cancelled = false;
+    IHS_MutexLock(retransmission->lock);
+    IHS_RetransmissionCancelled *slot = &retransmission->cancelled[retransmission->cancelledHead];
+    slot->channelId = channelId;
+    slot->packetId = packetId;
+    slot->fragmentId = fragmentId;
+    slot->valid = true;
+    retransmission->cancelledHead = (retransmission->cancelledHead + 1) % CANCELLED_RING_SIZE;
+    IHS_MutexUnlock(retransmission->lock);
     for (;;) {
         IHS_MutexLock(retransmission->lock);
         PendingRetransmission *match = IHS_QueuePollBy(retransmission->queue, RetransmissionPacketPredicate, &query);

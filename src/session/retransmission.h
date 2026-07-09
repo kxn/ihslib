@@ -32,10 +32,22 @@
 
 typedef struct IHS_Session IHS_Session;
 
+typedef struct IHS_RetransmissionCancelled {
+    IHS_SessionChannelId channelId;
+    uint16_t packetId, fragmentId;
+    bool valid;
+} IHS_RetransmissionCancelled;
+
 typedef struct IHS_SessionRetransmission {
     IHS_Session *session;
     IHS_Mutex *lock;
     IHS_Queue *queue;
+    /* Identities cancelled recently. The next retransmission of a packet is queued
+     * asynchronously by the send worker, so an ACK can land after the timer decided
+     * to retransmit but before the new entry exists; that twin must be dropped on
+     * arrival or it retransmits to the attempt limit. Ring, oldest overwritten. */
+    IHS_RetransmissionCancelled cancelled[16];
+    unsigned int cancelledHead;
 } IHS_SessionRetransmission;
 
 void IHS_RetransmissionInit(IHS_SessionRetransmission *retransmission, IHS_Session *session);
