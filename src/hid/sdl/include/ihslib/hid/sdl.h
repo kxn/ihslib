@@ -28,8 +28,9 @@
 #include "ihslib/hid.h"
 #include "ihslib/hid/sdl/config.h"
 
-#include <SDL2/SDL_events.h>
-#include <SDL2/SDL_joystick.h>
+#include <SDL3/SDL_events.h>
+#include <SDL3/SDL_joystick.h>
+#include <SDL3/SDL_gamepad.h>
 
 /**
  *  This macro will evaluate to true if targeting SDL at least X.Y.Z.
@@ -46,7 +47,7 @@ typedef struct IHS_HIDProviderSDLJoystickIDMapping {
 
     SDL_JoystickID (*instanceId)(int index, void *context);
 
-    SDL_GameController *(*controller)(int index, void *context);
+    SDL_Gamepad *(*controller)(int index, void *context);
 } IHS_HIDProviderSDLDeviceList;
 
 IHS_HIDProvider *IHS_HIDProviderSDLCreateManaged();
@@ -56,10 +57,16 @@ IHS_HIDProvider *IHS_HIDProviderSDLCreateUnmanaged(const IHS_HIDProviderSDLDevic
 void IHS_HIDProviderSDLDestroy(IHS_HIDProvider *provider);
 
 /**
- * For an event from IHS managed device, it will add report data
+ * For an event from IHS managed device, it will add report data.
+ *
+ * This only accumulates state; it never transmits. When it returns true, call
+ * IHS_SessionHIDSendReport() to flush — once per rendered frame is a good rate.
+ * Sending per event floods the reliable control channel (sticks and gyros emit
+ * hundreds of events per second) and starves the video stream of bandwidth.
+ *
  * @param session
  * @param event
- * @return
+ * @return true if the report changed and a flush is due
  */
 bool IHS_HIDHandleSDLEvent(IHS_Session *session, const SDL_Event *event);
 

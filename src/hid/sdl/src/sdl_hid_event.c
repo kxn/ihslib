@@ -27,50 +27,42 @@
 
 #include "hid/manager.h"
 
+#include <stdlib.h> /* SDL2 pulled this in transitively; SDL3 does not */
+
 #include "sdl_hid_common.h"
 #include "session/session_pri.h"
 
-static bool HandleRemoveEvent(IHS_HIDManager *manager, const SDL_ControllerDeviceEvent *event);
+static bool HandleRemoveEvent(IHS_HIDManager *manager, const SDL_GamepadDeviceEvent *event);
 
-static bool HandleCButtonEvent(IHS_HIDManager *manager, const SDL_ControllerButtonEvent *event);
+static bool HandleCButtonEvent(IHS_HIDManager *manager, const SDL_GamepadButtonEvent *event);
 
-static bool HandleCAxisEvent(IHS_HIDManager *manager, const SDL_ControllerAxisEvent *event);
+static bool HandleCAxisEvent(IHS_HIDManager *manager, const SDL_GamepadAxisEvent *event);
 
-static bool HandleSensorEvent(IHS_HIDManager *manager, const SDL_ControllerSensorEvent *event);
+static bool HandleSensorEvent(IHS_HIDManager *manager, const SDL_GamepadSensorEvent *event);
 
 bool IHS_HIDHandleSDLEvent(IHS_Session *session, const SDL_Event *event) {
     switch (event->type) {
-        case SDL_CONTROLLERDEVICEADDED: {
+        case SDL_EVENT_GAMEPAD_ADDED: {
             IHS_SessionHIDNotifyDeviceChange(session);
             return true;
         }
-        case SDL_CONTROLLERDEVICEREMOVED: {
-            bool changed = HandleRemoveEvent(session->hidManager, &event->cdevice);
+        case SDL_EVENT_GAMEPAD_REMOVED: {
+            bool changed = HandleRemoveEvent(session->hidManager, &event->gdevice);
             IHS_SessionHIDNotifyDeviceChange(session);
             return changed;
         }
-        case SDL_CONTROLLERBUTTONDOWN:
-        case SDL_CONTROLLERBUTTONUP: {
-            bool changed = HandleCButtonEvent(session->hidManager, &event->cbutton);
-            if (changed) {
-                IHS_SessionHIDSendReport(session);
-            }
-            return changed;
-        }
-        case SDL_CONTROLLERAXISMOTION: {
-            bool changed = HandleCAxisEvent(session->hidManager, &event->caxis);
-            if (changed) {
-                IHS_SessionHIDSendReport(session);
-            }
-            return changed;
-        }
-        case SDL_CONTROLLERSENSORUPDATE: {
-            bool changed = HandleSensorEvent(session->hidManager, &event->csensor);
-            if (changed) {
-                IHS_SessionHIDSendReport(session);
-            }
-            return changed;
-        }
+        /* These only accumulate state. The caller decides when to flush it with
+         * IHS_SessionHIDSendReport: a stick or a gyro emits hundreds of events per
+         * second, and one reliable control packet each saturates the uplink — on
+         * Wi-Fi that costs the airtime the video stream needs, and the retransmits
+         * pile up unacknowledged. */
+        case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+        case SDL_EVENT_GAMEPAD_BUTTON_UP:
+            return HandleCButtonEvent(session->hidManager, &event->gbutton);
+        case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+            return HandleCAxisEvent(session->hidManager, &event->gaxis);
+        case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
+            return HandleSensorEvent(session->hidManager, &event->gsensor);
     }
     return false;
 }
@@ -102,7 +94,7 @@ bool IHS_HIDResetSDLGameControllers(IHS_Session *session) {
     return true;
 }
 
-static bool HandleRemoveEvent(IHS_HIDManager *manager, const SDL_ControllerDeviceEvent *event) {
+static bool HandleRemoveEvent(IHS_HIDManager *manager, const SDL_GamepadDeviceEvent *event) {
     IHS_HIDManagedDevice *managed = IHS_HIDManagerDeviceByJoystickID(manager, event->which);
     if (managed == NULL) {
         return false;
@@ -111,7 +103,7 @@ static bool HandleRemoveEvent(IHS_HIDManager *manager, const SDL_ControllerDevic
     return true;
 }
 
-static bool HandleCButtonEvent(IHS_HIDManager *manager, const SDL_ControllerButtonEvent *event) {
+static bool HandleCButtonEvent(IHS_HIDManager *manager, const SDL_GamepadButtonEvent *event) {
     IHS_HIDManagedDevice *managed = IHS_HIDManagerDeviceByJoystickID(manager, event->which);
     if (managed == NULL) {
         return false;
@@ -120,7 +112,7 @@ static bool HandleCButtonEvent(IHS_HIDManager *manager, const SDL_ControllerButt
     assert(device != NULL);
     IHS_HIDDeviceLock(managed->device);
     bool changed = IHS_HIDReportSDLSetButton(&device->states.current, event->button,
-                                             event->state == SDL_PRESSED);
+                                             event->down);
     if (changed) {
         IHS_HIDDeviceReportAddDelta(managed->device, (const uint8_t *) &device->states.previous,
                                     (const uint8_t *) &device->states.current, 48);
@@ -130,7 +122,7 @@ static bool HandleCButtonEvent(IHS_HIDManager *manager, const SDL_ControllerButt
     return changed;
 }
 
-static bool HandleCAxisEvent(IHS_HIDManager *manager, const SDL_ControllerAxisEvent *event) {
+static bool HandleCAxisEvent(IHS_HIDManager *manager, const SDL_GamepadAxisEvent *event) {
     IHS_HIDManagedDevice *managed = IHS_HIDManagerDeviceByJoystickID(manager, event->which);
     if (managed == NULL) {
         return false;
@@ -148,7 +140,7 @@ static bool HandleCAxisEvent(IHS_HIDManager *manager, const SDL_ControllerAxisEv
     return changed;
 }
 
-static bool HandleSensorEvent(IHS_HIDManager *manager, const SDL_ControllerSensorEvent *event) {
+static bool HandleSensorEvent(IHS_HIDManager *manager, const SDL_GamepadSensorEvent *event) {
     IHS_HIDManagedDevice *managed = IHS_HIDManagerDeviceByJoystickID(manager, event->which);
     if (managed == NULL) {
         return false;

@@ -28,7 +28,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#include <SDL2/SDL.h>
+#include <SDL3/SDL_gamepad.h>
 
 typedef struct __attribute__((__packed__)) IHS_HIDReportSDL {
     int16_t axes[6];
@@ -48,9 +48,9 @@ bool IHS_HIDReportSDLInit(IHS_HIDStateSDL *report);
 
 bool IHS_HIDReportSDLSetRequestedReportVersion(IHS_HIDStateSDL *report, uint8_t version);
 
-bool IHS_HIDReportSDLSetButton(IHS_HIDStateSDL *report, SDL_GameControllerButton button, bool pressed);
+bool IHS_HIDReportSDLSetButton(IHS_HIDStateSDL *report, SDL_GamepadButton button, bool pressed);
 
-bool IHS_HIDReportSDLSetAxis(IHS_HIDStateSDL *report, SDL_GameControllerAxis axis, int16_t value);
+bool IHS_HIDReportSDLSetAxis(IHS_HIDStateSDL *report, SDL_GamepadAxis axis, int16_t value);
 
 bool IHS_HIDReportSDLSetAccel(IHS_HIDStateSDL *report, const float accel[3]);
 

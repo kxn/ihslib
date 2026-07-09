@@ -25,7 +25,7 @@
 
 #pragma once
 
-#include <SDL_version.h>
+#include <SDL3/SDL_version.h>
 
 #define IHS_HID_SDL_TARGET_MAJOR @IHSLIB_SDL_TARGET_MAJOR@
 #define IHS_HID_SDL_TARGET_MINOR @IHSLIB_SDL_TARGET_MINOR@

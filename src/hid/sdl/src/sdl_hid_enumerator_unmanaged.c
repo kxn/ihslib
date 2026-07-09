@@ -24,6 +24,7 @@
  */
 #include <stddef.h>
 #include <stdlib.h>
+#include <stdio.h> /* snprintf; SDL2 pulled it in transitively, SDL3 does not */
 
 #include "sdl_hid_common.h"
 #include "sdl_hid_utils.h"
@@ -125,21 +126,21 @@ static void *EnumerationNext(IHS_Enumeration *enumeration) {
 static bool EnumerationGetInfo(IHS_Enumeration *enumeration, IHS_HIDDeviceInfo *info) {
     UnmanagedEnumeration *ue = (UnmanagedEnumeration *) enumeration;
     GameControllerEnumeration *gce = (GameControllerEnumeration *) enumeration;
-    SDL_GameController *controller = ue->list->controller(gce->joystickIndex, ue->listContext);
+    SDL_Gamepad *controller = ue->list->controller(gce->joystickIndex, ue->listContext);
     if (controller == NULL) {
         return false;
     }
-    SDL_Joystick *joystick = SDL_GameControllerGetJoystick(controller);
-    SDL_JoystickID instanceId = SDL_JoystickInstanceID(joystick);
-    snprintf(gce->temp.path, 16, "sdl://%d", instanceId);
-    const char *name = SDL_JoystickName(joystick);
+    SDL_Joystick *joystick = SDL_GetGamepadJoystick(controller);
+    SDL_JoystickID instanceId = SDL_GetJoystickID(joystick);
+    snprintf(gce->temp.path, 16, "sdl://%u", instanceId);
+    const char *name = SDL_GetJoystickName(joystick);
     if (name != NULL) {
         strncpy(gce->temp.product_string, name, 63);
         gce->temp.product_string[63] = '\0';
     } else {
         strcpy(gce->temp.product_string, "Generic Gamepad");
     }
-    SDL_JoystickGUID guid = SDL_JoystickGetGUID(joystick);
+    SDL_GUID guid = SDL_GetJoystickGUID(joystick);
     if (!IHS_HIDDeviceSDLGetJoystickGUIDInfo(&guid, &info->vendor_id, &info->product_id, &info->product_version,
                                              NULL)) {
         info->vendor_id = 0;

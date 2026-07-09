@@ -75,11 +75,32 @@ typedef struct __attribute__((__packed__)) {
 
 _Static_assert(sizeof(DeviceFeatureReport) == 20, "");
 
-bool IsXinputDevice(const SDL_JoystickGUID *guid);
+bool IsXinputDevice(const SDL_GUID *guid);
 
-bool IsHIDAPIDevice(const SDL_JoystickGUID *guid);
+bool IsHIDAPIDevice(const SDL_GUID *guid);
 
-EControllerType InferControllerType(const SDL_JoystickGUID *guid);
+/**
+ * Map SDL3's SDL_PowerState + battery percentage back onto the SDL2
+ * SDL_JoystickPowerLevel byte the Steam host expects on the wire.
+ * UNKNOWN/ERROR -> SDL_JOYSTICK_POWER_UNKNOWN (-1 as a byte, i.e. 0xFF).
+ */
+static uint8_t JoystickPowerLevelByte(SDL_Joystick *joystick) {
+    int percent = -1;
+    switch (SDL_GetJoystickPowerInfo(joystick, &percent)) {
+        case SDL_POWERSTATE_NO_BATTERY:
+            return 4; /* SDL_JOYSTICK_POWER_WIRED */
+        case SDL_POWERSTATE_ON_BATTERY:
+        case SDL_POWERSTATE_CHARGING:
+        case SDL_POWERSTATE_CHARGED:
+            if (percent < 0) return (uint8_t) -1; /* UNKNOWN */
+            if (percent <= 5) return 0;  /* EMPTY */
+            if (percent <= 20) return 1; /* LOW */
+            if (percent <= 70) return 2; /* MEDIUM */
+            return 3;                    /* FULL */
+        default:
+            return (uint8_t) -1; /* SDL_JOYSTICK_POWER_UNKNOWN */
+    }
+}
 
 int IHS_HIDDeviceSDLGetFeatureReport(IHS_HIDDevice *device, const uint8_t *reportNumber, size_t reportNumberLen,
                                      IHS_Buffer *dest, size_t length) {
@@ -88,94 +109,62 @@ int IHS_HIDDeviceSDLGetFeatureReport(IHS_HIDDevice *device, const uint8_t *repor
     switch (reportNumber[0]) {
         case GetFeatureReportGetSerial: {
             IHS_BufferWriteMem(dest, 0, reportNumber, 1);
-#if IHS_HID_SDL_TARGET_ATLEAST(2, 0, 14)
-            const char *serial = SDL_GameControllerGetSerial(sdl->controller);
+            const char *serial = SDL_GetGamepadSerial(sdl->controller);
             if (serial == NULL) serial = "";
             IHS_BufferWriteMem(dest, 1, (const uint8_t *) serial, strlen(serial) + 1);
-#else
-            // Write an empty string
-            IHS_BufferFillMem(dest, 1, 0, 1);
-#endif
             break;
         }
         case GetFeatureReportGetPowerLevel: {
             IHS_BufferWriteMem(dest, 0, reportNumber, 1);
-#if IHS_HID_SDL_TARGET_ATLEAST(2, 0, 4)
-            SDL_Joystick *joystick = SDL_GameControllerGetJoystick(sdl->controller);
-            uint8_t level = SDL_JoystickCurrentPowerLevel(joystick);
+            SDL_Joystick *joystick = SDL_GetGamepadJoystick(sdl->controller);
+            uint8_t level = JoystickPowerLevelByte(joystick);
             IHS_BufferWriteMem(dest, 1, &level, 1);
-#else
-            // Write an empty string
-            IHS_BufferFillMem(dest, 1, SDL_JOYSTICK_POWER_UNKNOWN, 1);
-#endif
             break;
         }
         case GetFeatureReportGetCaps: {
             int playerIndex = -1;
-            SDL_JoystickGUID guid = SDL_JoystickGetGUID(SDL_GameControllerGetJoystick(sdl->controller));
+            SDL_GUID guid = SDL_GetJoystickGUID(SDL_GetGamepadJoystick(sdl->controller));
 
             bool xinput = IsXinputDevice(&guid);
             // Initialize so the xinput-true branch doesn't leak uninitialized stack
             // contents through the wire report (DeviceFeatureReport.controllerType below).
             EControllerType controllerType = k_ControllerTypeUnknown;
             if (!xinput) {
-#if IHS_HID_SDL_TARGET_ATLEAST(2, 0, 9)
-                playerIndex = SDL_GameControllerGetPlayerIndex(sdl->controller);
-#else
-                playerIndex = sdl->playerIndex;
-#endif
-#if IHS_HID_SDL_TARGET_ATLEAST(2, 0, 12)
-                switch (SDL_GameControllerGetType(sdl->controller)) {
-                    case SDL_CONTROLLER_TYPE_XBOX360:
+                playerIndex = SDL_GetGamepadPlayerIndex(sdl->controller);
+                switch (SDL_GetGamepadType(sdl->controller)) {
+                    case SDL_GAMEPAD_TYPE_XBOX360:
                         controllerType = k_ControllerTypeXBox360Controller;
                         break;
-                    case SDL_CONTROLLER_TYPE_XBOXONE:
+                    case SDL_GAMEPAD_TYPE_XBOXONE:
                         controllerType = k_ControllerTypeXBoxOneController;
                         break;
-                    case SDL_CONTROLLER_TYPE_PS3:
+                    case SDL_GAMEPAD_TYPE_PS3:
                         controllerType = k_ControllerTypePS3Controller;
                         break;
-                    case SDL_CONTROLLER_TYPE_PS4:
+                    case SDL_GAMEPAD_TYPE_PS4:
                         controllerType = k_ControllerTypePS4Controller;
                         break;
-                    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO:
+                    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO:
                         controllerType = k_ControllerTypeSwitchProController;
                         break;
-                    case SDL_CONTROLLER_TYPE_VIRTUAL:
-                        controllerType = k_ControllerTypeMobileTouch;
-                        break;
-                    case SDL_CONTROLLER_TYPE_PS5:
+                    /* SDL3 dropped SDL_GAMEPAD_TYPE_VIRTUAL; virtual pads now report
+                     * as whatever type they emulate, so there is nothing to map. */
+                    case SDL_GAMEPAD_TYPE_PS5:
                         controllerType = k_ControllerTypePS5Controller;
                         break;
-#if SDL_VERSION_ATLEAST(2, 0, 16)
-                    case SDL_CONTROLLER_TYPE_AMAZON_LUNA:
-                        controllerType = k_ControllerTypeXBoxOneController;
-                        break;
-                    case SDL_CONTROLLER_TYPE_GOOGLE_STADIA:
-                        controllerType = k_ControllerTypeUnknownNonSteamController;
-                        break;
-#endif
-#if SDL_VERSION_ATLEAST(2, 24, 0)
-                    case SDL_CONTROLLER_TYPE_NVIDIA_SHIELD:
-                        controllerType = k_ControllerTypeXBoxOneController;
-                        break;
-                    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+                    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
                         controllerType = k_ControllerTypeSwitchJoyConLeft;
                         break;
-                    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+                    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
                         controllerType = k_ControllerTypeSwitchJoyConRight;
                         break;
-                    case SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+                    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
                         controllerType = k_ControllerTypeSwitchJoyConPair;
                         break;
-#endif
                     default:
                         controllerType = k_ControllerTypeUnknownNonSteamController;
                         break;
                 }
-#else
-                controllerType = InferControllerType(&guid);
-#endif
             }
             DeviceFeatureReport report = {
                     .valid = true,
@@ -197,41 +186,10 @@ int IHS_HIDDeviceSDLGetFeatureReport(IHS_HIDDevice *device, const uint8_t *repor
     return 0;
 }
 
-bool IsXinputDevice(const SDL_JoystickGUID *guid) {
+bool IsXinputDevice(const SDL_GUID *guid) {
     return guid->data[14] == 'x';
 }
 
-bool IsHIDAPIDevice(const SDL_JoystickGUID *guid) {
+bool IsHIDAPIDevice(const SDL_GUID *guid) {
     return guid->data[14] == 'h';
-}
-
-enum UsbVendorId {
-    UsbVendorIdMicrosoft = 0x045e,
-    UsbVendorIdSony = 0x054c,
-    UsbVendorIdNintendo = 0x057e,
-    UsbVendorIdValve = 0x28de,
-};
-
-EControllerType InferControllerType(const SDL_JoystickGUID *guid) {
-    uint16_t vendorId, productId;
-    if (!IHS_HIDDeviceSDLGetJoystickGUIDInfo(guid, &vendorId, &productId, NULL, NULL)) {
-        return k_ControllerTypeUnknownNonSteamController;
-    }
-    switch (vendorId) {
-        case UsbVendorIdMicrosoft: {
-            return k_ControllerTypeXBoxOneController;
-        }
-        case UsbVendorIdSony: {
-            return k_ControllerTypePS4Controller;
-        }
-        case UsbVendorIdNintendo: {
-            return k_ControllerTypeXInputSwitchController;
-        }
-        case UsbVendorIdValve: {
-            return k_ControllerTypeSteamController;
-        }
-        default: {
-            return k_ControllerTypeUnknownNonSteamController;
-        }
-    }
 }

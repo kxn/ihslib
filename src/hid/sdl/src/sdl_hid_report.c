@@ -39,7 +39,7 @@ bool IHS_HIDReportSDLSetRequestedReportVersion(IHS_HIDStateSDL *report, uint8_t 
     return true;
 }
 
-bool IHS_HIDReportSDLSetButton(IHS_HIDStateSDL *report, SDL_GameControllerButton button, bool pressed) {
+bool IHS_HIDReportSDLSetButton(IHS_HIDStateSDL *report, SDL_GamepadButton button, bool pressed) {
     if (button < 0 || button >= 16) {
         return false;
     }
@@ -52,7 +52,7 @@ bool IHS_HIDReportSDLSetButton(IHS_HIDStateSDL *report, SDL_GameControllerButton
     return prev != report->buttons;
 }
 
-bool IHS_HIDReportSDLSetAxis(IHS_HIDStateSDL *report, SDL_GameControllerAxis axis, int16_t value) {
+bool IHS_HIDReportSDLSetAxis(IHS_HIDStateSDL *report, SDL_GamepadAxis axis, int16_t value) {
     if (axis < 0 || axis >= 6) {
         return false;
     }

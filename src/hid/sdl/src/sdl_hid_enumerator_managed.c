@@ -24,10 +24,9 @@
  */
 #include "ihslib/hid/sdl.h"
 
-#if IHS_HID_SDL_TARGET_ATLEAST(2, 0, 6)
-
 #include <stddef.h>
 #include <stdlib.h>
+#include <stdio.h> /* snprintf; SDL2 pulled it in transitively, SDL3 does not */
 #include "sdl_hid_common.h"
 #include "sdl_hid_utils.h"
 #include "sdl_hid_enumerators.h"
@@ -49,12 +48,14 @@ static void *EnumerationNext(IHS_Enumeration *enumeration);
 
 static bool EnumerationGetInfo(IHS_Enumeration *enumeration, IHS_HIDDeviceInfo *info);
 
-static int NextControllerIndex(int current, int count);
+static void EnumerationFree(IHS_Enumeration *enumeration);
+
+static int NextControllerIndex(const GameControllerEnumeration *gce, int current);
 
 const static IHS_HIDDeviceSDLEnumerationClass ManagedEnumerationClass = {
         .base = {
                 .alloc = EnumerationAlloc,
-                .free = (void (*)(IHS_Enumeration *)) free,
+                .free = EnumerationFree,
                 .count = EnumerationCount,
                 .reset = EnumerationReset,
                 .ended = EnumerationEnded,
@@ -77,11 +78,10 @@ static IHS_Enumeration *EnumerationAlloc(const IHS_EnumerationClass *cls, void *
 }
 
 static size_t EnumerationCount(const IHS_Enumeration *enumeration) {
-    (void) enumeration;
     size_t count = 0;
     const GameControllerEnumeration *gce = (const GameControllerEnumeration *) enumeration;
     for (int i = 0, j = gce->joystickCount; i < j; i++) {
-        if (SDL_IsGameController(i)) {
+        if (SDL_IsGamepad(gce->joystickIds[i])) {
             count++;
         }
     }
@@ -90,8 +90,17 @@ static size_t EnumerationCount(const IHS_Enumeration *enumeration) {
 
 static void EnumerationReset(IHS_Enumeration *enumeration) {
     GameControllerEnumeration *gce = (GameControllerEnumeration *) enumeration;
+    SDL_free(gce->joystickIds);
+    int count = 0;
+    gce->joystickIds = SDL_GetJoysticks(&count);
     gce->joystickIndex = 0;
-    gce->joystickCount = SDL_NumJoysticks();
+    gce->joystickCount = gce->joystickIds != NULL ? count : 0;
+}
+
+static void EnumerationFree(IHS_Enumeration *enumeration) {
+    GameControllerEnumeration *gce = (GameControllerEnumeration *) enumeration;
+    SDL_free(gce->joystickIds);
+    free(gce);
 }
 
 static bool EnumerationEnded(const IHS_Enumeration *enumeration) {
@@ -109,42 +118,40 @@ static void *EnumerationGet(const IHS_Enumeration *enumeration) {
 
 static void *EnumerationNext(IHS_Enumeration *enumeration) {
     GameControllerEnumeration *gce = (GameControllerEnumeration *) enumeration;
-    gce->joystickIndex = NextControllerIndex(gce->joystickIndex, gce->joystickCount);
+    gce->joystickIndex = NextControllerIndex(gce, gce->joystickIndex);
     return EnumerationGet(enumeration);
 }
 
 static bool EnumerationGetInfo(IHS_Enumeration *enumeration, IHS_HIDDeviceInfo *info) {
     GameControllerEnumeration *gce = (GameControllerEnumeration *) enumeration;
-    int index = gce->joystickIndex;
-    SDL_JoystickID instanceId = SDL_JoystickGetDeviceInstanceID(index);
-    if (instanceId == -1) {
+    if (gce->joystickIndex >= gce->joystickCount) {
         return false;
     }
-    snprintf(gce->temp.path, 16, "sdl://%d", instanceId);
-    const char *name = SDL_JoystickNameForIndex(index);
+    SDL_JoystickID instanceId = gce->joystickIds[gce->joystickIndex];
+    snprintf(gce->temp.path, 16, "sdl://%u", instanceId);
+    const char *name = SDL_GetJoystickNameForID(instanceId);
     if (name != NULL) {
         strncpy(gce->temp.product_string, name, 63);
         gce->temp.product_string[63] = '\0';
     } else {
         strcpy(gce->temp.product_string, "Generic Gamepad");
     }
-    info->vendor_id = SDL_JoystickGetDeviceVendor(index);
-    info->product_id = SDL_JoystickGetDeviceProduct(index);
-    info->product_version = SDL_JoystickGetDeviceProductVersion(index);
+    info->vendor_id = SDL_GetJoystickVendorForID(instanceId);
+    info->product_id = SDL_GetJoystickProductForID(instanceId);
+    info->product_version = SDL_GetJoystickProductVersionForID(instanceId);
     info->path = gce->temp.path;
     info->product_string = gce->temp.product_string;
     return true;
 }
 
-static int NextControllerIndex(int current, int count) {
+static int NextControllerIndex(const GameControllerEnumeration *gce, int current) {
+    int count = gce->joystickCount;
     if (current >= count) {
         return count;
     }
     int i = current + 1;
-    while (!SDL_IsGameController(i) && i < count) {
+    while (i < count && !SDL_IsGamepad(gce->joystickIds[i])) {
         i++;
     }
     return i;
 }
-
-#endif

@@ -26,10 +26,12 @@
 #include "ihslib/buffer.h"
 #include "ihslib/hid.h"
 
+#include <stdlib.h> /* SDL2 pulled this in transitively; SDL3 does not */
+
 #include "sdl_hid_common.h"
 #include "session/session_pri.h"
 
-#include <SDL2/SDL.h>
+#include <SDL3/SDL.h>
 
 static IHS_HIDDevice *DeviceAlloc(const struct IHS_HIDDeviceClass *cls);
 
@@ -72,29 +74,14 @@ static const IHS_HIDDeviceClass DeviceClass = {
         .requestDisconnect = DeviceRequestDisconnect,
 };
 
-IHS_HIDDevice *IHS_HIDDeviceSDLCreate(IHS_HIDProvider *provider, SDL_GameController *controller, bool managed) {
+IHS_HIDDevice *IHS_HIDDeviceSDLCreate(IHS_HIDProvider *provider, SDL_Gamepad *controller, bool managed) {
+    (void) provider;
     IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) IHS_HIDDeviceCreate(&DeviceClass);
-    SDL_Joystick *joystick = SDL_GameControllerGetJoystick(controller);
+    SDL_Joystick *joystick = SDL_GetGamepadJoystick(controller);
     device->controllerManaged = managed;
-    device->instanceId = SDL_JoystickInstanceID(joystick);
+    device->instanceId = SDL_GetJoystickID(joystick);
     device->controller = controller;
     device->playerIndex = -1;
-
-#if !IHS_HID_SDL_TARGET_ATLEAST(2, 0, 9)
-    device->hapticEffectId = -1;
-    SDL_Haptic *haptic = SDL_HapticOpenFromJoystick(joystick);
-    if (haptic != NULL) {
-        unsigned int hapticBits = SDL_HapticQuery(haptic);
-        if (hapticBits & SDL_HAPTIC_LEFTRIGHT) {
-            device->haptic = haptic;
-        } else {
-            SDL_HapticClose(haptic);
-        }
-    } else {
-        IHS_SessionLog(IHS_HIDProviderGetSession(provider), IHS_LogLevelWarn, "HID.SDL",
-                       "Device haptic is not supported: %s", SDL_GetError());
-    }
-#endif
     return (IHS_HIDDevice *) device;
 }
 
@@ -120,18 +107,8 @@ static void DeviceFree(IHS_HIDDevice *device) {
 
 static void DeviceClose(IHS_HIDDevice *device) {
     IHS_HIDDeviceSDL *deviceSdl = (IHS_HIDDeviceSDL *) device;
-#if !IHS_HID_SDL_TARGET_ATLEAST(2, 0, 9)
-    if (deviceSdl->haptic != NULL) {
-        if (deviceSdl->hapticEffectId != -1) {
-            SDL_HapticDestroyEffect(deviceSdl->haptic, deviceSdl->hapticEffectId);
-        }
-        SDL_HapticClose(deviceSdl->haptic);
-        deviceSdl->haptic = NULL;
-    }
-#endif
-
     if (deviceSdl->controllerManaged) {
-        SDL_GameControllerClose(deviceSdl->controller);
+        SDL_CloseGamepad(deviceSdl->controller);
         deviceSdl->controller = NULL;
     }
 }
@@ -165,13 +142,11 @@ static int DeviceProductString(IHS_HIDDevice *device, IHS_Buffer *dest) {
 }
 
 static int DeviceSerialNumber(IHS_HIDDevice *device, IHS_Buffer *dest) {
-#if IHS_HID_SDL_TARGET_ATLEAST(2, 0, 14)
     IHS_HIDDeviceSDL *sdl = (IHS_HIDDeviceSDL *) device;
-    const char *serial = SDL_GameControllerGetSerial(sdl->controller);
+    const char *serial = SDL_GetGamepadSerial(sdl->controller);
     if (serial != NULL) {
         IHS_BufferWriteMem(dest, 0, (const unsigned char *) serial, strlen(serial));
     }
-#endif
     IHS_BufferWriteMem(dest, 0, (const unsigned char *) "", 1);
     return 0;
 }

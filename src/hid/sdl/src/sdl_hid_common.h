@@ -30,7 +30,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#include <SDL2/SDL.h>
+#include <SDL3/SDL.h>
 
 #include "hid/device.h"
 
@@ -44,19 +44,15 @@ typedef struct IHS_HIDDeviceSDL {
      */
     bool controllerManaged;
     SDL_JoystickID instanceId;
-    SDL_GameController *controller;
+    SDL_Gamepad *controller;
     int playerIndex;
-#if !IHS_HID_SDL_TARGET_ATLEAST(2, 0, 9)
-    SDL_Haptic *haptic;
-    int hapticEffectId;
-#endif
     struct {
         IHS_HIDStateSDL current;
         IHS_HIDStateSDL previous;
     } states;
 } IHS_HIDDeviceSDL;
 
-IHS_HIDDevice *IHS_HIDDeviceSDLCreate(IHS_HIDProvider *provider, SDL_GameController *controller, bool managed);
+IHS_HIDDevice *IHS_HIDDeviceSDLCreate(IHS_HIDProvider *provider, SDL_Gamepad *controller, bool managed);
 
 bool IHS_HIDDeviceIsSDL(const IHS_HIDDevice *device);
 

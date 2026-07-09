@@ -40,6 +40,11 @@ typedef struct GameControllerEnumeration {
 
     int joystickIndex;
     int joystickCount;
+    /**
+     * Managed enumeration only: SDL3 joystick instance IDs from SDL_GetJoysticks().
+     * Owned by the enumeration; freed with SDL_free(). NULL for unmanaged.
+     */
+    SDL_JoystickID *joystickIds;
 
     struct {
         char path[16];
@@ -48,11 +53,7 @@ typedef struct GameControllerEnumeration {
     } temp;
 } GameControllerEnumeration;
 
-#if IHS_HID_SDL_TARGET_ATLEAST(2, 0, 6)
-
 IHS_Enumeration *IHS_HIDDeviceSDLEnumerateManaged();
-
-#endif
 
 IHS_Enumeration *IHS_HIDDeviceSDLEnumerateUnmanaged(const IHS_HIDProviderSDLDeviceList *list, void *listContext);
 

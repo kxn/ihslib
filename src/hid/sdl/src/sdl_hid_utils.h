@@ -25,10 +25,10 @@
 
 #pragma once
 
-#include <SDL2/SDL.h>
+#include <SDL3/SDL.h>
 
 #include <stdbool.h>
 #include <stdint.h>
 
-bool IHS_HIDDeviceSDLGetJoystickGUIDInfo(const SDL_JoystickGUID *guid, Uint16 *vendor, Uint16 *product, Uint16 *version,
+bool IHS_HIDDeviceSDLGetJoystickGUIDInfo(const SDL_GUID *guid, Uint16 *vendor, Uint16 *product, Uint16 *version,
                                          Uint16 *crc16);
