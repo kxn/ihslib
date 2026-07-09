@@ -39,6 +39,8 @@ typedef struct IHS_SessionChannelControl {
     uint64_t sendEncryptSequence;
     uint64_t recvEncryptSequence;
     IHS_SessionPacketsWindow *framePacketWindow;
+    /** Set once the frame window overflowed, so we disconnect only once. */
+    bool overflowed;
     IHS_TimerTask *keepAliveTimer;
 } IHS_SessionChannelControl;
 

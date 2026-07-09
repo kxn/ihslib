@@ -153,8 +153,14 @@ static void OnControlReceived(IHS_SessionChannel *channel, IHS_SessionPacket *pa
         case IHS_SessionPacketTypeReliable:
         case IHS_SessionPacketTypeReliableFrag:
             if (!IHS_SessionPacketsWindowAdd(window, packet)) {
-                IHS_SessionLog(channel->session, IHS_LogLevelError, "Control", "Frames window overflow");
-                IHS_SessionDisconnect(channel->session);
+                /* Log and disconnect once: the packets keep coming, and firing a
+                 * disconnect per packet floods the link and re-enters teardown. */
+                if (!control->overflowed) {
+                    control->overflowed = true;
+                    IHS_SessionLog(channel->session, IHS_LogLevelError, "Control", "Frames window overflow");
+                    IHS_SessionDisconnect(channel->session);
+                }
+                return;
             }
             IHS_SessionChannelPacketAck(channel, packet->header.packetId, true);
             break;
