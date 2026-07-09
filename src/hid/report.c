@@ -63,14 +63,9 @@ void IHS_HIDReportHolderDeinit(IHS_HIDReportHolder *holder) {
     free(holder->pendingCurrent);
 }
 
-// Capture `current` as the pending state for the next send and decide whether to skip
-// because the bytes are byte-identical to what was last flushed. Allocates the two scratch
-// buffers lazily and grows them on demand. Returns true if the caller should drop.
-static bool DedupAndStash(IHS_HIDReportHolder *holder, const uint8_t *current, size_t len) {
-    if (holder->lastSent != NULL && holder->lastSentLen == len &&
-        memcmp(holder->lastSent, current, len) == 0) {
-        return true;
-    }
+// Capture `current` as the pending state for the next send. Allocates the two scratch
+// buffers lazily and grows them on demand.
+static void Stash(IHS_HIDReportHolder *holder, const uint8_t *current, size_t len) {
     if (len > holder->bufferCapacity) {
         holder->lastSent = realloc(holder->lastSent, len);
         holder->pendingCurrent = realloc(holder->pendingCurrent, len);
@@ -78,7 +73,13 @@ static bool DedupAndStash(IHS_HIDReportHolder *holder, const uint8_t *current, s
     }
     memcpy(holder->pendingCurrent, current, len);
     holder->pendingCurrentLen = len;
-    return false;
+}
+
+// True when `current` is byte-identical to what was last flushed, so a full report
+// carrying it would tell the host nothing it does not already know.
+static bool SameAsLastSent(const IHS_HIDReportHolder *holder, const uint8_t *current, size_t len) {
+    return holder->lastSent != NULL && holder->lastSentLen == len &&
+           memcmp(holder->lastSent, current, len) == 0;
 }
 
 void IHS_HIDReportHolderSetReportLength(IHS_HIDReportHolder *holder, size_t reportLen) {
@@ -87,9 +88,12 @@ void IHS_HIDReportHolderSetReportLength(IHS_HIDReportHolder *holder, size_t repo
 
 void IHS_HIDReportHolderAddFull(IHS_HIDReportHolder *holder, const uint8_t *current, size_t len) {
     assert(holder->reportLength >= len);
-    if (DedupAndStash(holder, current, len)) {
+    /* A full report is self-contained, so one that repeats the last flushed state is
+     * pure noise. Safe to drop: it breaks no chain. */
+    if (SameAsLastSent(holder, current, len)) {
         return;
     }
+    Stash(holder, current, len);
     size_t offset = holder->dataBuffer.size;
     uint8_t *data = IHS_BufferPointerForAppend(&holder->dataBuffer, len);
     memcpy(data, current, len);
@@ -107,9 +111,14 @@ void IHS_HIDReportHolderAddFull(IHS_HIDReportHolder *holder, const uint8_t *curr
 
 void IHS_HIDReportHolderAddDelta(IHS_HIDReportHolder *holder, const uint8_t *previous, const uint8_t *current,
                                  size_t len) {
-    if (DedupAndStash(holder, current, len)) {
-        return;
-    }
+    /* Never drop a delta, even one that lands back on the last flushed state. Deltas
+     * are a chain: the host applies each to the state the previous one left it in, and
+     * the caller has already advanced its own `previous` past this one. Press-then-
+     * release inside a single frame used to lose the release, leaving the host with a
+     * held button and every later delta applied to a state that no longer exists.
+     * The callers only add a delta when the bytes actually changed, so there is
+     * nothing to deduplicate here anyway. */
+    Stash(holder, current, len);
     size_t offset = holder->dataBuffer.size;
     /* Worst case is every byte changed: a full changed-byte bitmask, then a copy of
      * each changed byte. Reserving only reportLength overflows the buffer by the
