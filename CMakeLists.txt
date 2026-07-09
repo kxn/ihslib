@@ -21,8 +21,11 @@ option(IHSLIB_SANITIZE_THREAD "Link Thread Sanitizer (mutually exclusive with ad
 
 find_package(PkgConfig REQUIRED)
 
-if (NOT SDL2_FOUND)
-    pkg_check_modules(SDL2 sdl2)
+# SDL3 only: the SDL2 threading backend was replaced by ihs_thread_posix.c, and
+# the HID provider is ported to SDL3. Linking both SDLs into one process
+# cross-binds their identical SDL_* symbols and breaks threads.
+if (NOT SDL3_FOUND)
+    pkg_check_modules(SDL3 sdl3)
 endif ()
 
 if (NOT PROTOBUF_C_FOUND)
