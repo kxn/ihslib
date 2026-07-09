@@ -28,6 +28,7 @@
 #include <memory.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <assert.h>
 
 #include "crc32.h"
 
@@ -42,7 +43,8 @@ void IHS_HIDReportHolderInit(IHS_HIDReportHolder *holder, uint32_t deviceId) {
     IHS_BufferInit(&holder->dataBuffer, 256, 8192);
     IHS_ArrayListInit(&holder->reportItems, sizeof(CHIDDeviceInputReport));
     IHS_ArrayListInit(&holder->reportPointers, sizeof(CHIDDeviceInputReport *));
-    holder->report.reports = holder->reportPointers.data;
+    IHS_ArrayListInit(&holder->reportOffsets, sizeof(size_t));
+    holder->report.reports = NULL; /* bound in GetMessage */
     holder->reportLength = 0;
     holder->lastSent = NULL;
     holder->lastSentLen = 0;
@@ -53,6 +55,7 @@ void IHS_HIDReportHolderInit(IHS_HIDReportHolder *holder, uint32_t deviceId) {
 
 void IHS_HIDReportHolderDeinit(IHS_HIDReportHolder *holder) {
     holder->report.reports = NULL;
+    IHS_ArrayListDeinit(&holder->reportOffsets);
     IHS_ArrayListDeinit(&holder->reportPointers);
     IHS_ArrayListDeinit(&holder->reportItems);
     IHS_BufferClear(&holder->dataBuffer, true);
@@ -87,6 +90,7 @@ void IHS_HIDReportHolderAddFull(IHS_HIDReportHolder *holder, const uint8_t *curr
     if (DedupAndStash(holder, current, len)) {
         return;
     }
+    size_t offset = holder->dataBuffer.size;
     uint8_t *data = IHS_BufferPointerForAppend(&holder->dataBuffer, len);
     memcpy(data, current, len);
     holder->dataBuffer.size += len;
@@ -94,10 +98,10 @@ void IHS_HIDReportHolderAddFull(IHS_HIDReportHolder *holder, const uint8_t *curr
 
     chiddevice_input_report__init(item);
     item->has_full_report = true;
-    item->full_report.data = data;
+    item->full_report.data = NULL; /* bound in GetMessage */
     item->full_report.len = len;
 
-    IHS_ArrayListAppend(&holder->reportPointers, &item);
+    IHS_ArrayListAppend(&holder->reportOffsets, &offset);
     holder->report.n_reports = holder->reportItems.size;
 }
 
@@ -106,8 +110,14 @@ void IHS_HIDReportHolderAddDelta(IHS_HIDReportHolder *holder, const uint8_t *pre
     if (DedupAndStash(holder, current, len)) {
         return;
     }
-    uint8_t *data = IHS_BufferPointerForAppend(&holder->dataBuffer, holder->reportLength);
+    size_t offset = holder->dataBuffer.size;
+    /* Worst case is every byte changed: a full changed-byte bitmask, then a copy of
+     * each changed byte. Reserving only reportLength overflows the buffer by the
+     * size of the mask, which stayed hidden while a message held a single report. */
+    size_t deltaMax = ((holder->reportLength + 7) >> 3) + len;
+    uint8_t *data = IHS_BufferPointerForAppend(&holder->dataBuffer, deltaMax);
     int deltaLen = ComputeDelta(previous, current, len, holder->reportLength, data);
+    assert(deltaLen >= 0 && (size_t) deltaLen <= deltaMax);
     holder->dataBuffer.size += deltaLen;
     // Send the data and CRC
     uint32_t crc = IHS_CRC32(current, len);
@@ -115,12 +125,12 @@ void IHS_HIDReportHolderAddDelta(IHS_HIDReportHolder *holder, const uint8_t *pre
 
     chiddevice_input_report__init(item);
     item->has_delta_report = true;
-    item->delta_report.data = data;
+    item->delta_report.data = NULL; /* bound in GetMessage */
     item->delta_report.len = deltaLen;
     PROTOBUF_C_P_SET_VALUE(item, delta_report_crc, crc);
     PROTOBUF_C_P_SET_VALUE(item, delta_report_size, len);
 
-    IHS_ArrayListAppend(&holder->reportPointers, &item);
+    IHS_ArrayListAppend(&holder->reportOffsets, &offset);
     holder->report.n_reports = holder->reportItems.size;
 }
 
@@ -128,14 +138,33 @@ IHS_HIDDeviceReportMessage *IHS_HIDReportHolderGetMessage(IHS_HIDReportHolder *h
     if (holder->reportItems.size == 0) {
         return NULL;
     }
+    /* Bind data pointers now: dataBuffer, reportItems and reportPointers all
+     * reallocate as reports accumulate, so anything captured at Add time dangles.
+     * Only ever safe when the message held a single report — it no longer does. */
+    uint8_t *base = IHS_BufferPointer(&holder->dataBuffer);
+    IHS_ArrayListClear(&holder->reportPointers);
+    for (size_t i = 0; i < holder->reportItems.size; i++) {
+        CHIDDeviceInputReport *item = IHS_ArrayListGet(&holder->reportItems, i);
+        size_t offset = *(size_t *) IHS_ArrayListGet(&holder->reportOffsets, i);
+        if (item->has_full_report) {
+            item->full_report.data = base + offset;
+        } else {
+            item->delta_report.data = base + offset;
+        }
+        IHS_ArrayListAppend(&holder->reportPointers, &item);
+    }
+    holder->report.reports = holder->reportPointers.data;
+    holder->report.n_reports = holder->reportItems.size;
     return &holder->report;
 }
 
 void IHS_HIDReportHolderResetMessage(IHS_HIDReportHolder *holder) {
     holder->report.n_reports = 0;
+    holder->report.reports = NULL;
     IHS_BufferClear(&holder->dataBuffer, false);
     IHS_ArrayListClear(&holder->reportItems);
     IHS_ArrayListClear(&holder->reportPointers);
+    IHS_ArrayListClear(&holder->reportOffsets);
     // Promote the most recent pending state to lastSent so the next dedup check
     // compares against what just went out on the wire.
     if (holder->pendingCurrentLen > 0) {

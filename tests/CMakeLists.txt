@@ -19,6 +19,7 @@ add_subdirectory(common)
 ihs_add_test(arraylist test_arraylist.c)
 ihs_add_test(enumeration test_enumeration.c)
 ihs_add_test(crypto test_crypto.c)
+ihs_add_test(hid_report_batch test_hid_report_batch.c)
 
 add_subdirectory(hid)
 add_subdirectory(session)
