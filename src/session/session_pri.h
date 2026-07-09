@@ -80,6 +80,11 @@ struct IHS_Session {
     IHS_Base base;
     IHS_SessionInfo info;
     IHS_SessionState state;
+    /* Video codec chosen during negotiation and the host capture size. Used to
+     * lazily create the video channel when the host streams video without ever
+     * sending k_EStreamControlStartVideoData (observed with desktop streaming). */
+    int negotiatedVideoCodec;
+    uint32_t captureWidth, captureHeight;
     uint8_t numChannels;
     IHS_SessionChannel *channels[16];
     IHS_Thread *sendThread;

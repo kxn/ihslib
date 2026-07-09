@@ -76,6 +76,10 @@ void IHS_SessionChannelControlOnVideo(IHS_SessionChannel *channel, EStreamContro
             }
             IHS_SessionLog(session, IHS_LogLevelDebug, "Video", "SetCaptureSize(width=%d, height=%d)",
                            message->width, message->height);
+            if (message->width > 0 && message->height > 0) {
+                session->captureWidth = message->width;
+                session->captureHeight = message->height;
+            }
             const IHS_StreamVideoCallbacks *callbacks = session->callbacks.video;
             if (callbacks && callbacks->setCaptureSize) {
                 callbacks->setCaptureSize(session, message->width, message->height, session->callbackContexts.video);

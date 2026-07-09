@@ -39,6 +39,8 @@
 #include "session/channels/ch_discovery.h"
 #include "session/channels/ch_control.h"
 #include "session/channels/ch_stats.h"
+#include "session/channels/video/ch_data_video.h"
+#include "protobuf/remoteplay.pb-c.h"
 
 #include "hid/manager.h"
 
@@ -212,6 +214,27 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
         IHS_SessionCancelRetransmission(session, channelId, packet.header.packetId, packet.header.fragmentId);
     }
     IHS_SessionChannel *channel = IHS_SessionChannelFor(session, channelId);
+    if (channel == NULL && session->negotiatedVideoCodec != 0 /* not None */ &&
+        packetType != IHS_SessionPacketTypeACK && packetType != IHS_SessionPacketTypeNACK &&
+        IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataVideo) == NULL) {
+        /* Some hosts (e.g. desktop streaming) start sending video on its data
+         * channel without ever emitting k_EStreamControlStartVideoData. Create
+         * the video channel on demand from the negotiated codec/capture size so
+         * the stream can actually be decoded. */
+        CStartVideoDataMsg msg = CSTART_VIDEO_DATA_MSG__INIT;
+        msg.channel = channelId;
+        msg.has_codec = true;
+        msg.codec = session->negotiatedVideoCodec;
+        msg.has_width = true;
+        msg.width = session->captureWidth ? session->captureWidth : 1920;
+        msg.has_height = true;
+        msg.height = session->captureHeight ? session->captureHeight : 1080;
+        channel = IHS_SessionChannelDataVideoCreate(session, &msg);
+        IHS_SessionChannelAdd(session, channel);
+        IHS_SessionLog(session, IHS_LogLevelInfo, "Session",
+                       "Created video channel %u on demand (codec=%d, %ux%u)",
+                       channelId, msg.codec, msg.width, msg.height);
+    }
     if (channel != NULL) {
         IHS_SessionChannelReceivedPacket(channel, &packet);
     } else {
