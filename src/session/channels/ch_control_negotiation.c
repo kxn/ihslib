@@ -98,6 +98,9 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
     if (ihsConf.maxBitrateKbps == 0) {
         ihsConf.maxBitrateKbps = 15000;
     }
+    IHS_SessionLog(session, IHS_LogLevelInfo, "Negotiation", "Requesting at most %ux%u @ %u fps, %u kbps%s%s",
+                   ihsConf.maxWidth, ihsConf.maxHeight, ihsConf.maxFps, ihsConf.maxBitrateKbps,
+                   ihsConf.enableHevc ? ", HEVC" : "", ihsConf.enableAudio ? ", audio" : "");
 
     for (int i = 0; i < message->n_supported_video_codecs; i++) {
         IHS_SessionLog(session, IHS_LogLevelInfo, "Negotiation", "Host offers video codec %d%s",
