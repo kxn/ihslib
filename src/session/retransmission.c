@@ -68,13 +68,7 @@ bool IHS_RetransmissionQueue(IHS_SessionRetransmission *retransmission, IHS_Sess
     assert(packet->body.data != NULL);
     assert(packet->body.offset == IHS_PACKET_HEADER_SIZE);
     if (packet->header.retransmitCount >= RETRANSMISSION_ATTEMPTS) {
-        /* Twenty unacknowledged copies of one packet is not a lossy link, it is a
-         * packet the peer never accepts. Say so, instead of falling silent. */
-        IHS_SessionLog(retransmission->session, IHS_LogLevelWarn, "Retransmission",
-                       "Giving up on Packet(channelId=%u, packetId=%u, fragmentId=%u) after %u attempts",
-                       packet->header.channelId, packet->header.packetId, packet->header.fragmentId,
-                       RETRANSMISSION_ATTEMPTS);
-        return false;
+        return false; /* RetransmissionTimerRun already warned */
     }
     PendingRetransmission *pending = IHS_QueueItemObtain(retransmission->queue);
     pending->packet = *packet;
@@ -140,7 +134,16 @@ static uint64_t RetransmissionTimerRun(int runCount, void *context) {
     PendingRetransmission *pending = context;
     IHS_SessionRetransmission *retransmission = pending->retransmission;
     IHS_SessionPacket *packet = &pending->packet;
-    IHS_SessionQueuePacket(retransmission->session, packet, packet->header.retransmitCount < RETRANSMISSION_ATTEMPTS);
+    bool again = packet->header.retransmitCount < RETRANSMISSION_ATTEMPTS;
+    if (!again) {
+        /* Twenty unacknowledged copies of one packet is not a lossy link, it is a
+         * packet the peer never accepts. Say so, instead of falling silent. */
+        IHS_SessionLog(retransmission->session, IHS_LogLevelWarn, "Retransmission",
+                       "Giving up on Packet(channelId=%u, packetId=%u, fragmentId=%u) after %u attempts",
+                       packet->header.channelId, packet->header.packetId, packet->header.fragmentId,
+                       RETRANSMISSION_ATTEMPTS);
+    }
+    IHS_SessionQueuePacket(retransmission->session, packet, again);
     assert(packet->body.data == NULL);
     return 0;
 }

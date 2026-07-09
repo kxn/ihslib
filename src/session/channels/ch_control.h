@@ -30,12 +30,18 @@
 #include "session/frame.h"
 #include "session/window.h"
 #include "ihs_timer.h"
+#include "ihs_thread.h"
 
 #include "protobuf/remoteplay.pb-c.h"
 #include "protobuf/hiddevices.pb-c.h"
 
 typedef struct IHS_SessionChannelControl {
     IHS_SessionChannel base;
+    /** Serializes IHS_SessionChannelControlSend: it allocates a packet id and an
+     * encryption sequence, and the two must stay in step. Three threads send control
+     * messages — the receive thread answering HID requests, the timer thread's
+     * keepalive, and the application's per-frame HID report. */
+    IHS_Mutex *sendLock;
     uint64_t sendEncryptSequence;
     uint64_t recvEncryptSequence;
     IHS_SessionPacketsWindow *framePacketWindow;
