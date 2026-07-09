@@ -52,6 +52,13 @@ bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionF
  */
 uint16_t IHS_SessionPacketsWindowDiscard(IHS_SessionPacketsWindow *window, uint32_t diff);
 
+/**
+ * Recycle every pending packet and reset head/tail. Unlike Discard(), this can't
+ * fail to free anything: Discard() only advances past frame-head packets, so a
+ * window holding nothing but orphaned fragments (frame head lost) is immovable.
+ */
+void IHS_SessionPacketsWindowReleaseAll(IHS_SessionPacketsWindow *window);
+
 void IHS_SessionPacketsWindowReleaseFrame(IHS_SessionFrame *frame);
 
 uint16_t IHS_SessionPacketsWindowAvailable(const IHS_SessionPacketsWindow *window);

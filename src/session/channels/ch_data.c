@@ -82,8 +82,12 @@ void IHS_SessionChannelDataReceived(IHS_SessionChannel *channel, IHS_SessionPack
     if (!IHS_SessionPacketsWindowAdd(dataCh->window, packet)) {
         IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Data", "%s channel items overflow! Available: %u",
                        DataChannelName(channel->type), IHS_SessionPacketsWindowAvailable(dataCh->window));
-        IHS_SessionPacketsWindowDiscard(dataCh->window, 0);
+        /* Drop everything, not just whole frames: Discard() walks forward to the
+         * next frame-head packet, so once the head of the oldest frame is lost the
+         * window is stuck full and every later packet overflows too. */
+        IHS_SessionPacketsWindowReleaseAll(dataCh->window);
         IHS_SessionChannelDataLost(channel);
+        IHS_SessionPacketsWindowAdd(dataCh->window, packet); /* now fits; caller clears on failure */
     }
     IHS_CondSignal(dataCh->windowCond);
     IHS_MutexUnlock(dataCh->windowLock);
@@ -127,12 +131,19 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
     IHS_SessionLog(channel->base.session, IHS_LogLevelInfo, "Data", "%s channel started", channelName);
     while (!channel->interrupted) {
         IHS_MutexLock(channel->windowLock);
-        uint16_t discarded = IHS_SessionPacketsWindowDiscard(channel->window, DISCARD_DIFF);
-        if (discarded > 0) {
-            IHS_SessionLog(channel->base.session, IHS_LogLevelDebug, channelName, "Discarded %u packets", discarded);
-        }
         bool hasFrame;
-        while (!(hasFrame = IHS_SessionPacketsWindowPoll(channel->window, &frame))) {
+        for (;;) {
+            /* Retry the age-based discard on every wakeup, not just once per
+             * delivered frame: a packet lost at the head makes Poll fail forever,
+             * and the discard that would step over it is the only way out. */
+            uint16_t discarded = IHS_SessionPacketsWindowDiscard(channel->window, DISCARD_DIFF);
+            if (discarded > 0) {
+                IHS_SessionLog(channel->base.session, IHS_LogLevelDebug, channelName,
+                               "Discarded %u packets", discarded);
+            }
+            if ((hasFrame = IHS_SessionPacketsWindowPoll(channel->window, &frame))) {
+                break;
+            }
             IHS_CondWait(channel->windowCond, channel->windowLock);
             if (channel->interrupted) {
                 break;

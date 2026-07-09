@@ -65,6 +65,16 @@ IHS_SessionPacketsWindow *IHS_SessionPacketsWindowCreate(uint16_t capacity) {
     return window;
 }
 
+void IHS_SessionPacketsWindowReleaseAll(IHS_SessionPacketsWindow *window) {
+    for (int i = 0, j = window->capacity; i < j; i++) {
+        if (FrameItemIsUsed(&window->data[i])) {
+            FrameItemRecycle(&window->data[i]);
+        }
+    }
+    window->head.pos = 0;
+    window->tail.pos = -1;
+}
+
 void IHS_SessionPacketsWindowDestroy(IHS_SessionPacketsWindow *window) {
     for (int i = 0, j = window->capacity; i < j; i++) {
         if (!FrameItemIsUsed(&window->data[i])) {
@@ -114,6 +124,19 @@ bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionF
     }
     assert(window->head.pos >= 0);
     IHS_SessionWindowItem *head = &window->data[window->head.pos % window->capacity];
+
+    /* Joining a session already in progress lands us mid-message: the first packet
+     * we see is a fragment whose head we will never get, because Add() drops
+     * anything older than the window. Skip those orphans, or the head never
+     * becomes a frame start and the window wedges full forever. */
+    while (FrameItemIsUsed(head) && !FrameItemIsHead(head)) {
+        FrameItemRecycle(head);
+        window->head.pos = (window->head.pos + 1) % window->capacity;
+        if (--size == 0) {
+            return false;
+        }
+        head = &window->data[window->head.pos];
+    }
 
     /* Must start from packet head */
     if (!FrameItemIsHead(head)) {
