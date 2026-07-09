@@ -24,6 +24,7 @@
  */
 
 #include <stdlib.h>
+#include <math.h>
 
 #include "session/channels/ch_data.h"
 #include "ch_data_video.h"
@@ -87,7 +88,8 @@ static bool AssembleFrame(IHS_SessionChannel *channel);
 static void AppendToFrameBuffer(IHS_SessionChannelVideo *channel, const IHS_Buffer *data,
                                 const IHS_VideoFrameHeader *header);
 
-static void SubmitFrame(IHS_SessionChannel *channel, IHS_Buffer *data, IHS_StreamVideoFrameFlag flags);
+static void SubmitFrame(IHS_SessionChannel *channel, uint16_t frameId, IHS_Buffer *data,
+                        IHS_StreamVideoFrameFlag flags);
 
 static uint64_t ReportVideoStats(int runCount, void *data);
 
@@ -258,7 +260,7 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
     }
 
     if (AssembleFrame(channel)) {
-        SubmitFrame(channel, &videoCh->frame.buffer, videoCh->frame.flags);
+        SubmitFrame(channel, videoCh->states.lastFrameId, &videoCh->frame.buffer, videoCh->frame.flags);
         IHS_BufferClear(&videoCh->frame.buffer, false);
         videoCh->frame.flags = 0;
         videoCh->states.frameFinished = false;
@@ -392,14 +394,15 @@ static void AppendToFrameBuffer(IHS_SessionChannelVideo *channel, const IHS_Buff
     }
 }
 
-static void SubmitFrame(IHS_SessionChannel *channel, IHS_Buffer *data, IHS_StreamVideoFrameFlag flags) {
+static void SubmitFrame(IHS_SessionChannel *channel, uint16_t frameId, IHS_Buffer *data,
+                        IHS_StreamVideoFrameFlag flags) {
     IHS_Session *session = channel->session;
     const IHS_StreamVideoCallbacks *callbacks = session->callbacks.video;
     if (callbacks == NULL || callbacks->submit == NULL) {
         return;
     }
     void *context = session->callbackContexts.video;
-    IHS_StreamVideoSubmitResult result = callbacks->submit(session, data, flags, context);
+    IHS_StreamVideoSubmitResult result = callbacks->submit(session, frameId, data, flags, context);
     if (result == IHS_StreamVideoSubmitReportLost) {
         IHS_SessionLog(session, IHS_LogLevelInfo, "Video", "Decoder reported frame lost.");
         IHS_SessionChannelDataLost(channel);

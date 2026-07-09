@@ -79,7 +79,13 @@ typedef enum IHS_StreamFramerateLimiter {
 typedef struct IHS_StreamVideoCallbacks {
     int (*start)(IHS_Session *session, const IHS_StreamVideoConfig *config, void *context);
 
-    IHS_StreamVideoSubmitResult (*submit)(IHS_Session *session, IHS_Buffer *data, IHS_StreamVideoFrameFlag flags, void *context);
+    /**
+     * @param frameId Identifies this frame. Pass it back to
+     *                IHS_SessionReportVideoFrameStage / ...FrameComplete so the
+     *                host's adaptive bitrate loop learns what the client did with it.
+     */
+    IHS_StreamVideoSubmitResult (*submit)(IHS_Session *session, uint16_t frameId, IHS_Buffer *data,
+                                          IHS_StreamVideoFrameFlag flags, void *context);
 
     void (*stop)(IHS_Session *session, void *context);
 
