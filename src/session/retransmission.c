@@ -31,8 +31,8 @@
 
 typedef struct IHS_QueueItem {
     IHS_SessionPacket packet;
-    IHS_TimerTask *task;
     IHS_SessionRetransmission *retransmission;
+    bool cancelled;
 } PendingRetransmission;
 
 typedef struct RetransmissionQuery {
@@ -40,8 +40,6 @@ typedef struct RetransmissionQuery {
     uint16_t packetId;
     uint16_t fragmentId;
 } RetransmissionQuery;
-
-static void RetransmissionQueueItemDestroy(PendingRetransmission *item, void *context);
 
 static uint64_t RetransmissionTimerRun(int runCount, void *context);
 
@@ -58,8 +56,10 @@ void IHS_RetransmissionInit(IHS_SessionRetransmission *retransmission, IHS_Sessi
 }
 
 void IHS_RetransmissionDeinit(IHS_SessionRetransmission *retransmission) {
+    /* The session destroys its timers first, so every task has already run its end
+     * callback and drained itself out of this queue. Nothing left to destroy. */
     IHS_MutexLock(retransmission->lock);
-    IHS_QueueDestroy(retransmission->queue, RetransmissionQueueItemDestroy, retransmission);
+    IHS_QueueDestroy(retransmission->queue, NULL, NULL);
     IHS_MutexUnlock(retransmission->lock);
     IHS_MutexDestroy(retransmission->lock);
 }
@@ -75,8 +75,8 @@ bool IHS_RetransmissionQueue(IHS_SessionRetransmission *retransmission, IHS_Sess
     pending->retransmission = retransmission;
     pending->packet.header.retransmitCount++;
     IHS_BufferTransferOwnership(&packet->body, &pending->packet.body);
-    pending->task = IHS_TimerTaskStart(retransmission->session->timers, RetransmissionTimerRun, RetransmissionTimerEnd,
-                                       RETRANSMISSION_INTERVAL, pending);
+    IHS_TimerTaskStart(retransmission->session->timers, RetransmissionTimerRun, RetransmissionTimerEnd,
+                       RETRANSMISSION_INTERVAL, pending);
     IHS_MutexLock(retransmission->lock);
     IHS_QueueAppend(retransmission->queue, pending);
     IHS_MutexUnlock(retransmission->lock);
@@ -94,45 +94,49 @@ bool IHS_RetransmissionCancel(IHS_SessionRetransmission *retransmission, IHS_Ses
             .packetId = packetId,
             .fragmentId = fragmentId,
     };
-    /* Cancel every match, not just the first. A packet awaiting retransmission has
-     * two entries in the queue for a moment: RetransmissionTimerRun re-queues the
-     * packet with retransmitCount+1 before RetransmissionTimerEnd removes the old
-     * entry. An ACK landing in that window used to cancel one twin and leave the
-     * other retransmitting until it hit the attempt limit. */
+    /* Cancel every match, not just the first: a packet awaiting retransmission has two
+     * entries for a moment, since RetransmissionTimerRun re-queues it with
+     * retransmitCount+1 before RetransmissionTimerEnd removes the old entry. An ACK
+     * landing in that window used to leave one twin retransmitting to the limit.
+     *
+     * The timer thread owns every pending item: it alone frees them, from the task's
+     * end callback. So cancelling must not stop the task nor touch the item once the
+     * lock is dropped — an ACK arriving as the task expires would otherwise read
+     * match->task out of a pending that RetransmissionTimerEnd has already freed, and
+     * stop an IHS_TimerTask that died with it. Marking under the lock is enough: the
+     * next run sees the flag, sends nothing, and ends, freeing the item on the thread
+     * that owns it. Cost is one RETRANSMISSION_INTERVAL of lingering, not a segfault. */
     bool cancelled = false;
     for (;;) {
         IHS_MutexLock(retransmission->lock);
         PendingRetransmission *match = IHS_QueuePollBy(retransmission->queue, RetransmissionPacketPredicate, &query);
+        unsigned int retransmitCount = 0;
+        if (match != NULL) {
+            match->cancelled = true;
+            retransmitCount = match->packet.header.retransmitCount;
+        }
         IHS_MutexUnlock(retransmission->lock);
         if (match == NULL) {
             break;
         }
         cancelled = true;
-        if (match->task != NULL) {
-            IHS_SessionLog(retransmission->session, IHS_LogLevelVerbose, "Retransmission",
-                           "Cancelling Packet(channelId=%u, packetId=%u, fragmentId=%u), retransmitCount=%u",
-                           channelId, packetId, fragmentId, match->packet.header.retransmitCount);
-            IHS_TimerTask *task = match->task;
-            match->task = NULL;
-            IHS_TimerTaskStopImmediate(task);
-        }
+        IHS_SessionLog(retransmission->session, IHS_LogLevelVerbose, "Retransmission",
+                       "Cancelling Packet(channelId=%u, packetId=%u, fragmentId=%u), retransmitCount=%u",
+                       channelId, packetId, fragmentId, retransmitCount);
     }
     return cancelled;
-}
-
-static void RetransmissionQueueItemDestroy(PendingRetransmission *item, void *context) {
-    (void) context;
-    IHS_TimerTask *task = item->task;
-    item->task = NULL;
-    if (task != NULL) {
-        IHS_TimerTaskStopImmediate(task);
-    }
 }
 
 static uint64_t RetransmissionTimerRun(int runCount, void *context) {
     (void) runCount;
     PendingRetransmission *pending = context;
     IHS_SessionRetransmission *retransmission = pending->retransmission;
+    IHS_MutexLock(retransmission->lock);
+    bool cancelled = pending->cancelled;
+    IHS_MutexUnlock(retransmission->lock);
+    if (cancelled) {
+        return 0; /* ACKed: end the task, which frees the packet in the end callback */
+    }
     IHS_SessionPacket *packet = &pending->packet;
     bool again = packet->header.retransmitCount < RETRANSMISSION_ATTEMPTS;
     if (!again) {
