@@ -78,11 +78,32 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
     IHS_SessionConfig ihsConf = {
             .enableAudio = true,
             .enableHevc = false,
+            .maxWidth = 1920,
+            .maxHeight = 1080,
+            .maxFps = 60,
+            .maxBitrateKbps = 15000,
     };
 
     IHS_Session *session = channel->session;
     if (session->callbacks.session && session->callbacks.session->configuring) {
         session->callbacks.session->configuring(session, &ihsConf, session->callbackContexts.session);
+    }
+    if (ihsConf.maxWidth == 0 || ihsConf.maxHeight == 0) {
+        ihsConf.maxWidth = 1920;
+        ihsConf.maxHeight = 1080;
+    }
+    if (ihsConf.maxFps == 0) {
+        ihsConf.maxFps = 60;
+    }
+    if (ihsConf.maxBitrateKbps == 0) {
+        ihsConf.maxBitrateKbps = 15000;
+    }
+
+    for (int i = 0; i < message->n_supported_video_codecs; i++) {
+        IHS_SessionLog(session, IHS_LogLevelInfo, "Negotiation", "Host offers video codec %d%s",
+                       message->supported_video_codecs[i],
+                       message->supported_video_codecs[i] == k_EStreamVideoCodecHEVC ? " (HEVC)" :
+                       message->supported_video_codecs[i] == k_EStreamVideoCodecH264 ? " (H264)" : "");
     }
 
     EStreamAudioCodec audioCodec = k_EStreamAudioCodecNone;
@@ -114,6 +135,12 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
         }
     }
 
+    /* Remember the codec + a default capture size so the video channel can be
+     * created lazily if the host never sends k_EStreamControlStartVideoData. */
+    session->negotiatedVideoCodec = videoCodec;
+    session->captureWidth = 1920;
+    session->captureHeight = 1080;
+
     CNegotiatedConfig config = CNEGOTIATED_CONFIG__INIT;
     PROTOBUF_C_SET_VALUE(config, reliable_data, false);
 
@@ -124,21 +151,23 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
     config.selected_video_codec = videoCodec;
 
     CStreamVideoMode availableVideoMode = CSTREAM_VIDEO_MODE__INIT;
-    availableVideoMode.width = 1920;
-    availableVideoMode.height = 1080;
-    PROTOBUF_C_SET_VALUE(availableVideoMode, refresh_rate_numerator, 5994);
-    PROTOBUF_C_SET_VALUE(availableVideoMode, refresh_rate_denominator, 100);
+    availableVideoMode.width = (int32_t) ihsConf.maxWidth;
+    availableVideoMode.height = (int32_t) ihsConf.maxHeight;
+    PROTOBUF_C_SET_VALUE(availableVideoMode, refresh_rate_numerator, ihsConf.maxFps);
+    PROTOBUF_C_SET_VALUE(availableVideoMode, refresh_rate_denominator, 1);
 
     CStreamVideoMode *availableVideoModes[] = {&availableVideoMode};
     config.n_available_video_modes = 1;
     config.available_video_modes = availableVideoModes;
 
-    PROTOBUF_C_SET_VALUE(config, enable_remote_hid, 0);
+    /* Gamepads reach the host over the HID channel, not the keyboard/mouse input
+     * channel. Without this the host sees no controller at all. */
+    PROTOBUF_C_SET_VALUE(config, enable_remote_hid, 1);
 
     CStreamingClientConfig clientConfig = CSTREAMING_CLIENT_CONFIG__INIT;
 
-    PROTOBUF_C_SET_VALUE(clientConfig, maximum_resolution_x, 0);
-    PROTOBUF_C_SET_VALUE(clientConfig, maximum_resolution_y, 0);
+    PROTOBUF_C_SET_VALUE(clientConfig, maximum_resolution_x, (int32_t) ihsConf.maxWidth);
+    PROTOBUF_C_SET_VALUE(clientConfig, maximum_resolution_y, (int32_t) ihsConf.maxHeight);
     PROTOBUF_C_SET_VALUE(clientConfig, enable_hardware_decoding, true);
     PROTOBUF_C_SET_VALUE(clientConfig, enable_performance_overlay, true);
     if (ihsConf.enableAudio) {
@@ -154,10 +183,10 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
         PROTOBUF_C_SET_VALUE(clientConfig, enable_microphone_streaming, true);
     }
     PROTOBUF_C_SET_VALUE(clientConfig, enable_video_streaming, true);
-    PROTOBUF_C_SET_VALUE(clientConfig, maximum_framerate_numerator, 5994);
-    PROTOBUF_C_SET_VALUE(clientConfig, maximum_framerate_denominator, 100);
+    PROTOBUF_C_SET_VALUE(clientConfig, maximum_framerate_numerator, ihsConf.maxFps);
+    PROTOBUF_C_SET_VALUE(clientConfig, maximum_framerate_denominator, 1);
     PROTOBUF_C_SET_VALUE(clientConfig, quality, k_EStreamQualityBalanced);
-    PROTOBUF_C_SET_VALUE(clientConfig, maximum_bitrate_kbps, 30000);
+    PROTOBUF_C_SET_VALUE(clientConfig, maximum_bitrate_kbps, ihsConf.maxBitrateKbps);
     if (ihsConf.enableHevc) {
         PROTOBUF_C_SET_VALUE(clientConfig, enable_video_hevc, true);
     }

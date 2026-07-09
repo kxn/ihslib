@@ -43,6 +43,11 @@ typedef struct IHS_SessionInfo {
 typedef struct IHS_SessionConfig {
     bool enableAudio;
     bool enableHevc;
+    /** Cap on the host's encode resolution, framerate and bitrate. 0 = library default. */
+    uint32_t maxWidth;
+    uint32_t maxHeight;
+    uint32_t maxFps;
+    uint32_t maxBitrateKbps;
 } IHS_SessionConfig;
 
 typedef struct IHS_StreamSessionCallbacks {
