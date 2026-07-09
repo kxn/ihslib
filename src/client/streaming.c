@@ -201,10 +201,14 @@ static uint64_t StreamingRequestTimer(int runCount, void *context) {
     message.stream_interface = (EStreamInterface) request.streamingInterface;
 
     message.has_stream_desktop = true;
-    message.stream_desktop = true;
+    message.stream_desktop = request.streamDesktop;
 
     message.has_form_factor = true;
     message.form_factor = k_EStreamDeviceFormFactorTV;
+
+    /* Steam gates advertised codecs on the client's reported version; with no
+     * device_version it treats us as a legacy client and offers H264 only. */
+    message.device_version = "1.1.0";
 
     message.has_device_token = true;
     message.device_token.data = client->base.deviceToken;

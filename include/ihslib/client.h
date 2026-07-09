@@ -88,6 +88,12 @@ typedef struct IHS_StreamingRequest {
     } maxResolution;
     int32_t audioChannelCount;
     IHS_StreamInterface streamingInterface;
+    /**
+     * Stream the host's whole desktop. When false the host streams its game /
+     * Big Picture session instead, which is also the only path on which some
+     * hosts offer HEVC.
+     */
+    bool streamDesktop;
 } IHS_StreamingRequest;
 
 typedef struct IHS_ClientDiscoveryCallbacks {
