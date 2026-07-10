@@ -73,6 +73,14 @@ typedef struct IHS_SessionPacketHeader {
     int16_t fragmentId;
     uint16_t packetId;
     uint32_t sendTimestamp;
+    /**
+     * Retransmission attempt cap for this packet. 0 means the global default
+     * (RETRANSMISSION_ATTEMPTS). Not part of the 13-byte wire header — it only
+     * steers our own retransmit policy. State-based traffic (HID input) sets it
+     * low so a lost packet doesn't head-of-line-block the reliable channel for
+     * the full 20 attempts; the next report supersedes it anyway.
+     */
+    uint8_t maxRetransmit;
 } IHS_SessionPacketHeader;
 
 typedef struct IHS_SessionPacket {

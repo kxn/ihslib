@@ -28,6 +28,11 @@
 
 #define RETRANSMISSION_INTERVAL 10
 #define RETRANSMISSION_ATTEMPTS 20
+
+/* Per-packet override of RETRANSMISSION_ATTEMPTS; 0 means use the default. */
+static inline unsigned int AttemptCap(const IHS_SessionPacketHeader *header) {
+    return header->maxRetransmit ? header->maxRetransmit : RETRANSMISSION_ATTEMPTS;
+}
 #define CANCELLED_RING_SIZE (sizeof(((IHS_SessionRetransmission *) 0)->cancelled) / \
                              sizeof(((IHS_SessionRetransmission *) 0)->cancelled[0]))
 
@@ -69,7 +74,7 @@ void IHS_RetransmissionDeinit(IHS_SessionRetransmission *retransmission) {
 bool IHS_RetransmissionQueue(IHS_SessionRetransmission *retransmission, IHS_SessionPacket *packet) {
     assert(packet->body.data != NULL);
     assert(packet->body.offset == IHS_PACKET_HEADER_SIZE);
-    if (packet->header.retransmitCount >= RETRANSMISSION_ATTEMPTS) {
+    if (packet->header.retransmitCount >= AttemptCap(&packet->header)) {
         return false; /* RetransmissionTimerRun already warned */
     }
     if (packet->header.retransmitCount > 0) {
@@ -170,14 +175,15 @@ static uint64_t RetransmissionTimerRun(int runCount, void *context) {
         return 0; /* ACKed: end the task, which frees the packet in the end callback */
     }
     IHS_SessionPacket *packet = &pending->packet;
-    bool again = packet->header.retransmitCount < RETRANSMISSION_ATTEMPTS;
+    bool again = packet->header.retransmitCount < AttemptCap(&packet->header);
     if (!again) {
-        /* Twenty unacknowledged copies of one packet is not a lossy link, it is a
-         * packet the peer never accepts. Say so, instead of falling silent. */
+        /* For default traffic, exhausting all attempts means a packet the peer
+         * never accepts, not mere loss — worth saying out loud. HID caps far
+         * lower on purpose (see ch_control.c), so its give-ups are routine. */
         IHS_SessionLog(retransmission->session, IHS_LogLevelWarn, "Retransmission",
                        "Giving up on Packet(channelId=%u, packetId=%u, fragmentId=%u) after %u attempts",
                        packet->header.channelId, packet->header.packetId, packet->header.fragmentId,
-                       RETRANSMISSION_ATTEMPTS);
+                       AttemptCap(&packet->header));
     }
     IHS_SessionQueuePacket(retransmission->session, packet, again);
     assert(packet->body.data == NULL);

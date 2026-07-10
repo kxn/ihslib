@@ -40,6 +40,10 @@
 
 static bool IsMessageEncrypted(EStreamControlMessage type);
 
+/* A lost HID report is superseded ~16 ms later, so three tries (~30 ms) is
+ * plenty before letting the reliable channel move on. */
+#define HID_RETRANSMIT_ATTEMPTS 3
+
 static size_t EncryptedMessageCapacity(size_t plainSize);
 
 static void OnControlInit(IHS_SessionChannel *channel, const void *data);
@@ -97,6 +101,14 @@ bool IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamControlMe
     IHS_MutexLock(control->sendLock);
     IHS_SessionFrame frame;
     IHS_SessionChannelInitializeFrame(channel, &frame, IHS_SessionPacketTypeReliable, true, packetId);
+    /* HID input is a full state snapshot: losing one is corrected by the next
+     * frame's report, but retransmitting a lost one 20 times (200 ms at the 10 ms
+     * interval) head-of-line-blocks every input behind it — a visible control
+     * freeze on lossy Wi-Fi. Cap it low; the host resyncs its sequence past the
+     * gap, exactly as it already does when we give up after 20. */
+    if (type == k_EStreamControlRemoteHID) {
+        frame.header.maxRetransmit = HID_RETRANSMIT_ATTEMPTS;
+    }
     IHS_SessionLog(channel->session, logLevel, "Control", "Send control message: %s, id=%u", value->name,
                    frame.header.packetId);
     IHS_BufferAppendUInt8(&frame.body, type);
