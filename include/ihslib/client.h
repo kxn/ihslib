@@ -94,6 +94,14 @@ typedef struct IHS_StreamingRequest {
      * hosts offer HEVC.
      */
     bool streamDesktop;
+    /**
+     * Reserve this many gamepad slots in the streaming request, the way Steam's
+     * own client does. The host allocates the slots up front instead of learning
+     * of the pads only when the HID channel enumerates them mid-negotiation.
+     * The controller type is left for HID detection (vid:pid), so glyphs stay
+     * correct. 0 sends no reservation.
+     */
+    int32_t gamepadCount;
 } IHS_StreamingRequest;
 
 typedef struct IHS_ClientDiscoveryCallbacks {

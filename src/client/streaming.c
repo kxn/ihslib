@@ -220,6 +220,25 @@ static uint64_t StreamingRequestTimer(int runCount, void *context) {
     EStreamTransport transports[] = {k_EStreamTransportUDP};
     message.supported_transport = transports;
 
+    /* Reserve gamepad slots the way Steam does: the host sets them up from the
+     * request rather than waiting for the HID channel to enumerate mid-stream.
+     * controller_type is left unset so the host still types each pad from its
+     * HID vid:pid. Steam sends both the count and one entry per slot. */
+    CMsgRemoteDeviceStreamingRequest__ReservedGamepad reserved[16];
+    CMsgRemoteDeviceStreamingRequest__ReservedGamepad *reservedPtrs[16];
+    int gamepadCount = request.gamepadCount;
+    if (gamepadCount > 16) gamepadCount = 16;
+    if (gamepadCount > 0) {
+        message.has_gamepad_count = true;
+        message.gamepad_count = gamepadCount;
+        for (int i = 0; i < gamepadCount; i++) {
+            cmsg_remote_device_streaming_request__reserved_gamepad__init(&reserved[i]);
+            reservedPtrs[i] = &reserved[i];
+        }
+        message.n_gamepads = gamepadCount;
+        message.gamepads = reservedPtrs;
+    }
+
     IHS_ClientLog(client, IHS_LogLevelDebug, "Client", "Sending streaming request packet to host %s", host.hostname);
     IHS_ClientSend(client, host.address, k_ERemoteDeviceStreamingRequest, (ProtobufCMessage *) &message);
     return 3000;
