@@ -208,16 +208,25 @@ void IHS_SessionChannelPacketAck(IHS_SessionChannel *channel, int32_t packetId, 
 
 static bool SessionChannelQueueFramePackets(IHS_SessionChannel *channel, IHS_SessionFrame *frame, size_t bodyLimit,
                                             bool enableRetransmit) {
-    int fragmentSize = (int) (frame->body.size / bodyLimit + 1);
-    assert(fragmentSize <= INT16_MAX);
+    /* The head carries the number of fragments that FOLLOW it, which is what the
+     * receiving window reads back (window.c: packetsCount = 1 + head->fragmentId).
+     * `size / bodyLimit + 1` counted the head as well, and over-counted by one more
+     * whenever the body divided exactly, so the peer sat waiting for fragments that
+     * were never coming and never acknowledged the message. */
+    int packetCount = (int) ((frame->body.size + bodyLimit - 1) / bodyLimit);
+    assert(packetCount <= INT16_MAX);
     int16_t fragmentId = -1;
     while (frame->body.size != 0) {
         size_t packetBodySize = frame->body.size > bodyLimit ? bodyLimit : frame->body.size;
         IHS_SessionPacket packet;
         packet.header = frame->header;
         if (fragmentId < 0) {
-            packet.header.fragmentId = (int16_t) fragmentSize;
+            packet.header.fragmentId = (int16_t) (packetCount - 1);
         } else {
+            /* Fragments sit in consecutive window slots, which are keyed by packet id —
+             * reusing the head's id would land every fragment on the same slot, and the
+             * window drops a slot that is already taken. */
+            packet.header.packetId = IHS_SessionChannelNextPacketId(channel);
             packet.header.fragmentId = fragmentId;
             packet.header.type = FragmentedPacketType(packet.header.type);
         }
