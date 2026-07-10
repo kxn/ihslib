@@ -475,6 +475,10 @@ bool IHS_SessionInputEnabled(IHS_Session *session) {
     return session->state.streamingInput;
 }
 
+bool IHS_SessionStreaming(IHS_Session *session) {
+    return session->state.connectionState == IHS_SessionConnectionStateConnected;
+}
+
 static void OnSetSpectatorMode(IHS_SessionChannel *channel, const CSetSpectatorModeMsg *message) {
     IHS_SessionLog(channel->session, IHS_LogLevelDebug, "Control", "Set client config. spectator_mode=%u",
                    message->enabled);

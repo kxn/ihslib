@@ -137,6 +137,13 @@ bool IHS_SessionChannelControlSendHIDMsg(IHS_SessionChannel *channel, const CHID
     // IsStreaming() && BStreamingInput(). If the server disabled input streaming via
     // OnSetClientConfig, drop the message client-side rather than burning bandwidth on
     // something the server has told us it isn't reading.
+    //
+    // IsStreaming() is not cosmetic: the HID manager enumerates on the timer thread, so
+    // a slow handshake lets the device list race ahead of AuthenticationRequest. The host
+    // accepts that packet, then never speaks again — the session dies fifteen seconds
+    // later, mid-negotiation. Seen from a libretro core, where the frontend's video init
+    // delays the handshake past the first HID tick.
+    if (!IHS_SessionStreaming(channel->session)) return false;
     if (!IHS_SessionInputEnabled(channel->session)) return false;
     CRemoteHIDMsg wrapped = CREMOTE_HIDMSG__INIT;
     size_t messageSize = chidmessage_from_remote__get_packed_size(message);

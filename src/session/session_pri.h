@@ -138,5 +138,12 @@ bool IHS_SessionSendControlMessage(IHS_Session *session, EStreamControlMessage t
  */
 bool IHS_SessionInputEnabled(IHS_Session *session);
 
+/**
+ * Mirrors Steam's IsStreaming(): true once NegotiationComplete has been sent.
+ * Outbound control traffic that the host only expects from a live session must
+ * check this — it accepts an early packet, then abandons the session.
+ */
+bool IHS_SessionStreaming(IHS_Session *session);
+
 bool IHS_SessionCancelRetransmission(IHS_Session *session, IHS_SessionChannelId channelId, uint16_t packetId,
                                      uint16_t fragmentId);
