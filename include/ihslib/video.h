@@ -39,8 +39,8 @@ typedef enum IHS_StreamVideoCodec {
     IHS_StreamVideoCodecVP9 = 3,
     IHS_StreamVideoCodecH264 = 4,
     IHS_StreamVideoCodecHEVC = 5,
-    IHS_StreamVideoCodecORBX1 = 6,
-    IHS_StreamVideoCodecORBX2 = 7,
+    IHS_StreamVideoCodecAV1 = 8,
+    IHS_StreamVideoCodecPyrowave = 9,
 } IHS_StreamVideoCodec;
 
 typedef enum IHS_StreamVideoFrameFlag {

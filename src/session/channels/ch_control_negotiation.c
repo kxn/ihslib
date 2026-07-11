@@ -166,8 +166,8 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
     PROTOBUF_C_SET_VALUE(availableVideoMode, refresh_rate_denominator, 1);
 
     CStreamVideoMode *availableVideoModes[] = {&availableVideoMode};
-    config.n_available_video_modes = 1;
-    config.available_video_modes = availableVideoModes;
+    config.n_available_video_modes_obsolete = 1;
+    config.available_video_modes_obsolete = availableVideoModes;
 
     /* Gamepads reach the host over the HID channel, not the keyboard/mouse input
      * channel. Without this the host sees no controller at all. */
@@ -175,8 +175,8 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
 
     CStreamingClientConfig clientConfig = CSTREAMING_CLIENT_CONFIG__INIT;
 
-    PROTOBUF_C_SET_VALUE(clientConfig, maximum_resolution_x, (int32_t) ihsConf.maxWidth);
-    PROTOBUF_C_SET_VALUE(clientConfig, maximum_resolution_y, (int32_t) ihsConf.maxHeight);
+    PROTOBUF_C_SET_VALUE(clientConfig, desired_resolution_x, (int32_t) ihsConf.maxWidth);
+    PROTOBUF_C_SET_VALUE(clientConfig, desired_resolution_y, (int32_t) ihsConf.maxHeight);
     PROTOBUF_C_SET_VALUE(clientConfig, enable_hardware_decoding, true);
     PROTOBUF_C_SET_VALUE(clientConfig, enable_performance_overlay, true);
     if (ihsConf.enableAudio) {
@@ -192,10 +192,10 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
         PROTOBUF_C_SET_VALUE(clientConfig, enable_microphone_streaming, true);
     }
     PROTOBUF_C_SET_VALUE(clientConfig, enable_video_streaming, true);
-    PROTOBUF_C_SET_VALUE(clientConfig, maximum_framerate_numerator, ihsConf.maxFps);
-    PROTOBUF_C_SET_VALUE(clientConfig, maximum_framerate_denominator, 1);
+    PROTOBUF_C_SET_VALUE(clientConfig, desired_framerate_numerator, ihsConf.maxFps);
+    PROTOBUF_C_SET_VALUE(clientConfig, desired_framerate_denominator, 1);
     PROTOBUF_C_SET_VALUE(clientConfig, quality, k_EStreamQualityBalanced);
-    PROTOBUF_C_SET_VALUE(clientConfig, maximum_bitrate_kbps, ihsConf.maxBitrateKbps);
+    PROTOBUF_C_SET_VALUE(clientConfig, desired_bitrate_kbps, ihsConf.maxBitrateKbps);
     if (ihsConf.enableHevc) {
         PROTOBUF_C_SET_VALUE(clientConfig, enable_video_hevc, true);
     }
@@ -214,8 +214,18 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
     PROTOBUF_C_SET_VALUE(clientCaps, system_can_suspend, true);
     PROTOBUF_C_SET_VALUE(clientCaps, maximum_decode_bitrate_kbps, 30000);
     PROTOBUF_C_SET_VALUE(clientCaps, maximum_burst_bitrate_kbps, 90000);
+    /* Current Steam reads the codec list; supports_video_hevc is obsoleted but still
+     * the only thing older hosts look at, so send both. */
+    EStreamVideoCodec supportedCodecs[] = {k_EStreamVideoCodecHEVC, k_EStreamVideoCodecH264};
+    clientCaps.supported_video_codecs = ihsConf.enableHevc ? supportedCodecs : &supportedCodecs[1];
+    clientCaps.n_supported_video_codecs = ihsConf.enableHevc ? 2 : 1;
+    EStreamAudioCodec supportedAudioCodecs[] = {k_EStreamAudioCodecOpus};
+    if (ihsConf.enableAudio) {
+        clientCaps.supported_audio_codecs = supportedAudioCodecs;
+        clientCaps.n_supported_audio_codecs = 1;
+    }
     if (ihsConf.enableHevc) {
-        PROTOBUF_C_SET_VALUE(clientCaps, supports_video_hevc, true);
+        PROTOBUF_C_SET_VALUE(clientCaps, supports_video_hevc_obsolete, true);
     }
     PROTOBUF_C_SET_VALUE(clientCaps, form_factor, k_EStreamDeviceFormFactorTV);
 

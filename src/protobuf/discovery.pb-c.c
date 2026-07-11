@@ -379,6 +379,96 @@ void   cmsg_remote_device_authorization_confirmed__free_unpacked
   assert(message->base.descriptor == &cmsg_remote_device_authorization_confirmed__descriptor);
   protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
 }
+void   cmsg_remote_client_broadcast_client_pairing_state__init
+                     (CMsgRemoteClientBroadcastClientPairingState         *message)
+{
+  static const CMsgRemoteClientBroadcastClientPairingState init_value = CMSG_REMOTE_CLIENT_BROADCAST_CLIENT_PAIRING_STATE__INIT;
+  *message = init_value;
+}
+size_t cmsg_remote_client_broadcast_client_pairing_state__get_packed_size
+                     (const CMsgRemoteClientBroadcastClientPairingState *message)
+{
+  assert(message->base.descriptor == &cmsg_remote_client_broadcast_client_pairing_state__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t cmsg_remote_client_broadcast_client_pairing_state__pack
+                     (const CMsgRemoteClientBroadcastClientPairingState *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &cmsg_remote_client_broadcast_client_pairing_state__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t cmsg_remote_client_broadcast_client_pairing_state__pack_to_buffer
+                     (const CMsgRemoteClientBroadcastClientPairingState *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &cmsg_remote_client_broadcast_client_pairing_state__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+CMsgRemoteClientBroadcastClientPairingState *
+       cmsg_remote_client_broadcast_client_pairing_state__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (CMsgRemoteClientBroadcastClientPairingState *)
+     protobuf_c_message_unpack (&cmsg_remote_client_broadcast_client_pairing_state__descriptor,
+                                allocator, len, data);
+}
+void   cmsg_remote_client_broadcast_client_pairing_state__free_unpacked
+                     (CMsgRemoteClientBroadcastClientPairingState *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &cmsg_remote_client_broadcast_client_pairing_state__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
+void   cmsg_remote_client_broadcast_client_pairing_exclusivity__init
+                     (CMsgRemoteClientBroadcastClientPairingExclusivity         *message)
+{
+  static const CMsgRemoteClientBroadcastClientPairingExclusivity init_value = CMSG_REMOTE_CLIENT_BROADCAST_CLIENT_PAIRING_EXCLUSIVITY__INIT;
+  *message = init_value;
+}
+size_t cmsg_remote_client_broadcast_client_pairing_exclusivity__get_packed_size
+                     (const CMsgRemoteClientBroadcastClientPairingExclusivity *message)
+{
+  assert(message->base.descriptor == &cmsg_remote_client_broadcast_client_pairing_exclusivity__descriptor);
+  return protobuf_c_message_get_packed_size ((const ProtobufCMessage*)(message));
+}
+size_t cmsg_remote_client_broadcast_client_pairing_exclusivity__pack
+                     (const CMsgRemoteClientBroadcastClientPairingExclusivity *message,
+                      uint8_t       *out)
+{
+  assert(message->base.descriptor == &cmsg_remote_client_broadcast_client_pairing_exclusivity__descriptor);
+  return protobuf_c_message_pack ((const ProtobufCMessage*)message, out);
+}
+size_t cmsg_remote_client_broadcast_client_pairing_exclusivity__pack_to_buffer
+                     (const CMsgRemoteClientBroadcastClientPairingExclusivity *message,
+                      ProtobufCBuffer *buffer)
+{
+  assert(message->base.descriptor == &cmsg_remote_client_broadcast_client_pairing_exclusivity__descriptor);
+  return protobuf_c_message_pack_to_buffer ((const ProtobufCMessage*)message, buffer);
+}
+CMsgRemoteClientBroadcastClientPairingExclusivity *
+       cmsg_remote_client_broadcast_client_pairing_exclusivity__unpack
+                     (ProtobufCAllocator  *allocator,
+                      size_t               len,
+                      const uint8_t       *data)
+{
+  return (CMsgRemoteClientBroadcastClientPairingExclusivity *)
+     protobuf_c_message_unpack (&cmsg_remote_client_broadcast_client_pairing_exclusivity__descriptor,
+                                allocator, len, data);
+}
+void   cmsg_remote_client_broadcast_client_pairing_exclusivity__free_unpacked
+                     (CMsgRemoteClientBroadcastClientPairingExclusivity *message,
+                      ProtobufCAllocator *allocator)
+{
+  if(!message)
+    return;
+  assert(message->base.descriptor == &cmsg_remote_client_broadcast_client_pairing_exclusivity__descriptor);
+  protobuf_c_message_free_unpacked ((ProtobufCMessage*)message, allocator);
+}
 void   cmsg_remote_device_streaming_request__reserved_gamepad__init
                      (CMsgRemoteDeviceStreamingRequest__ReservedGamepad         *message)
 {
@@ -740,12 +830,12 @@ static const ProtobufCFieldDescriptor cmsg_remote_client_broadcast_header__field
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
   {
-    "device_id",
+    "device_id_OBSOLETE",
     4,
     PROTOBUF_C_LABEL_OPTIONAL,
     PROTOBUF_C_TYPE_UINT64,
-    offsetof(CMsgRemoteClientBroadcastHeader, has_device_id),
-    offsetof(CMsgRemoteClientBroadcastHeader, device_id),
+    offsetof(CMsgRemoteClientBroadcastHeader, has_device_id_obsolete),
+    offsetof(CMsgRemoteClientBroadcastHeader, device_id_obsolete),
     NULL,
     NULL,
     0,             /* flags */
@@ -766,7 +856,7 @@ static const ProtobufCFieldDescriptor cmsg_remote_client_broadcast_header__field
 };
 static const unsigned cmsg_remote_client_broadcast_header__field_indices_by_name[] = {
   0,   /* field[0] = client_id */
-  3,   /* field[3] = device_id */
+  3,   /* field[3] = device_id_OBSOLETE */
   4,   /* field[4] = device_token */
   2,   /* field[2] = instance_id */
   1,   /* field[1] = msg_type */
@@ -843,7 +933,8 @@ const ProtobufCMessageDescriptor cmsg_remote_client_broadcast_status__user__desc
   NULL,NULL,NULL    /* reserved[123] */
 };
 static const int32_t cmsg_remote_client_broadcast_status__ostype__default_value = 0;
-static const ProtobufCFieldDescriptor cmsg_remote_client_broadcast_status__field_descriptors[23] =
+static const EVRLinkCaps cmsg_remote_client_broadcast_status__vr_link_caps__default_value = k_EVRLinkCapsUnknown;
+static const ProtobufCFieldDescriptor cmsg_remote_client_broadcast_status__field_descriptors[29] =
 {
   {
     "version",
@@ -1121,18 +1212,93 @@ static const ProtobufCFieldDescriptor cmsg_remote_client_broadcast_status__field
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "vr_link_caps",
+    26,
+    PROTOBUF_C_LABEL_OPTIONAL,
+    PROTOBUF_C_TYPE_ENUM,
+    offsetof(CMsgRemoteClientBroadcastStatus, has_vr_link_caps),
+    offsetof(CMsgRemoteClientBroadcastStatus, vr_link_caps),
+    &evrlink_caps__descriptor,
+    &cmsg_remote_client_broadcast_status__vr_link_caps__default_value,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "vr_link_invite_client_id",
+    27,
+    PROTOBUF_C_LABEL_OPTIONAL,
+    PROTOBUF_C_TYPE_FIXED64,
+    offsetof(CMsgRemoteClientBroadcastStatus, has_vr_link_invite_client_id),
+    offsetof(CMsgRemoteClientBroadcastStatus, vr_link_invite_client_id),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "connected_paired_network_hash",
+    28,
+    PROTOBUF_C_LABEL_OPTIONAL,
+    PROTOBUF_C_TYPE_FIXED64,
+    offsetof(CMsgRemoteClientBroadcastStatus, has_connected_paired_network_hash),
+    offsetof(CMsgRemoteClientBroadcastStatus, connected_paired_network_hash),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "wifi_dongle_present",
+    29,
+    PROTOBUF_C_LABEL_OPTIONAL,
+    PROTOBUF_C_TYPE_BOOL,
+    offsetof(CMsgRemoteClientBroadcastStatus, has_wifi_dongle_present),
+    offsetof(CMsgRemoteClientBroadcastStatus, wifi_dongle_present),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "is_low_spec_hardware",
+    30,
+    PROTOBUF_C_LABEL_OPTIONAL,
+    PROTOBUF_C_TYPE_BOOL,
+    offsetof(CMsgRemoteClientBroadcastStatus, has_is_low_spec_hardware),
+    offsetof(CMsgRemoteClientBroadcastStatus, is_low_spec_hardware),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "gaming_device_type",
+    31,
+    PROTOBUF_C_LABEL_OPTIONAL,
+    PROTOBUF_C_TYPE_UINT32,
+    offsetof(CMsgRemoteClientBroadcastStatus, has_gaming_device_type),
+    offsetof(CMsgRemoteClientBroadcastStatus, gaming_device_type),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned cmsg_remote_client_broadcast_status__field_indices_by_name[] = {
   14,   /* field[14] = broadcasting_active */
   2,   /* field[2] = connect_port */
+  25,   /* field[25] = connected_paired_network_hash */
   16,   /* field[16] = content_cache_port */
   13,   /* field[13] = download_lan_peer_group */
   4,   /* field[4] = enabled_services */
   8,   /* field[8] = euniverse */
   11,   /* field[11] = games_running */
+  28,   /* field[28] = gaming_device_type */
   3,   /* field[3] = hostname */
   17,   /* field[17] = ip_addresses */
   6,   /* field[6] = is64bit */
+  27,   /* field[27] = is_low_spec_hardware */
   12,   /* field[12] = mac_addresses */
   1,   /* field[1] = min_version */
   5,   /* field[5] = ostype */
@@ -1146,13 +1312,16 @@ static const unsigned cmsg_remote_client_broadcast_status__field_indices_by_name
   7,   /* field[7] = users */
   0,   /* field[0] = version */
   15,   /* field[15] = vr_active */
+  23,   /* field[23] = vr_link_caps */
+  24,   /* field[24] = vr_link_invite_client_id */
+  26,   /* field[26] = wifi_dongle_present */
 };
 static const ProtobufCIntRange cmsg_remote_client_broadcast_status__number_ranges[3 + 1] =
 {
   { 1, 0 },
   { 6, 4 },
   { 11, 8 },
-  { 0, 23 }
+  { 0, 29 }
 };
 const ProtobufCMessageDescriptor cmsg_remote_client_broadcast_status__descriptor =
 {
@@ -1162,7 +1331,7 @@ const ProtobufCMessageDescriptor cmsg_remote_client_broadcast_status__descriptor
   "CMsgRemoteClientBroadcastStatus",
   "",
   sizeof(CMsgRemoteClientBroadcastStatus),
-  23,
+  29,
   cmsg_remote_client_broadcast_status__field_descriptors,
   cmsg_remote_client_broadcast_status__field_indices_by_name,
   3,  cmsg_remote_client_broadcast_status__number_ranges,
@@ -1427,7 +1596,7 @@ const ProtobufCEnumDescriptor cmsg_remote_device_authorization_request__ekey_esc
   cmsg_remote_device_authorization_request__ekey_escrow_usage__value_ranges,
   NULL,NULL,NULL,NULL   /* reserved[1234] */
 };
-static const ProtobufCFieldDescriptor cmsg_remote_device_authorization_request__field_descriptors[4] =
+static const ProtobufCFieldDescriptor cmsg_remote_device_authorization_request__field_descriptors[5] =
 {
   {
     "device_token",
@@ -1477,17 +1646,30 @@ static const ProtobufCFieldDescriptor cmsg_remote_device_authorization_request__
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "request_id",
+    5,
+    PROTOBUF_C_LABEL_OPTIONAL,
+    PROTOBUF_C_TYPE_UINT32,
+    offsetof(CMsgRemoteDeviceAuthorizationRequest, has_request_id),
+    offsetof(CMsgRemoteDeviceAuthorizationRequest, request_id),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned cmsg_remote_device_authorization_request__field_indices_by_name[] = {
   3,   /* field[3] = auth_key */
   1,   /* field[1] = device_name */
   0,   /* field[0] = device_token */
   2,   /* field[2] = encrypted_request */
+  4,   /* field[4] = request_id */
 };
 static const ProtobufCIntRange cmsg_remote_device_authorization_request__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 4 }
+  { 0, 5 }
 };
 const ProtobufCMessageDescriptor cmsg_remote_device_authorization_request__descriptor =
 {
@@ -1497,7 +1679,7 @@ const ProtobufCMessageDescriptor cmsg_remote_device_authorization_request__descr
   "CMsgRemoteDeviceAuthorizationRequest",
   "",
   sizeof(CMsgRemoteDeviceAuthorizationRequest),
-  4,
+  5,
   cmsg_remote_device_authorization_request__field_descriptors,
   cmsg_remote_device_authorization_request__field_indices_by_name,
   1,  cmsg_remote_device_authorization_request__number_ranges,
@@ -1639,6 +1821,121 @@ const ProtobufCMessageDescriptor cmsg_remote_device_authorization_confirmed__des
   (ProtobufCMessageInit) cmsg_remote_device_authorization_confirmed__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
+static const ProtobufCFieldDescriptor cmsg_remote_client_broadcast_client_pairing_state__field_descriptors[2] =
+{
+  {
+    "my_paired_network_hash",
+    1,
+    PROTOBUF_C_LABEL_OPTIONAL,
+    PROTOBUF_C_TYPE_FIXED64,
+    offsetof(CMsgRemoteClientBroadcastClientPairingState, has_my_paired_network_hash),
+    offsetof(CMsgRemoteClientBroadcastClientPairingState, my_paired_network_hash),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "my_pairing_time",
+    2,
+    PROTOBUF_C_LABEL_OPTIONAL,
+    PROTOBUF_C_TYPE_UINT32,
+    offsetof(CMsgRemoteClientBroadcastClientPairingState, has_my_pairing_time),
+    offsetof(CMsgRemoteClientBroadcastClientPairingState, my_pairing_time),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned cmsg_remote_client_broadcast_client_pairing_state__field_indices_by_name[] = {
+  0,   /* field[0] = my_paired_network_hash */
+  1,   /* field[1] = my_pairing_time */
+};
+static const ProtobufCIntRange cmsg_remote_client_broadcast_client_pairing_state__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 2 }
+};
+const ProtobufCMessageDescriptor cmsg_remote_client_broadcast_client_pairing_state__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "CMsgRemoteClientBroadcastClientPairingState",
+  "CMsgRemoteClientBroadcastClientPairingState",
+  "CMsgRemoteClientBroadcastClientPairingState",
+  "",
+  sizeof(CMsgRemoteClientBroadcastClientPairingState),
+  2,
+  cmsg_remote_client_broadcast_client_pairing_state__field_descriptors,
+  cmsg_remote_client_broadcast_client_pairing_state__field_indices_by_name,
+  1,  cmsg_remote_client_broadcast_client_pairing_state__number_ranges,
+  (ProtobufCMessageInit) cmsg_remote_client_broadcast_client_pairing_state__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
+static const ProtobufCFieldDescriptor cmsg_remote_client_broadcast_client_pairing_exclusivity__field_descriptors[3] =
+{
+  {
+    "if_paired_network_hash_is",
+    1,
+    PROTOBUF_C_LABEL_OPTIONAL,
+    PROTOBUF_C_TYPE_FIXED64,
+    offsetof(CMsgRemoteClientBroadcastClientPairingExclusivity, has_if_paired_network_hash_is),
+    offsetof(CMsgRemoteClientBroadcastClientPairingExclusivity, if_paired_network_hash_is),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "unpair_unless_you_are_client_id",
+    2,
+    PROTOBUF_C_LABEL_OPTIONAL,
+    PROTOBUF_C_TYPE_FIXED64,
+    offsetof(CMsgRemoteClientBroadcastClientPairingExclusivity, has_unpair_unless_you_are_client_id),
+    offsetof(CMsgRemoteClientBroadcastClientPairingExclusivity, unpair_unless_you_are_client_id),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "last_known_pairing_time",
+    3,
+    PROTOBUF_C_LABEL_OPTIONAL,
+    PROTOBUF_C_TYPE_UINT32,
+    offsetof(CMsgRemoteClientBroadcastClientPairingExclusivity, has_last_known_pairing_time),
+    offsetof(CMsgRemoteClientBroadcastClientPairingExclusivity, last_known_pairing_time),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+};
+static const unsigned cmsg_remote_client_broadcast_client_pairing_exclusivity__field_indices_by_name[] = {
+  0,   /* field[0] = if_paired_network_hash_is */
+  2,   /* field[2] = last_known_pairing_time */
+  1,   /* field[1] = unpair_unless_you_are_client_id */
+};
+static const ProtobufCIntRange cmsg_remote_client_broadcast_client_pairing_exclusivity__number_ranges[1 + 1] =
+{
+  { 1, 0 },
+  { 0, 3 }
+};
+const ProtobufCMessageDescriptor cmsg_remote_client_broadcast_client_pairing_exclusivity__descriptor =
+{
+  PROTOBUF_C__MESSAGE_DESCRIPTOR_MAGIC,
+  "CMsgRemoteClientBroadcastClientPairingExclusivity",
+  "CMsgRemoteClientBroadcastClientPairingExclusivity",
+  "CMsgRemoteClientBroadcastClientPairingExclusivity",
+  "",
+  sizeof(CMsgRemoteClientBroadcastClientPairingExclusivity),
+  3,
+  cmsg_remote_client_broadcast_client_pairing_exclusivity__field_descriptors,
+  cmsg_remote_client_broadcast_client_pairing_exclusivity__field_indices_by_name,
+  1,  cmsg_remote_client_broadcast_client_pairing_exclusivity__number_ranges,
+  (ProtobufCMessageInit) cmsg_remote_client_broadcast_client_pairing_exclusivity__init,
+  NULL,NULL,NULL    /* reserved[123] */
+};
 static const ProtobufCFieldDescriptor cmsg_remote_device_streaming_request__reserved_gamepad__field_descriptors[2] =
 {
   {
@@ -1696,7 +1993,7 @@ static const protobuf_c_boolean cmsg_remote_device_streaming_request__enable_aud
 static const protobuf_c_boolean cmsg_remote_device_streaming_request__enable_input_streaming__default_value = 1;
 static const EStreamDeviceFormFactor cmsg_remote_device_streaming_request__form_factor__default_value = k_EStreamDeviceFormFactorUnknown;
 static const EStreamInterface cmsg_remote_device_streaming_request__stream_interface__default_value = k_EStreamInterfaceDefault;
-static const ProtobufCFieldDescriptor cmsg_remote_device_streaming_request__field_descriptors[20] =
+static const ProtobufCFieldDescriptor cmsg_remote_device_streaming_request__field_descriptors[23] =
 {
   {
     "request_id",
@@ -1938,12 +2235,49 @@ static const ProtobufCFieldDescriptor cmsg_remote_device_streaming_request__fiel
     0,             /* flags */
     0,NULL,NULL    /* reserved1,reserved2, etc */
   },
+  {
+    "maximum_framerate_numerator",
+    21,
+    PROTOBUF_C_LABEL_OPTIONAL,
+    PROTOBUF_C_TYPE_INT32,
+    offsetof(CMsgRemoteDeviceStreamingRequest, has_maximum_framerate_numerator),
+    offsetof(CMsgRemoteDeviceStreamingRequest, maximum_framerate_numerator),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "maximum_framerate_denominator",
+    22,
+    PROTOBUF_C_LABEL_OPTIONAL,
+    PROTOBUF_C_TYPE_INT32,
+    offsetof(CMsgRemoteDeviceStreamingRequest, has_maximum_framerate_denominator),
+    offsetof(CMsgRemoteDeviceStreamingRequest, maximum_framerate_denominator),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
+  {
+    "display_hdr",
+    23,
+    PROTOBUF_C_LABEL_OPTIONAL,
+    PROTOBUF_C_TYPE_BOOL,
+    offsetof(CMsgRemoteDeviceStreamingRequest, has_display_hdr),
+    offsetof(CMsgRemoteDeviceStreamingRequest, display_hdr),
+    NULL,
+    NULL,
+    0,             /* flags */
+    0,NULL,NULL    /* reserved1,reserved2, etc */
+  },
 };
 static const unsigned cmsg_remote_device_streaming_request__field_indices_by_name[] = {
   3,   /* field[3] = audio_channel_count */
   12,   /* field[12] = client_id */
   6,   /* field[6] = device_token */
   4,   /* field[4] = device_version */
+  22,   /* field[22] = display_hdr */
   9,   /* field[9] = enable_audio_streaming */
   10,   /* field[10] = enable_input_streaming */
   8,   /* field[8] = enable_video_streaming */
@@ -1951,6 +2285,8 @@ static const unsigned cmsg_remote_device_streaming_request__field_indices_by_nam
   18,   /* field[18] = gameid */
   16,   /* field[16] = gamepad_count */
   17,   /* field[17] = gamepads */
+  21,   /* field[21] = maximum_framerate_denominator */
+  20,   /* field[20] = maximum_framerate_numerator */
   1,   /* field[1] = maximum_resolution_x */
   2,   /* field[2] = maximum_resolution_y */
   11,   /* field[11] = network_test */
@@ -1964,7 +2300,7 @@ static const unsigned cmsg_remote_device_streaming_request__field_indices_by_nam
 static const ProtobufCIntRange cmsg_remote_device_streaming_request__number_ranges[1 + 1] =
 {
   { 1, 0 },
-  { 0, 20 }
+  { 0, 23 }
 };
 const ProtobufCMessageDescriptor cmsg_remote_device_streaming_request__descriptor =
 {
@@ -1974,7 +2310,7 @@ const ProtobufCMessageDescriptor cmsg_remote_device_streaming_request__descripto
   "CMsgRemoteDeviceStreamingRequest",
   "",
   sizeof(CMsgRemoteDeviceStreamingRequest),
-  20,
+  23,
   cmsg_remote_device_streaming_request__field_descriptors,
   cmsg_remote_device_streaming_request__field_indices_by_name,
   1,  cmsg_remote_device_streaming_request__number_ranges,
@@ -2368,7 +2704,7 @@ const ProtobufCMessageDescriptor cmsg_remote_device_stream_transport_signal__des
   (ProtobufCMessageInit) cmsg_remote_device_stream_transport_signal__init,
   NULL,NULL,NULL    /* reserved[123] */
 };
-static const ProtobufCEnumValue eremote_client_broadcast_msg__enum_values_by_number[15] =
+static const ProtobufCEnumValue eremote_client_broadcast_msg__enum_values_by_number[17] =
 {
   { "k_ERemoteClientBroadcastMsgDiscovery", "k_ERemoteClientBroadcastMsgDiscovery", 0 },
   { "k_ERemoteClientBroadcastMsgStatus", "k_ERemoteClientBroadcastMsgStatus", 1 },
@@ -2385,15 +2721,19 @@ static const ProtobufCEnumValue eremote_client_broadcast_msg__enum_values_by_num
   { "k_ERemoteDeviceStreamTransportSignal", "k_ERemoteDeviceStreamTransportSignal", 12 },
   { "k_ERemoteDeviceStreamingProgress", "k_ERemoteDeviceStreamingProgress", 13 },
   { "k_ERemoteDeviceAuthorizationConfirmed", "k_ERemoteDeviceAuthorizationConfirmed", 14 },
+  { "k_ERemoteClientBroadcastMsgPairingState", "k_ERemoteClientBroadcastMsgPairingState", 15 },
+  { "k_ERemoteClientBroadcastMsgPairingExclusivity", "k_ERemoteClientBroadcastMsgPairingExclusivity", 16 },
 };
 static const ProtobufCIntRange eremote_client_broadcast_msg__value_ranges[] = {
-{0, 0},{0, 15}
+{0, 0},{0, 17}
 };
-static const ProtobufCEnumValueIndex eremote_client_broadcast_msg__enum_values_by_name[15] =
+static const ProtobufCEnumValueIndex eremote_client_broadcast_msg__enum_values_by_name[17] =
 {
   { "k_ERemoteClientBroadcastMsgClientIDDeconflict", 11 },
   { "k_ERemoteClientBroadcastMsgDiscovery", 0 },
   { "k_ERemoteClientBroadcastMsgOffline", 2 },
+  { "k_ERemoteClientBroadcastMsgPairingExclusivity", 16 },
+  { "k_ERemoteClientBroadcastMsgPairingState", 15 },
   { "k_ERemoteClientBroadcastMsgStatus", 1 },
   { "k_ERemoteDeviceAuthorizationCancelRequest", 9 },
   { "k_ERemoteDeviceAuthorizationConfirmed", 14 },
@@ -2414,15 +2754,15 @@ const ProtobufCEnumDescriptor eremote_client_broadcast_msg__descriptor =
   "ERemoteClientBroadcastMsg",
   "ERemoteClientBroadcastMsg",
   "",
-  15,
+  17,
   eremote_client_broadcast_msg__enum_values_by_number,
-  15,
+  17,
   eremote_client_broadcast_msg__enum_values_by_name,
   1,
   eremote_client_broadcast_msg__value_ranges,
   NULL,NULL,NULL,NULL   /* reserved[1234] */
 };
-static const ProtobufCEnumValue eremote_client_service__enum_values_by_number[6] =
+static const ProtobufCEnumValue eremote_client_service__enum_values_by_number[7] =
 {
   { "k_ERemoteClientServiceNone", "k_ERemoteClientServiceNone", 0 },
   { "k_ERemoteClientServiceRemoteControl", "k_ERemoteClientServiceRemoteControl", 1 },
@@ -2430,15 +2770,17 @@ static const ProtobufCEnumValue eremote_client_service__enum_values_by_number[6]
   { "k_ERemoteClientServiceSiteLicense", "k_ERemoteClientServiceSiteLicense", 4 },
   { "k_ERemoteClientServiceContentCache", "k_ERemoteClientServiceContentCache", 8 },
   { "k_ERemoteClientServiceContentServer", "k_ERemoteClientServiceContentServer", 16 },
+  { "k_ERemoteClientServiceManageDownloads", "k_ERemoteClientServiceManageDownloads", 32 },
 };
 static const ProtobufCIntRange eremote_client_service__value_ranges[] = {
-{0, 0},{4, 3},{8, 4},{16, 5},{0, 6}
+{0, 0},{4, 3},{8, 4},{16, 5},{32, 6},{0, 7}
 };
-static const ProtobufCEnumValueIndex eremote_client_service__enum_values_by_name[6] =
+static const ProtobufCEnumValueIndex eremote_client_service__enum_values_by_name[7] =
 {
   { "k_ERemoteClientServiceContentCache", 4 },
   { "k_ERemoteClientServiceContentServer", 5 },
   { "k_ERemoteClientServiceGameStreaming", 2 },
+  { "k_ERemoteClientServiceManageDownloads", 6 },
   { "k_ERemoteClientServiceNone", 0 },
   { "k_ERemoteClientServiceRemoteControl", 1 },
   { "k_ERemoteClientServiceSiteLicense", 3 },
@@ -2450,12 +2792,44 @@ const ProtobufCEnumDescriptor eremote_client_service__descriptor =
   "ERemoteClientService",
   "ERemoteClientService",
   "",
-  6,
+  7,
   eremote_client_service__enum_values_by_number,
-  6,
+  7,
   eremote_client_service__enum_values_by_name,
-  4,
+  5,
   eremote_client_service__value_ranges,
+  NULL,NULL,NULL,NULL   /* reserved[1234] */
+};
+static const ProtobufCEnumValue evrlink_caps__enum_values_by_number[4] =
+{
+  { "k_EVRLinkCapsUnknown", "k_EVRLinkCapsUnknown", 0 },
+  { "k_EVRLinkCapsAvailable", "k_EVRLinkCapsAvailable", 1 },
+  { "k_EVRLinkCapsUnimplemented", "k_EVRLinkCapsUnimplemented", 2 },
+  { "k_EVRLinkCapsMissingHardwareEncoding", "k_EVRLinkCapsMissingHardwareEncoding", 3 },
+};
+static const ProtobufCIntRange evrlink_caps__value_ranges[] = {
+{0, 0},{0, 4}
+};
+static const ProtobufCEnumValueIndex evrlink_caps__enum_values_by_name[4] =
+{
+  { "k_EVRLinkCapsAvailable", 1 },
+  { "k_EVRLinkCapsMissingHardwareEncoding", 3 },
+  { "k_EVRLinkCapsUnimplemented", 2 },
+  { "k_EVRLinkCapsUnknown", 0 },
+};
+const ProtobufCEnumDescriptor evrlink_caps__descriptor =
+{
+  PROTOBUF_C__ENUM_DESCRIPTOR_MAGIC,
+  "EVRLinkCaps",
+  "EVRLinkCaps",
+  "EVRLinkCaps",
+  "",
+  4,
+  evrlink_caps__enum_values_by_number,
+  4,
+  evrlink_caps__enum_values_by_name,
+  1,
+  evrlink_caps__value_ranges,
   NULL,NULL,NULL,NULL   /* reserved[1234] */
 };
 static const ProtobufCEnumValue eremote_device_authorization_result__enum_values_by_number[9] =
@@ -2500,24 +2874,26 @@ const ProtobufCEnumDescriptor eremote_device_authorization_result__descriptor =
   eremote_device_authorization_result__value_ranges,
   NULL,NULL,NULL,NULL   /* reserved[1234] */
 };
-static const ProtobufCEnumValue estream_device_form_factor__enum_values_by_number[5] =
+static const ProtobufCEnumValue estream_device_form_factor__enum_values_by_number[6] =
 {
   { "k_EStreamDeviceFormFactorUnknown", "k_EStreamDeviceFormFactorUnknown", 0 },
   { "k_EStreamDeviceFormFactorPhone", "k_EStreamDeviceFormFactorPhone", 1 },
   { "k_EStreamDeviceFormFactorTablet", "k_EStreamDeviceFormFactorTablet", 2 },
   { "k_EStreamDeviceFormFactorComputer", "k_EStreamDeviceFormFactorComputer", 3 },
   { "k_EStreamDeviceFormFactorTV", "k_EStreamDeviceFormFactorTV", 4 },
+  { "k_EStreamDeviceFormFactorVRHeadset", "k_EStreamDeviceFormFactorVRHeadset", 5 },
 };
 static const ProtobufCIntRange estream_device_form_factor__value_ranges[] = {
-{0, 0},{0, 5}
+{0, 0},{0, 6}
 };
-static const ProtobufCEnumValueIndex estream_device_form_factor__enum_values_by_name[5] =
+static const ProtobufCEnumValueIndex estream_device_form_factor__enum_values_by_name[6] =
 {
   { "k_EStreamDeviceFormFactorComputer", 3 },
   { "k_EStreamDeviceFormFactorPhone", 1 },
   { "k_EStreamDeviceFormFactorTV", 4 },
   { "k_EStreamDeviceFormFactorTablet", 2 },
   { "k_EStreamDeviceFormFactorUnknown", 0 },
+  { "k_EStreamDeviceFormFactorVRHeadset", 5 },
 };
 const ProtobufCEnumDescriptor estream_device_form_factor__descriptor =
 {
@@ -2526,9 +2902,9 @@ const ProtobufCEnumDescriptor estream_device_form_factor__descriptor =
   "EStreamDeviceFormFactor",
   "EStreamDeviceFormFactor",
   "",
-  5,
+  6,
   estream_device_form_factor__enum_values_by_number,
-  5,
+  6,
   estream_device_form_factor__enum_values_by_name,
   1,
   estream_device_form_factor__value_ranges,
@@ -2538,11 +2914,11 @@ static const ProtobufCEnumValue estream_transport__enum_values_by_number[7] =
 {
   { "k_EStreamTransportNone", "k_EStreamTransportNone", 0 },
   { "k_EStreamTransportUDP", "k_EStreamTransportUDP", 1 },
-  { "k_EStreamTransportUDPRelay", "k_EStreamTransportUDPRelay", 2 },
-  { "k_EStreamTransportWebRTC", "k_EStreamTransportWebRTC", 3 },
+  { "k_EStreamTransportUDPRelay_OBSOLETE", "k_EStreamTransportUDPRelay_OBSOLETE", 2 },
+  { "k_EStreamTransportWebRTC_OBSOLETE", "k_EStreamTransportWebRTC_OBSOLETE", 3 },
   { "k_EStreamTransportSDR", "k_EStreamTransportSDR", 4 },
   { "k_EStreamTransportUDP_SNS", "k_EStreamTransportUDP_SNS", 5 },
-  { "k_EStreamTransportUDPRelay_SNS", "k_EStreamTransportUDPRelay_SNS", 6 },
+  { "k_EStreamTransportUDPRelay_SNS_OBSOLETE", "k_EStreamTransportUDPRelay_SNS_OBSOLETE", 6 },
 };
 static const ProtobufCIntRange estream_transport__value_ranges[] = {
 {0, 0},{0, 7}
@@ -2552,10 +2928,10 @@ static const ProtobufCEnumValueIndex estream_transport__enum_values_by_name[7] =
   { "k_EStreamTransportNone", 0 },
   { "k_EStreamTransportSDR", 4 },
   { "k_EStreamTransportUDP", 1 },
-  { "k_EStreamTransportUDPRelay", 2 },
-  { "k_EStreamTransportUDPRelay_SNS", 6 },
+  { "k_EStreamTransportUDPRelay_OBSOLETE", 2 },
+  { "k_EStreamTransportUDPRelay_SNS_OBSOLETE", 6 },
   { "k_EStreamTransportUDP_SNS", 5 },
-  { "k_EStreamTransportWebRTC", 3 },
+  { "k_EStreamTransportWebRTC_OBSOLETE", 3 },
 };
 const ProtobufCEnumDescriptor estream_transport__descriptor =
 {
@@ -2572,22 +2948,24 @@ const ProtobufCEnumDescriptor estream_transport__descriptor =
   estream_transport__value_ranges,
   NULL,NULL,NULL,NULL   /* reserved[1234] */
 };
-static const ProtobufCEnumValue estream_interface__enum_values_by_number[4] =
+static const ProtobufCEnumValue estream_interface__enum_values_by_number[5] =
 {
   { "k_EStreamInterfaceDefault", "k_EStreamInterfaceDefault", 0 },
   { "k_EStreamInterfaceRecentGames", "k_EStreamInterfaceRecentGames", 1 },
   { "k_EStreamInterfaceBigPicture", "k_EStreamInterfaceBigPicture", 2 },
   { "k_EStreamInterfaceDesktop", "k_EStreamInterfaceDesktop", 3 },
+  { "k_EStreamInterfaceSteamVR", "k_EStreamInterfaceSteamVR", 4 },
 };
 static const ProtobufCIntRange estream_interface__value_ranges[] = {
-{0, 0},{0, 4}
+{0, 0},{0, 5}
 };
-static const ProtobufCEnumValueIndex estream_interface__enum_values_by_name[4] =
+static const ProtobufCEnumValueIndex estream_interface__enum_values_by_name[5] =
 {
   { "k_EStreamInterfaceBigPicture", 2 },
   { "k_EStreamInterfaceDefault", 0 },
   { "k_EStreamInterfaceDesktop", 3 },
   { "k_EStreamInterfaceRecentGames", 1 },
+  { "k_EStreamInterfaceSteamVR", 4 },
 };
 const ProtobufCEnumDescriptor estream_interface__descriptor =
 {
@@ -2596,15 +2974,15 @@ const ProtobufCEnumDescriptor estream_interface__descriptor =
   "EStreamInterface",
   "EStreamInterface",
   "",
-  4,
+  5,
   estream_interface__enum_values_by_number,
-  4,
+  5,
   estream_interface__enum_values_by_name,
   1,
   estream_interface__value_ranges,
   NULL,NULL,NULL,NULL   /* reserved[1234] */
 };
-static const ProtobufCEnumValue eremote_device_streaming_result__enum_values_by_number[15] =
+static const ProtobufCEnumValue eremote_device_streaming_result__enum_values_by_number[16] =
 {
   { "k_ERemoteDeviceStreamingSuccess", "k_ERemoteDeviceStreamingSuccess", 0 },
   { "k_ERemoteDeviceStreamingUnauthorized", "k_ERemoteDeviceStreamingUnauthorized", 1 },
@@ -2621,11 +2999,12 @@ static const ProtobufCEnumValue eremote_device_streaming_result__enum_values_by_
   { "k_ERemoteDeviceStreamingTransportUnavailable", "k_ERemoteDeviceStreamingTransportUnavailable", 12 },
   { "k_ERemoteDeviceStreamingInvisible", "k_ERemoteDeviceStreamingInvisible", 13 },
   { "k_ERemoteDeviceStreamingGameLaunchFailed", "k_ERemoteDeviceStreamingGameLaunchFailed", 14 },
+  { "k_ERemoteDeviceStreamingSteamVRNotInstalled", "k_ERemoteDeviceStreamingSteamVRNotInstalled", 15 },
 };
 static const ProtobufCIntRange eremote_device_streaming_result__value_ranges[] = {
-{0, 0},{0, 15}
+{0, 0},{0, 16}
 };
-static const ProtobufCEnumValueIndex eremote_device_streaming_result__enum_values_by_name[15] =
+static const ProtobufCEnumValueIndex eremote_device_streaming_result__enum_values_by_name[16] =
 {
   { "k_ERemoteDeviceStreamingBroadcastingActive", 9 },
   { "k_ERemoteDeviceStreamingBusy", 4 },
@@ -2638,6 +3017,7 @@ static const ProtobufCEnumValueIndex eremote_device_streaming_result__enum_value
   { "k_ERemoteDeviceStreamingInvisible", 13 },
   { "k_ERemoteDeviceStreamingPINRequired", 11 },
   { "k_ERemoteDeviceStreamingScreenLocked", 2 },
+  { "k_ERemoteDeviceStreamingSteamVRNotInstalled", 15 },
   { "k_ERemoteDeviceStreamingSuccess", 0 },
   { "k_ERemoteDeviceStreamingTransportUnavailable", 12 },
   { "k_ERemoteDeviceStreamingUnauthorized", 1 },
@@ -2650,9 +3030,9 @@ const ProtobufCEnumDescriptor eremote_device_streaming_result__descriptor =
   "ERemoteDeviceStreamingResult",
   "ERemoteDeviceStreamingResult",
   "",
-  15,
+  16,
   eremote_device_streaming_result__enum_values_by_number,
-  15,
+  16,
   eremote_device_streaming_result__enum_values_by_name,
   1,
   eremote_device_streaming_result__value_ranges,
