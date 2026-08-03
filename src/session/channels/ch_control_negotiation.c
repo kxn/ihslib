@@ -130,10 +130,14 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
     }
     if (videoCodec == IHS_StreamVideoCodecNone) {
         if (ihsConf.enableHevc) {
-            /* The host's codec list is the whole negotiation; nothing a client sends
-             * widens it. Say so, or HEVC looks enabled while H264 streams. */
-            IHS_SessionLog(session, IHS_LogLevelWarn, "Negotiation",
-                           "HEVC requested but the host offers none, falling back to H264");
+            /* Not a fallback verdict: a Windows host omitting HEVC from this
+             * announcement has been seen encoding HEVC anyway — our streaming
+             * request advertises supports_video_hevc, and the video channel's
+             * start message is what actually picks the codec. Warning that we
+             * are "falling back to H264" right before an HEVC decoder opens
+             * sends whoever reads the log down the wrong path. */
+            IHS_SessionLog(session, IHS_LogLevelInfo, "Negotiation",
+                           "HEVC absent from the host's announced codecs; the video start message decides");
         }
         for (int i = 0; i < message->n_supported_video_codecs; i++) {
             EStreamVideoCodec codec = message->supported_video_codecs[i];
