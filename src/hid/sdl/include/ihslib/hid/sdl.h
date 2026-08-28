@@ -85,3 +85,19 @@ bool IHS_HIDRefreshSDLGameControllers(IHS_Session *session);
  * @return
  */
 bool IHS_HIDResetSDLGameControllers(IHS_Session *session);
+
+/**
+ * Wire truth of the most recently submitted full-state HID report: the exact
+ * values packed onto the wire, not the live SDL device state. Diagnostics use
+ * this to distinguish "we sent a centered snapshot" from "the state we sent
+ * was stale".
+ */
+typedef struct IHS_HIDSDLLastSubmitted {
+    int16_t axes[6];
+    uint16_t buttons;
+    uint32_t flags;
+    /** Monotonic submission counter; 0 means nothing was submitted yet. */
+    uint64_t seq;
+} IHS_HIDSDLLastSubmitted;
+
+bool IHS_HIDSDLGetLastSubmittedReport(IHS_Session *session, IHS_HIDSDLLastSubmitted *out);

@@ -147,6 +147,17 @@ static bool ControlSendLocked(IHS_SessionChannelControl *control, EStreamControl
 }
 
 static bool ControlSendPendingHIDLocked(IHS_SessionChannelControl *control, bool force) {
+    /* Reclaim in-flight slots whose retransmission tracking was retired by the
+     * give-up window: their ACKs will never arrive, and without this the slot
+     * array leaks one entry per permanently-lost report until HID goes silent. */
+    while (control->hidInFlightCount > 0 &&
+           !IHS_RetransmissionIsTracked(&control->base.session->retransmission,
+                                        IHS_SessionChannelIdControl,
+                                        control->hidInFlightIds[0], 0)) {
+        memmove(control->hidInFlightIds, &control->hidInFlightIds[1],
+                (control->hidInFlightCount - 1) * sizeof(control->hidInFlightIds[0]));
+        control->hidInFlightCount--;
+    }
     if (!control->hidPendingValid ||
         (!force && control->hidInFlightCount >= IHS_CONTROL_HID_MAX_IN_FLIGHT)) {
         return true;

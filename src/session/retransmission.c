@@ -225,6 +225,21 @@ void IHS_RetransmissionNoteInitialSend(IHS_SessionRetransmission *retransmission
     IHS_MutexUnlock(retransmission->lock);
 }
 
+bool IHS_RetransmissionIsTracked(const IHS_SessionRetransmission *retransmission,
+                                 IHS_SessionChannelId channelId, uint16_t packetId,
+                                 int16_t fragmentId) {
+    IHS_MutexLock(retransmission->lock);
+    for (const IHS_RetransmissionPending *pending = retransmission->head; pending != NULL;
+         pending = pending->next) {
+        if (PacketIdentityMatches(&pending->packet.header, channelId, packetId, fragmentId)) {
+            IHS_MutexUnlock(retransmission->lock);
+            return true;
+        }
+    }
+    IHS_MutexUnlock(retransmission->lock);
+    return false;
+}
+
 size_t IHS_RetransmissionProcessAt(IHS_SessionRetransmission *retransmission, uint64_t nowMs,
                                    IHS_RetransmissionSendFunction send, void *context) {
     size_t dueCount = 0;

@@ -51,6 +51,9 @@ typedef struct IHS_HIDDeviceSDL {
         IHS_HIDStateSDL current;
         IHS_HIDStateSDL previous;
     } states;
+    /** Snapshot of the values packed into the most recent wire submission. */
+    IHS_HIDStateSDL lastSubmitted;
+    uint64_t lastSubmittedSeq;
 } IHS_HIDDeviceSDL;
 
 #define IHS_HID_SDL_BASE_REPORT_LEN ((size_t) sizeof(IHS_HIDStateSDL))

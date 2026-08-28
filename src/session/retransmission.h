@@ -55,6 +55,10 @@ void IHS_RetransmissionInit(IHS_SessionRetransmission *retransmission, IHS_Sessi
 
 void IHS_RetransmissionDeinit(IHS_SessionRetransmission *retransmission);
 
+bool IHS_RetransmissionIsTracked(const IHS_SessionRetransmission *retransmission,
+                                 IHS_SessionChannelId channelId, uint16_t packetId,
+                                 int16_t fragmentId);
+
 bool IHS_RetransmissionTrack(IHS_SessionRetransmission *retransmission,
                              const IHS_SessionPacket *packet, uint64_t nowMs);
 

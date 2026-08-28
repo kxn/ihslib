@@ -35,9 +35,13 @@
 #include "protobuf/remoteplay.pb-c.h"
 #include "protobuf/hiddevices.pb-c.h"
 
-/* Keep one progress lane available when an earlier full-state report reaches
- * the host but its ACK is lost. Superseded reports receive bounded gap filling. */
-#define IHS_CONTROL_HID_MAX_IN_FLIGHT 2
+/* Single in-flight HID report, matching the official client's serial sends:
+ * the host's ordered control window rejects or holds out-of-order reports, so
+ * concurrent in-flight reports risk reordered application. A lost report can
+ * no longer wedge the channel - the retransmission give-up (3 s) retires it
+ * and the in-flight slot is reclaimed, after which the pending report carries
+ * the newest full state. */
+#define IHS_CONTROL_HID_MAX_IN_FLIGHT 1
 
 typedef struct IHS_SessionChannelControl {
     IHS_SessionChannel base;
@@ -51,8 +55,8 @@ typedef struct IHS_SessionChannelControl {
     /** Latest complete input snapshot waiting behind the bounded HID window. */
     IHS_Buffer hidPending;
     bool hidPendingValid;
-    /** Two routine packets may be in flight so one missing ACK cannot stop all
-     * future full-state snapshots. Teardown may add a final neutral snapshot. */
+    /** Sent HID report ids awaiting ACK. Entries whose retransmission tracking
+     * was retired by the give-up window are reclaimed on the next send. */
     uint16_t hidInFlightIds[4];
     size_t hidInFlightCount;
     uint64_t hidSubmitted;

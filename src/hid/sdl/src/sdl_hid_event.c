@@ -62,6 +62,8 @@ bool IHS_HIDRefreshSDLGameControllers(IHS_Session *session) {
         size_t reportLen = IHS_HIDDeviceSDLWireReportLength(managed);
         IHS_HIDReportSDLPackWire(current, reportLen, &device->states.current);
         IHS_HIDDeviceReportReplaceWithFullForced((IHS_HIDDevice *) device, current, reportLen);
+        device->lastSubmitted = device->states.current;
+        device->lastSubmittedSeq++;
         device->states.previous = device->states.current;
         IHS_HIDDeviceUnlock(managed->device);
         queued = true;
@@ -71,6 +73,37 @@ bool IHS_HIDRefreshSDLGameControllers(IHS_Session *session) {
         return false;
     }
     return IHS_SessionHIDSendReport(session);
+}
+
+bool IHS_HIDSDLGetLastSubmittedReport(IHS_Session *session, IHS_HIDSDLLastSubmitted *out) {
+    if (session == NULL || session->hidManager == NULL || out == NULL) {
+        return false;
+    }
+    size_t count;
+    IHS_HIDManagedDevice **snapshot = IHS_HIDManagerSnapshotOpenDevices(session->hidManager,
+                                                                       &count);
+    bool found = false;
+    for (size_t i = 0; i < count; ++i) {
+        IHS_HIDManagedDevice *managed = snapshot[i];
+        if (!IHS_HIDDeviceIsSDL(managed->device)) {
+            continue;
+        }
+        IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) managed->device;
+        IHS_HIDDeviceLock(managed->device);
+        if (device->lastSubmittedSeq > 0) {
+            memcpy(out->axes, device->lastSubmitted.axes, sizeof(out->axes));
+            out->buttons = device->lastSubmitted.buttons;
+            out->flags = device->lastSubmitted.flags;
+            out->seq = device->lastSubmittedSeq;
+            found = true;
+        }
+        IHS_HIDDeviceUnlock(managed->device);
+        if (found) {
+            break;
+        }
+    }
+    free(snapshot);
+    return found;
 }
 
 bool IHS_HIDHandleSDLEvent(IHS_Session *session, const SDL_Event *event) {
