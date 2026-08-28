@@ -32,6 +32,7 @@
 
 #include <unistd.h>
 #include <assert.h>
+#include <signal.h>
 #include <stdio.h>
 
 #include "session/session_pri.h"
@@ -61,6 +62,20 @@ static void test_destroy_after_timer_starts_firing(void) {
     IHS_SessionDestroy(session);
 }
 
+static void test_threaded_disconnect_without_host_ack(void) {
+    IHS_Session *session = IHS_TestSessionCreate();
+    assert(IHS_SessionConnect(session));
+
+    // Let the receive/send workers initialize before asking the normal graceful
+    // disconnect path to exhaust its bounded StopRequest and transport timers.
+    usleep(20 * 1000);
+    alarm(4);
+    IHS_SessionDisconnect(session);
+    IHS_SessionThreadedJoin(session);
+    IHS_SessionDestroy(session);
+    alarm(0);
+}
+
 int main(void) {
     IHS_Init();
     for (int i = 0; i < 5; ++i) {
@@ -69,7 +84,8 @@ int main(void) {
     for (int i = 0; i < 5; ++i) {
         test_destroy_after_timer_starts_firing();
     }
+    test_threaded_disconnect_without_host_ack();
     IHS_Quit();
-    printf("disconnect-destroy UAF tests OK\n");
+    printf("disconnect lifecycle tests OK\n");
     return 0;
 }

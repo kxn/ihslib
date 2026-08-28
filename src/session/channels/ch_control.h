@@ -35,6 +35,10 @@
 #include "protobuf/remoteplay.pb-c.h"
 #include "protobuf/hiddevices.pb-c.h"
 
+/* Keep one progress lane available when an earlier full-state report reaches
+ * the host but its ACK is lost. Superseded reports receive bounded gap filling. */
+#define IHS_CONTROL_HID_MAX_IN_FLIGHT 2
+
 typedef struct IHS_SessionChannelControl {
     IHS_SessionChannel base;
     /** Serializes IHS_SessionChannelControlSend: it allocates a packet id and an
@@ -44,6 +48,18 @@ typedef struct IHS_SessionChannelControl {
     IHS_Mutex *sendLock;
     uint64_t sendEncryptSequence;
     uint64_t recvEncryptSequence;
+    /** Latest complete input snapshot waiting behind the bounded HID window. */
+    IHS_Buffer hidPending;
+    bool hidPendingValid;
+    /** Two routine packets may be in flight so one missing ACK cannot stop all
+     * future full-state snapshots. Teardown may add a final neutral snapshot. */
+    uint16_t hidInFlightIds[4];
+    size_t hidInFlightCount;
+    uint64_t hidSubmitted;
+    uint64_t hidCoalesced;
+    uint64_t hidSent;
+    uint64_t hidAcknowledged;
+    uint64_t hidSuperseded;
     IHS_SessionPacketsWindow *framePacketWindow;
     /** Set once the frame window overflowed, so we disconnect only once. */
     bool overflowed;
@@ -54,6 +70,15 @@ IHS_SessionChannel *IHS_SessionChannelControlCreate(IHS_Session *session);
 
 bool IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamControlMessage type,
                                    const ProtobufCMessage *message, int32_t packetId);
+
+/** Submit a complete CHID input-report snapshot. New snapshots replace the queued
+ * snapshot while an older one awaits ACK; packet IDs are allocated only when sent. */
+bool IHS_SessionChannelControlSubmitHIDReport(IHS_SessionChannel *channel,
+                                              const uint8_t *data, size_t dataLen);
+
+/** Commit a queued snapshot even if another HID snapshot is still in flight. Used
+ * only to order the final neutral controller state before StopRequest. */
+bool IHS_SessionChannelControlFlushPendingHID(IHS_SessionChannel *channel);
 
 void IHS_SessionChannelControlHandshake(IHS_SessionChannel *channel, bool networkTest);
 

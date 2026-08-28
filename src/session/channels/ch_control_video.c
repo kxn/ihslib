@@ -37,13 +37,24 @@ void IHS_SessionChannelControlOnVideo(IHS_SessionChannel *channel, EStreamContro
     IHS_Session *session = channel->session;
     switch (type) {
         case k_EStreamControlStartVideoData: {
-            IHS_SessionChannel *video = IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataVideo);
-            if (video) break;
             CStartVideoDataMsg *message = cstart_video_data_msg__unpack(NULL, payload->size,
                                                                         IHS_BufferPointer(payload));
             if (message == NULL) {
                 IHS_SessionLog(session, IHS_LogLevelWarn, "Video", "Malformed CStartVideoDataMsg");
                 break;
+            }
+            IHS_SessionLog(session, IHS_LogLevelInfo, "Video",
+                           "StartVideoData(channel=%u, codec=%d, size=%ux%u, codecData=%zu)",
+                           message->channel, message->has_codec ? message->codec : 0,
+                           message->has_width ? message->width : 0,
+                           message->has_height ? message->height : 0,
+                           message->has_codec_data ? message->codec_data.len : 0);
+            IHS_SessionChannel *video = IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataVideo);
+            if (video) {
+                IHS_SessionLog(session, IHS_LogLevelInfo, "Video",
+                               "Replacing active video channel old=%u new=%u",
+                               video->id, message->channel);
+                IHS_SessionChannelRemove(session, video->id);
             }
             video = IHS_SessionChannelDataVideoCreate(session, message);
             IHS_SessionChannelAdd(session, video);
@@ -52,7 +63,13 @@ void IHS_SessionChannelControlOnVideo(IHS_SessionChannel *channel, EStreamContro
         }
         case k_EStreamControlStopVideoData: {
             IHS_SessionChannel *video = IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataVideo);
-            if (!video) break;
+            if (!video) {
+                IHS_SessionLog(session, IHS_LogLevelInfo, "Video",
+                               "StopVideoData ignored: no active video channel");
+                break;
+            }
+            IHS_SessionLog(session, IHS_LogLevelInfo, "Video",
+                           "StopVideoData(channel=%u)", video->id);
             IHS_SessionChannelRemove(session, video->id);
             break;
         }

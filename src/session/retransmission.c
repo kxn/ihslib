@@ -1,216 +1,325 @@
 /*
- *  _____  _   _  _____  _  _  _
- * |_   _|| | | |/  ___|| |(_)| |     Steam
- *   | |  | |_| |\ `--. | | _ | |__     In-Home
- *   | |  |  _  | `--. \| || || '_ \      Streaming
- *  _| |_ | | | |/\__/ /| || || |_) |       Library
- *  \___/ \_| |_/\____/ |_||_||_.__/
- *
  * Copyright (c) 2022 Mariotaku <https://github.com/mariotaku>.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 3 of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
- *
+ * SPDX-License-Identifier: LGPL-3.0-or-later
  */
 
 #include "retransmission.h"
+
+#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
+
 #include "session_pri.h"
 
-#define RETRANSMISSION_INTERVAL 10
-#define RETRANSMISSION_ATTEMPTS 20
+#define RETRANSMISSION_TICK_MS 5
+#define RETRANSMISSION_INITIAL_MS 25
+#define RETRANSMISSION_MAX_MS 100
+#define RETRANSMISSION_SUPERSEDE_MIN_RETRIES 3
 
-/* Per-packet override of RETRANSMISSION_ATTEMPTS; 0 means use the default. */
-static inline unsigned int AttemptCap(const IHS_SessionPacketHeader *header) {
-    return header->maxRetransmit ? header->maxRetransmit : RETRANSMISSION_ATTEMPTS;
-}
-#define CANCELLED_RING_SIZE (sizeof(((IHS_SessionRetransmission *) 0)->cancelled) / \
-                             sizeof(((IHS_SessionRetransmission *) 0)->cancelled[0]))
-
-typedef struct IHS_QueueItem {
+struct IHS_RetransmissionPending {
     IHS_SessionPacket packet;
-    IHS_SessionRetransmission *retransmission;
-    bool cancelled;
-} PendingRetransmission;
+    uint64_t firstTrackedMs;
+    uint64_t lastSendMs;
+    uint64_t nextRetryMs;
+    uint32_t retryCount;
+    bool initialSent;
+    bool nackPending;
+    bool superseded;
+    IHS_RetransmissionPending *next;
+};
 
-typedef struct RetransmissionQuery {
-    IHS_SessionChannelId channelId;
-    uint16_t packetId;
-    uint16_t fragmentId;
-} RetransmissionQuery;
-
-static uint64_t RetransmissionTimerRun(int runCount, void *context);
-
-static void RetransmissionTimerEnd(void *context);
-
-static bool RetransmissionIdenticalPredicate(PendingRetransmission *item, void *context);
-
-static bool RetransmissionPacketPredicate(PendingRetransmission *item, void *context);
-
-void IHS_RetransmissionInit(IHS_SessionRetransmission *retransmission, IHS_Session *session) {
-    retransmission->session = session;
-    retransmission->lock = IHS_MutexCreate();
-    retransmission->queue = IHS_QueueCreate(sizeof(PendingRetransmission));
+static bool PacketIdentityMatches(const IHS_SessionPacketHeader *header,
+                                  IHS_SessionChannelId channelId, uint16_t packetId,
+                                  int16_t fragmentId) {
+    return header->channelId == channelId && header->packetId == packetId &&
+           header->fragmentId == fragmentId;
 }
 
-void IHS_RetransmissionDeinit(IHS_SessionRetransmission *retransmission) {
-    /* The session destroys its timers first, so every task has already run its end
-     * callback and drained itself out of this queue. Nothing left to destroy. */
-    IHS_MutexLock(retransmission->lock);
-    IHS_QueueDestroy(retransmission->queue, NULL, NULL);
-    IHS_MutexUnlock(retransmission->lock);
-    IHS_MutexDestroy(retransmission->lock);
+static void PacketClone(IHS_SessionPacket *dest, const IHS_SessionPacket *source) {
+    memset(dest, 0, sizeof(*dest));
+    dest->header = source->header;
+    dest->crc = source->crc;
+    IHS_SessionPacketBodyInitialize(&dest->body, dest->header.hasCrc);
+    IHS_BufferAppendMem(&dest->body, IHS_BufferPointer(&source->body), source->body.size);
 }
 
-bool IHS_RetransmissionQueue(IHS_SessionRetransmission *retransmission, IHS_SessionPacket *packet) {
-    assert(packet->body.data != NULL);
-    assert(packet->body.offset == IHS_PACKET_HEADER_SIZE);
-    if (packet->header.retransmitCount >= AttemptCap(&packet->header)) {
-        return false; /* RetransmissionTimerRun already warned */
-    }
-    if (packet->header.retransmitCount > 0) {
-        /* A twin whose predecessor was ACKed while this one was in the send queue.
-         * Drop it here, where it finally becomes visible to Cancel. */
-        IHS_MutexLock(retransmission->lock);
-        bool drop = false;
-        for (size_t i = 0; i < CANCELLED_RING_SIZE; i++) {
-            IHS_RetransmissionCancelled *c = &retransmission->cancelled[i];
-            if (c->valid && c->channelId == packet->header.channelId &&
-                c->packetId == packet->header.packetId && c->fragmentId == packet->header.fragmentId) {
-                c->valid = false;
-                drop = true;
-                break;
-            }
-        }
-        IHS_MutexUnlock(retransmission->lock);
-        if (drop) {
-            IHS_SessionLog(retransmission->session, IHS_LogLevelVerbose, "Retransmission",
-                           "Dropping cancelled Packet(channelId=%u, packetId=%u, fragmentId=%u)",
-                           packet->header.channelId, packet->header.packetId, packet->header.fragmentId);
-            return false;
-        }
-    }
-    PendingRetransmission *pending = IHS_QueueItemObtain(retransmission->queue);
-    pending->packet = *packet;
-    pending->retransmission = retransmission;
-    pending->packet.header.retransmitCount++;
-    IHS_BufferTransferOwnership(&packet->body, &pending->packet.body);
-    IHS_TimerTaskStart(retransmission->session->timers, RetransmissionTimerRun, RetransmissionTimerEnd,
-                       RETRANSMISSION_INTERVAL, pending);
-    IHS_MutexLock(retransmission->lock);
-    IHS_QueueAppend(retransmission->queue, pending);
-    IHS_MutexUnlock(retransmission->lock);
-    IHS_SessionLog(retransmission->session, IHS_LogLevelVerbose, "Retransmission",
-                   "Queued Packet(channelId=%u, packetId=%u, fragmentId=%u), retransmitCount=%u",
-                   pending->packet.header.channelId, pending->packet.header.packetId,
-                   pending->packet.header.fragmentId, pending->packet.header.retransmitCount);
-    return true;
+static void PendingDestroy(IHS_RetransmissionPending *pending) {
+    IHS_SessionPacketClear(&pending->packet, true);
+    free(pending);
 }
 
-bool IHS_RetransmissionCancel(IHS_SessionRetransmission *retransmission, IHS_SessionChannelId channelId,
-                              uint16_t packetId, uint16_t fragmentId) {
-    RetransmissionQuery query = {
-            .channelId = channelId,
-            .packetId = packetId,
-            .fragmentId = fragmentId,
-    };
-    /* Cancel every match, not just the first: a packet awaiting retransmission has two
-     * entries for a moment, since RetransmissionTimerRun re-queues it with
-     * retransmitCount+1 before RetransmissionTimerEnd removes the old entry. An ACK
-     * landing in that window used to leave one twin retransmitting to the limit.
-     *
-     * The timer thread owns every pending item: it alone frees them, from the task's
-     * end callback. So cancelling must not stop the task nor touch the item once the
-     * lock is dropped — an ACK arriving as the task expires would otherwise read
-     * match->task out of a pending that RetransmissionTimerEnd has already freed, and
-     * stop an IHS_TimerTask that died with it. Marking under the lock is enough: the
-     * next run sees the flag, sends nothing, and ends, freeing the item on the thread
-     * that owns it. Cost is one RETRANSMISSION_INTERVAL of lingering, not a segfault. */
-    bool cancelled = false;
-    IHS_MutexLock(retransmission->lock);
-    IHS_RetransmissionCancelled *slot = &retransmission->cancelled[retransmission->cancelledHead];
-    slot->channelId = channelId;
-    slot->packetId = packetId;
-    slot->fragmentId = fragmentId;
-    slot->valid = true;
-    retransmission->cancelledHead = (retransmission->cancelledHead + 1) % CANCELLED_RING_SIZE;
-    IHS_MutexUnlock(retransmission->lock);
-    for (;;) {
-        IHS_MutexLock(retransmission->lock);
-        PendingRetransmission *match = IHS_QueuePollBy(retransmission->queue, RetransmissionPacketPredicate, &query);
-        unsigned int retransmitCount = 0;
-        if (match != NULL) {
-            match->cancelled = true;
-            retransmitCount = match->packet.header.retransmitCount;
-        }
-        IHS_MutexUnlock(retransmission->lock);
-        if (match == NULL) {
-            break;
-        }
-        cancelled = true;
-        IHS_SessionLog(retransmission->session, IHS_LogLevelVerbose, "Retransmission",
-                       "Cancelling Packet(channelId=%u, packetId=%u, fragmentId=%u), retransmitCount=%u",
-                       channelId, packetId, fragmentId, retransmitCount);
-    }
-    return cancelled;
+static uint64_t RetryDelayMs(uint32_t retryCount) {
+    uint32_t shift = retryCount > 4 ? 4 : retryCount;
+    uint64_t delay = (uint64_t) RETRANSMISSION_INITIAL_MS << shift;
+    return delay < RETRANSMISSION_MAX_MS ? delay : RETRANSMISSION_MAX_MS;
+}
+
+static bool SendRetry(IHS_SessionPacket *packet, void *context) {
+    return IHS_SessionSendPacket(context, packet);
 }
 
 static uint64_t RetransmissionTimerRun(int runCount, void *context) {
     (void) runCount;
-    PendingRetransmission *pending = context;
-    IHS_SessionRetransmission *retransmission = pending->retransmission;
-    IHS_MutexLock(retransmission->lock);
-    bool cancelled = pending->cancelled;
-    IHS_MutexUnlock(retransmission->lock);
-    if (cancelled) {
-        return 0; /* ACKed: end the task, which frees the packet in the end callback */
-    }
-    IHS_SessionPacket *packet = &pending->packet;
-    bool again = packet->header.retransmitCount < AttemptCap(&packet->header);
-    if (!again) {
-        /* For default traffic, exhausting all attempts means a packet the peer
-         * never accepts, not mere loss — worth saying out loud. HID caps far
-         * lower on purpose (see ch_control.c), so its give-ups are routine. */
-        IHS_SessionLog(retransmission->session, IHS_LogLevelWarn, "Retransmission",
-                       "Giving up on Packet(channelId=%u, packetId=%u, fragmentId=%u) after %u attempts",
-                       packet->header.channelId, packet->header.packetId, packet->header.fragmentId,
-                       AttemptCap(&packet->header));
-    }
-    IHS_SessionQueuePacket(retransmission->session, packet, again);
-    assert(packet->body.data == NULL);
-    return 0;
+    IHS_SessionRetransmission *retransmission = context;
+    IHS_RetransmissionProcessAt(retransmission, IHS_TimerNow(), SendRetry,
+                                retransmission->session);
+    return RETRANSMISSION_TICK_MS;
 }
 
 static void RetransmissionTimerEnd(void *context) {
-    PendingRetransmission *pending = context;
-    IHS_SessionRetransmission *retransmission = pending->retransmission;
-    IHS_SessionLog(retransmission->session, IHS_LogLevelVerbose, "Retransmission",
-                   "Timer ended for Packet(channelId=%u, packetId=%u, fragmentId=%u), retransmitCount=%u",
-                   pending->packet.header.channelId, pending->packet.header.packetId, pending->packet.header.fragmentId,
-                   pending->packet.header.retransmitCount);
+    IHS_SessionRetransmission *retransmission = context;
+    retransmission->timer = NULL;
+}
+
+void IHS_RetransmissionInit(IHS_SessionRetransmission *retransmission, IHS_Session *session) {
+    memset(retransmission, 0, sizeof(*retransmission));
+    retransmission->session = session;
+    retransmission->lock = IHS_MutexCreate();
+    if (session != NULL && session->timers != NULL) {
+        retransmission->timer = IHS_TimerTaskStart(session->timers, RetransmissionTimerRun,
+                                                   RetransmissionTimerEnd,
+                                                   RETRANSMISSION_TICK_MS, retransmission);
+    }
+}
+
+void IHS_RetransmissionDeinit(IHS_SessionRetransmission *retransmission) {
     IHS_MutexLock(retransmission->lock);
-    IHS_QueuePollBy(retransmission->queue, RetransmissionIdenticalPredicate, pending);
+    IHS_RetransmissionPending *pending = retransmission->head;
+    retransmission->head = NULL;
+    retransmission->stats.outstanding = 0;
     IHS_MutexUnlock(retransmission->lock);
-    IHS_SessionPacketClear(&pending->packet, true);
-    IHS_QueueItemFree(pending);
+    while (pending != NULL) {
+        IHS_RetransmissionPending *next = pending->next;
+        PendingDestroy(pending);
+        pending = next;
+    }
+    IHS_MutexDestroy(retransmission->lock);
 }
 
-static bool RetransmissionIdenticalPredicate(PendingRetransmission *item, void *context) {
-    return item == context;
+bool IHS_RetransmissionTrack(IHS_SessionRetransmission *retransmission,
+                             const IHS_SessionPacket *packet, uint64_t nowMs) {
+    assert(packet->body.data != NULL);
+    assert(packet->body.offset == IHS_PACKET_HEADER_SIZE);
+
+    IHS_RetransmissionPending *pending = calloc(1, sizeof(*pending));
+    if (pending == NULL) {
+        return false;
+    }
+    PacketClone(&pending->packet, packet);
+    pending->firstTrackedMs = nowMs;
+    /* Registration precedes queue admission so a fast ACK cannot race past us.
+     * Do not arm retry here: the send queue may take longer than the retry delay,
+     * which used to let a retransmission overtake the initial datagram. */
+    pending->nextRetryMs = UINT64_MAX;
+
+    IHS_MutexLock(retransmission->lock);
+    for (IHS_RetransmissionPending *item = retransmission->head; item != NULL;
+         item = item->next) {
+        if (PacketIdentityMatches(&item->packet.header, packet->header.channelId,
+                                  packet->header.packetId, packet->header.fragmentId)) {
+            IHS_MutexUnlock(retransmission->lock);
+            PendingDestroy(pending);
+            return false;
+        }
+    }
+    pending->next = retransmission->head;
+    retransmission->head = pending;
+    retransmission->stats.tracked++;
+    retransmission->stats.outstanding++;
+    IHS_MutexUnlock(retransmission->lock);
+    return true;
 }
 
-static bool RetransmissionPacketPredicate(PendingRetransmission *item, void *context) {
-    RetransmissionQuery *query = context;
-    return item->packet.header.channelId == query->channelId &&
-           item->packet.header.packetId == query->packetId &&
-           item->packet.header.fragmentId == query->fragmentId;
+bool IHS_RetransmissionAcknowledge(IHS_SessionRetransmission *retransmission,
+                                   IHS_SessionChannelId channelId, uint16_t packetId,
+                                   int16_t fragmentId, uint64_t nowMs) {
+    IHS_MutexLock(retransmission->lock);
+    IHS_RetransmissionPending **link = &retransmission->head;
+    while (*link != NULL && !PacketIdentityMatches(&(*link)->packet.header, channelId,
+                                                   packetId, fragmentId)) {
+        link = &(*link)->next;
+    }
+    IHS_RetransmissionPending *pending = *link;
+    if (pending != NULL) {
+        *link = pending->next;
+        retransmission->stats.acknowledged++;
+        retransmission->stats.outstanding--;
+        uint64_t latency = nowMs >= pending->firstTrackedMs ? nowMs - pending->firstTrackedMs : 0;
+        if (latency > retransmission->stats.maxAckLatencyMs) {
+            retransmission->stats.maxAckLatencyMs = latency;
+        }
+    }
+    IHS_MutexUnlock(retransmission->lock);
+    if (pending != NULL) {
+        PendingDestroy(pending);
+        return true;
+    }
+    return false;
+}
+
+bool IHS_RetransmissionSupersede(IHS_SessionRetransmission *retransmission,
+                                 IHS_SessionChannelId channelId, uint16_t packetId,
+                                 int16_t fragmentId) {
+    bool found = false;
+    IHS_MutexLock(retransmission->lock);
+    for (IHS_RetransmissionPending *pending = retransmission->head; pending != NULL;
+         pending = pending->next) {
+        if (PacketIdentityMatches(&pending->packet.header, channelId, packetId, fragmentId)) {
+            pending->superseded = true;
+            found = true;
+            break;
+        }
+    }
+    IHS_MutexUnlock(retransmission->lock);
+    return found;
+}
+
+bool IHS_RetransmissionNack(IHS_SessionRetransmission *retransmission,
+                            IHS_SessionChannelId channelId, uint16_t packetId,
+                            int16_t fragmentId, uint64_t nowMs) {
+    bool found = false;
+    IHS_MutexLock(retransmission->lock);
+    for (IHS_RetransmissionPending *pending = retransmission->head; pending != NULL;
+         pending = pending->next) {
+        if (PacketIdentityMatches(&pending->packet.header, channelId, packetId, fragmentId)) {
+            if (pending->initialSent) {
+                pending->nextRetryMs = nowMs;
+            } else {
+                pending->nackPending = true;
+            }
+            retransmission->stats.nacks++;
+            found = true;
+            break;
+        }
+    }
+    IHS_MutexUnlock(retransmission->lock);
+    return found;
+}
+
+void IHS_RetransmissionNoteInitialSend(IHS_SessionRetransmission *retransmission,
+                                       const IHS_SessionPacketHeader *header, bool sent,
+                                       uint64_t nowMs) {
+    IHS_MutexLock(retransmission->lock);
+    for (IHS_RetransmissionPending *pending = retransmission->head; pending != NULL;
+         pending = pending->next) {
+        if (PacketIdentityMatches(&pending->packet.header, header->channelId,
+                                  header->packetId, header->fragmentId)) {
+            pending->initialSent = true;
+            pending->lastSendMs = nowMs;
+            if (!sent || pending->nackPending) {
+                pending->nextRetryMs = nowMs;
+            } else {
+                pending->nextRetryMs = nowMs + RETRANSMISSION_INITIAL_MS;
+            }
+            if (!sent) {
+                retransmission->stats.sendFailures++;
+            }
+            break;
+        }
+    }
+    IHS_MutexUnlock(retransmission->lock);
+}
+
+size_t IHS_RetransmissionProcessAt(IHS_SessionRetransmission *retransmission, uint64_t nowMs,
+                                   IHS_RetransmissionSendFunction send, void *context) {
+    size_t dueCount = 0;
+    IHS_RetransmissionPending *retired = NULL;
+    IHS_MutexLock(retransmission->lock);
+
+    IHS_RetransmissionPending **link = &retransmission->head;
+    while (*link != NULL) {
+        IHS_RetransmissionPending *pending = *link;
+        if (pending->superseded &&
+            pending->retryCount >= RETRANSMISSION_SUPERSEDE_MIN_RETRIES) {
+            *link = pending->next;
+            pending->next = retired;
+            retired = pending;
+            retransmission->stats.superseded++;
+            retransmission->stats.outstanding--;
+            continue;
+        }
+        link = &pending->next;
+    }
+
+    for (IHS_RetransmissionPending *pending = retransmission->head; pending != NULL;
+         pending = pending->next) {
+        if (pending->initialSent && pending->nextRetryMs <= nowMs) {
+            dueCount++;
+        }
+    }
+    if (dueCount == 0) {
+        IHS_MutexUnlock(retransmission->lock);
+        while (retired != NULL) {
+            IHS_RetransmissionPending *next = retired->next;
+            PendingDestroy(retired);
+            retired = next;
+        }
+        return 0;
+    }
+
+    IHS_SessionPacket *due = calloc(dueCount, sizeof(*due));
+    if (due == NULL) {
+        IHS_MutexUnlock(retransmission->lock);
+        while (retired != NULL) {
+            IHS_RetransmissionPending *next = retired->next;
+            PendingDestroy(retired);
+            retired = next;
+        }
+        return 0;
+    }
+    size_t index = 0;
+    for (IHS_RetransmissionPending *pending = retransmission->head; pending != NULL;
+         pending = pending->next) {
+        if (!pending->initialSent || pending->nextRetryMs > nowMs) {
+            continue;
+        }
+        PacketClone(&due[index], &pending->packet);
+        pending->retryCount++;
+        due[index].header.retransmitCount = pending->retryCount > UINT8_MAX
+                                           ? UINT8_MAX : (uint8_t) pending->retryCount;
+        pending->lastSendMs = nowMs;
+        pending->nextRetryMs = nowMs + RetryDelayMs(pending->retryCount);
+        retransmission->stats.retries++;
+        index++;
+    }
+    IHS_MutexUnlock(retransmission->lock);
+
+    while (retired != NULL) {
+        IHS_RetransmissionPending *next = retired->next;
+        PendingDestroy(retired);
+        retired = next;
+    }
+
+    for (index = 0; index < dueCount; index++) {
+        bool sent = send(&due[index], context);
+        if (!sent) {
+            IHS_MutexLock(retransmission->lock);
+            retransmission->stats.sendFailures++;
+            IHS_MutexUnlock(retransmission->lock);
+        }
+        IHS_SessionPacketClear(&due[index], true);
+    }
+    free(due);
+    return dueCount;
+}
+
+void IHS_RetransmissionGetStats(IHS_SessionRetransmission *retransmission,
+                                IHS_RetransmissionStats *stats, uint64_t nowMs) {
+    IHS_MutexLock(retransmission->lock);
+    *stats = retransmission->stats;
+    uint64_t oldest = nowMs;
+    bool found = false;
+    for (IHS_RetransmissionPending *pending = retransmission->head; pending != NULL;
+         pending = pending->next) {
+        if (!found || pending->firstTrackedMs < oldest) {
+            oldest = pending->firstTrackedMs;
+            found = true;
+            stats->oldestChannelId = pending->packet.header.channelId;
+            stats->oldestPacketId = pending->packet.header.packetId;
+            stats->oldestFragmentId = pending->packet.header.fragmentId;
+            stats->oldestRetryCount = pending->retryCount;
+        }
+    }
+    stats->oldestOutstandingMs = found && nowMs >= oldest ? nowMs - oldest : 0;
+    IHS_MutexUnlock(retransmission->lock);
 }

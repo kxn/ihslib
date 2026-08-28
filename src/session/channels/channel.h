@@ -113,4 +113,5 @@ bool IHS_SessionChannelQueuePacket(IHS_SessionChannel *channel, IHS_SessionPacke
 
 bool IHS_SessionChannelQueueFrame(IHS_SessionChannel *channel, IHS_SessionFrame *frame, bool enableRetransmit);
 
-void IHS_SessionChannelPacketAck(IHS_SessionChannel *channel, int32_t packetId, bool ok);
+void IHS_SessionChannelPacketAck(IHS_SessionChannel *channel, int32_t packetId,
+                                 int16_t fragmentId, bool ok);

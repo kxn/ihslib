@@ -155,7 +155,10 @@ static int DeviceStartInputReports(IHS_HIDDevice *device, size_t length) {
     (void) length;
     IHS_HIDDeviceSDL *sdl = (IHS_HIDDeviceSDL *) device;
     IHS_HIDDeviceLock(device);
-    IHS_HIDDeviceReportAddFull(device, (const uint8_t *) &sdl->states.current, 48);
+    uint8_t current[IHS_HID_SDL_WIRE_REPORT_MAX];
+    size_t reportLen = IHS_HIDDeviceSDLWireReportLength(device->managed);
+    IHS_HIDReportSDLPackWire(current, reportLen, &sdl->states.current);
+    IHS_HIDDeviceReportAddFullForced(device, current, reportLen);
     sdl->states.previous = sdl->states.current;
     IHS_HIDDeviceUnlock(device);
     return 0;
@@ -164,7 +167,10 @@ static int DeviceStartInputReports(IHS_HIDDevice *device, size_t length) {
 static int DeviceRequestFullReport(IHS_HIDDevice *device) {
     IHS_HIDDeviceSDL *sdl = (IHS_HIDDeviceSDL *) device;
     IHS_HIDDeviceLock(device);
-    IHS_HIDDeviceReportAddFull(device, (const uint8_t *) &sdl->states.current, 48);
+    uint8_t current[IHS_HID_SDL_WIRE_REPORT_MAX];
+    size_t reportLen = IHS_HIDDeviceSDLWireReportLength(device->managed);
+    IHS_HIDReportSDLPackWire(current, reportLen, &sdl->states.current);
+    IHS_HIDDeviceReportAddFullForced(device, current, reportLen);
     sdl->states.previous = sdl->states.current;
     IHS_HIDDeviceUnlock(device);
     return 0;

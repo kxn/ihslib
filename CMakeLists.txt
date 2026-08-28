@@ -21,11 +21,30 @@ option(IHSLIB_SANITIZE_THREAD "Link Thread Sanitizer (mutually exclusive with ad
 
 find_package(PkgConfig REQUIRED)
 
-# SDL3 only: the SDL2 threading backend was replaced by ihs_thread_posix.c, and
-# the HID provider is ported to SDL3. Linking both SDLs into one process
-# cross-binds their identical SDL_* symbols and breaks threads.
-if (NOT SDL3_FOUND)
-    pkg_check_modules(SDL3 sdl3)
+option(IHSLIB_HID_SDL_USE_SDL2 "Build SDL HID provider against SDL2 instead of SDL3" OFF)
+
+# Default is SDL3 upstream. Switch portlibs currently provide SDL2 but not SDL3,
+# so the project can opt into an SDL2 compatibility build of the same provider.
+if (IHSLIB_HID_SDL_USE_SDL2)
+    if (NOT SDL2_FOUND)
+        pkg_check_modules(SDL2 sdl2)
+    endif ()
+    if (NOT DEFINED IHSLIB_HID_SDL)
+        set(IHSLIB_HID_SDL ${SDL2_FOUND} CACHE BOOL "Build SDL HID provider")
+    endif ()
+    if (IHSLIB_HID_SDL AND NOT SDL2_FOUND)
+        message(FATAL_ERROR "IHSLIB_HID_SDL_USE_SDL2 requires SDL2")
+    endif ()
+else ()
+    if (NOT SDL3_FOUND)
+        pkg_check_modules(SDL3 sdl3)
+    endif ()
+    if (NOT DEFINED IHSLIB_HID_SDL)
+        set(IHSLIB_HID_SDL ${SDL3_FOUND} CACHE BOOL "Build SDL HID provider")
+    endif ()
+    if (IHSLIB_HID_SDL AND NOT SDL3_FOUND)
+        message(FATAL_ERROR "IHSLIB_HID_SDL requires SDL3")
+    endif ()
 endif ()
 
 if (NOT PROTOBUF_C_FOUND)

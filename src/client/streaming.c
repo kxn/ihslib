@@ -42,9 +42,13 @@ static uint64_t StreamingRequestTimer(int runCount, void *context);
 static void StreamingRequestCleanup(void *context);
 
 bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host, const IHS_StreamingRequest *request) {
+    IHS_BaseLock(&client->base);
     if (client->taskHandles.streaming) {
+        IHS_BaseUnlock(&client->base);
         return false;
     }
+    IHS_BaseUnlock(&client->base);
+
     IHS_ClientLog(client, IHS_LogLevelInfo, "Client", "Begin sending streaming request to host %s", host->hostname);
     IHS_StreamingState *state = malloc(sizeof(IHS_StreamingState));
     state->client = client;
@@ -53,9 +57,20 @@ bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host, co
     state->requestId = IHS_CryptoRandomUInt32();
     state->lastMsgType = k_ERemoteClientBroadcastMsgDiscovery;
     state->lastMsgTime = IHS_TimerNow();
+    IHS_TimerTask *task = IHS_TimerTaskStart(client->timers, StreamingRequestTimer, StreamingRequestCleanup,
+                                             25, state);
+    if (task == NULL) {
+        free(state);
+        return false;
+    }
+
     IHS_BaseLock(&client->base);
-    client->taskHandles.streaming = IHS_TimerTaskStart(client->timers, StreamingRequestTimer, StreamingRequestCleanup,
-                                                       0, state);
+    if (client->taskHandles.streaming) {
+        IHS_BaseUnlock(&client->base);
+        IHS_TimerTaskStop(task);
+        return false;
+    }
+    client->taskHandles.streaming = task;
     IHS_BaseUnlock(&client->base);
     return true;
 }

@@ -181,6 +181,7 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
 
     PROTOBUF_C_SET_VALUE(clientConfig, desired_resolution_x, (int32_t) ihsConf.maxWidth);
     PROTOBUF_C_SET_VALUE(clientConfig, desired_resolution_y, (int32_t) ihsConf.maxHeight);
+    PROTOBUF_C_SET_VALUE(clientConfig, enable_input_streaming, true);
     PROTOBUF_C_SET_VALUE(clientConfig, enable_hardware_decoding, true);
     PROTOBUF_C_SET_VALUE(clientConfig, enable_performance_overlay, true);
     if (ihsConf.enableAudio) {

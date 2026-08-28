@@ -37,6 +37,8 @@
 static int ComputeDelta(const uint8_t *previous, const uint8_t *current, size_t inputLen, size_t reportLen,
                         uint8_t *delta);
 
+static void ClearMessage(IHS_HIDReportHolder *holder, bool promotePending);
+
 void IHS_HIDReportHolderInit(IHS_HIDReportHolder *holder, uint32_t deviceId) {
     chidmessage_from_remote__device_input_reports__device_input_report__init(&holder->report);
     PROTOBUF_C_SET_VALUE(holder->report, device, deviceId);
@@ -86,11 +88,12 @@ void IHS_HIDReportHolderSetReportLength(IHS_HIDReportHolder *holder, size_t repo
     holder->reportLength = reportLen;
 }
 
-void IHS_HIDReportHolderAddFull(IHS_HIDReportHolder *holder, const uint8_t *current, size_t len) {
+static void AddFull(IHS_HIDReportHolder *holder, const uint8_t *current, size_t len, bool force) {
     assert(holder->reportLength >= len);
     /* A full report is self-contained, so one that repeats the last flushed state is
-     * pure noise. Safe to drop: it breaks no chain. */
-    if (SameAsLastSent(holder, current, len)) {
+     * normally pure noise. Forced callers use it as an explicit host-requested refresh
+     * or low-rate heartbeat, so those bypass the byte-identical drop. */
+    if (!force && SameAsLastSent(holder, current, len)) {
         return;
     }
     Stash(holder, current, len);
@@ -107,6 +110,20 @@ void IHS_HIDReportHolderAddFull(IHS_HIDReportHolder *holder, const uint8_t *curr
 
     IHS_ArrayListAppend(&holder->reportOffsets, &offset);
     holder->report.n_reports = holder->reportItems.size;
+}
+
+void IHS_HIDReportHolderAddFull(IHS_HIDReportHolder *holder, const uint8_t *current, size_t len) {
+    AddFull(holder, current, len, false);
+}
+
+void IHS_HIDReportHolderAddFullForced(IHS_HIDReportHolder *holder, const uint8_t *current, size_t len) {
+    AddFull(holder, current, len, true);
+}
+
+void IHS_HIDReportHolderReplaceWithFullForced(IHS_HIDReportHolder *holder,
+                                              const uint8_t *current, size_t len) {
+    ClearMessage(holder, false);
+    AddFull(holder, current, len, true);
 }
 
 void IHS_HIDReportHolderAddDelta(IHS_HIDReportHolder *holder, const uint8_t *previous, const uint8_t *current,
@@ -168,6 +185,10 @@ IHS_HIDDeviceReportMessage *IHS_HIDReportHolderGetMessage(IHS_HIDReportHolder *h
 }
 
 void IHS_HIDReportHolderResetMessage(IHS_HIDReportHolder *holder) {
+    ClearMessage(holder, true);
+}
+
+static void ClearMessage(IHS_HIDReportHolder *holder, bool promotePending) {
     holder->report.n_reports = 0;
     holder->report.reports = NULL;
     IHS_BufferClear(&holder->dataBuffer, false);
@@ -176,11 +197,13 @@ void IHS_HIDReportHolderResetMessage(IHS_HIDReportHolder *holder) {
     IHS_ArrayListClear(&holder->reportOffsets);
     // Promote the most recent pending state to lastSent so the next dedup check
     // compares against what just went out on the wire.
-    if (holder->pendingCurrentLen > 0) {
+    if (promotePending && holder->pendingCurrentLen > 0) {
         uint8_t *swap = holder->lastSent;
         holder->lastSent = holder->pendingCurrent;
         holder->lastSentLen = holder->pendingCurrentLen;
         holder->pendingCurrent = swap;
+        holder->pendingCurrentLen = 0;
+    } else if (!promotePending) {
         holder->pendingCurrentLen = 0;
     }
 }

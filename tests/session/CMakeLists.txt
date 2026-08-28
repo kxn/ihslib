@@ -17,5 +17,8 @@ ihs_add_test(frame_stats test_frame_stats.c)
 ihs_add_test(window_orphan_frags window_orphan_frags.c)
 ihs_add_test(window_head_gap window_head_gap.c)
 ihs_add_test(window_join_midmessage window_join_midmessage.c)
+ihs_add_test(retransmission_state_machine retransmission_state_machine.c)
+ihs_add_test(control_hid_admission control_hid_admission.c)
+target_link_libraries(ihstest_control_hid_admission PRIVATE ihs-test-session)
 
 add_subdirectory(video)

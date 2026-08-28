@@ -26,6 +26,7 @@
 #include "ihslib/net.h"
 
 #include <arpa/inet.h>
+#include <sys/socket.h>
 #include <string.h>
 #include <assert.h>
 

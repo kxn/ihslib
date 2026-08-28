@@ -24,6 +24,7 @@
  */
 #include "sdl_hid_common.h"
 #include "sdl_hid_utils.h"
+#include "session/session_pri.h"
 
 typedef enum GetFeatureReportCommand {
     GetFeatureReportGetPowerLevel = 0x02,
@@ -130,7 +131,8 @@ int IHS_HIDDeviceSDLGetFeatureReport(IHS_HIDDevice *device, const uint8_t *repor
             // contents through the wire report (DeviceFeatureReport.controllerType below).
             EControllerType controllerType = k_ControllerTypeUnknown;
             if (!xinput) {
-                playerIndex = SDL_GetGamepadPlayerIndex(sdl->controller);
+                playerIndex = sdl->playerIndex >= 0 ? sdl->playerIndex :
+                              SDL_GetGamepadPlayerIndex(sdl->controller);
                 switch (SDL_GetGamepadType(sdl->controller)) {
                     case SDL_GAMEPAD_TYPE_XBOX360:
                         controllerType = k_ControllerTypeXBox360Controller;
@@ -173,6 +175,11 @@ int IHS_HIDDeviceSDLGetFeatureReport(IHS_HIDDevice *device, const uint8_t *repor
                     .controllerType = controllerType,
                     .hid = IsHIDAPIDevice(&guid),
             };
+            IHS_HIDDeviceLog(device, IHS_LogLevelDebug, "HID.SDL",
+                             "FeatureCaps(xinput=%u, hid=%u, type=%d, player=%d, guid14=0x%02x)",
+                             report.xinput ? 1U : 0U, report.hid ? 1U : 0U,
+                             (int)report.controllerType, (int)report.playerIndex,
+                             (unsigned)guid.data[14]);
             IHS_BufferWriteMem(dest, 0, reportNumber, 1);
             IHS_BufferWriteMem(dest, 1, (const unsigned char *) &report, 20);
             break;

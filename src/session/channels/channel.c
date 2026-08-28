@@ -119,9 +119,9 @@ void IHS_SessionChannelRemove(IHS_Session *session, IHS_SessionChannelId channel
     if (remaining > 0) {
         memmove(&session->channels[channelIndex], &session->channels[channelIndex + 1],
                 remaining * sizeof(IHS_SessionChannel *));
-    } else {
-        session->numChannels--;
     }
+    session->numChannels--;
+    session->channels[session->numChannels] = NULL;
 }
 
 void IHS_SessionChannelReceivedPacket(IHS_SessionChannel *channel, IHS_SessionPacket *packet) {
@@ -197,10 +197,12 @@ bool IHS_SessionChannelQueueFrame(IHS_SessionChannel *channel, IHS_SessionFrame 
     return ret;
 }
 
-void IHS_SessionChannelPacketAck(IHS_SessionChannel *channel, int32_t packetId, bool ok) {
+void IHS_SessionChannelPacketAck(IHS_SessionChannel *channel, int32_t packetId,
+                                 int16_t fragmentId, bool ok) {
     IHS_SessionPacket packet;
     IHS_SessionPacketType type = ok ? IHS_SessionPacketTypeACK : IHS_SessionPacketTypeNACK;
     IHS_SessionChannelInitializePacket(channel, &packet, type, true, packetId);
+    packet.header.fragmentId = fragmentId;
     IHS_BufferAppendUInt32LE(&packet.body, IHS_SessionPacketTimestamp());
     IHS_SessionChannelQueuePacket(channel, &packet, false);
     IHS_SessionPacketClear(&packet, true);

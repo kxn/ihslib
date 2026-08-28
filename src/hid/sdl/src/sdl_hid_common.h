@@ -29,13 +29,14 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include <SDL3/SDL.h>
 
 #include "hid/device.h"
 
 #include "sdl_hid_report.h"
-#include "hid/report.h"
+#include "hid/manager.h"
 
 typedef struct IHS_HIDDeviceSDL {
     IHS_HIDDevice base;
@@ -51,6 +52,24 @@ typedef struct IHS_HIDDeviceSDL {
         IHS_HIDStateSDL previous;
     } states;
 } IHS_HIDDeviceSDL;
+
+#define IHS_HID_SDL_BASE_REPORT_LEN ((size_t) sizeof(IHS_HIDStateSDL))
+#define IHS_HID_SDL_WIRE_REPORT_MAX 256U
+
+static inline size_t IHS_HIDDeviceSDLWireReportLength(const IHS_HIDManagedDevice *managed) {
+    size_t requested = managed != NULL ? managed->reportHolder.reportLength : 0;
+    if (requested < IHS_HID_SDL_BASE_REPORT_LEN ||
+        requested > IHS_HID_SDL_WIRE_REPORT_MAX) {
+        return IHS_HID_SDL_BASE_REPORT_LEN;
+    }
+    return requested;
+}
+
+static inline void IHS_HIDReportSDLPackWire(uint8_t *dest, size_t len,
+                                            const IHS_HIDStateSDL *state) {
+    memset(dest, 0, len);
+    memcpy(dest, state, IHS_HID_SDL_BASE_REPORT_LEN);
+}
 
 IHS_HIDDevice *IHS_HIDDeviceSDLCreate(IHS_HIDProvider *provider, SDL_Gamepad *controller, bool managed);
 

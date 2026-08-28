@@ -52,7 +52,9 @@ bool IHS_ClientAuthorizationRequest(IHS_Client *client, const IHS_HostInfo *host
     state->client = client;
     state->host = *host;
     strncpy(state->deviceName, client->base.deviceName, sizeof(state->deviceName) - 1);
+    state->deviceName[sizeof(state->deviceName) - 1] = '\0';
     strncpy(state->pin, pin, sizeof(state->pin) - 1);
+    state->pin[sizeof(state->pin) - 1] = '\0';
     IHS_BaseLock(&client->base);
     client->taskHandles.authorization = IHS_TimerTaskStart(client->timers, AuthorizationRequestTimer,
                                                            AuthorizationRequestCleanup, 0, state);
@@ -81,11 +83,28 @@ void IHS_ClientAuthorizationCallback(IHS_Client *client, const IHS_SocketAddress
     IHS_UNUSED(address);
     IHS_TimerTask *task = client->taskHandles.authorization;
     if (!task) return;
+    if (header->msg_type == k_ERemoteDeviceAuthorizationConfirmed) {
+        CMsgRemoteDeviceAuthorizationConfirmed *confirmed =
+                (CMsgRemoteDeviceAuthorizationConfirmed *) message;
+        IHS_ClientLog(client, IHS_LogLevelInfo, "Authorization",
+                      "Authorization confirmed result=%d",
+                      confirmed ? (int) confirmed->result : -1);
+        return;
+    }
     if (header->msg_type != k_ERemoteDeviceAuthorizationResponse) {
         return;
     }
     IHS_AuthorizationState *state = IHS_TimerTaskGetContext(task);
     CMsgRemoteDeviceAuthorizationResponse *resp = (CMsgRemoteDeviceAuthorizationResponse *) message;
+    if (resp == NULL) {
+        IHS_ClientLog(client, IHS_LogLevelWarn, "Authorization", "Malformed authorization response");
+        return;
+    }
+    IHS_ClientLog(client, IHS_LogLevelInfo, "Authorization",
+                  "Authorization response result=%d steamid=%llu auth_key=%zu device_token=%zu",
+                  (int) resp->result, (unsigned long long) resp->steamid,
+                  resp->has_auth_key ? resp->auth_key.len : 0,
+                  resp->has_device_token ? resp->device_token.len : 0);
     switch (resp->result) {
         case k_ERemoteDeviceAuthorizationInProgress:
             if (client->callbacks.authorization && client->callbacks.authorization->progress) {

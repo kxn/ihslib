@@ -71,6 +71,15 @@ void IHS_HIDProviderSDLDestroy(IHS_HIDProvider *provider);
 bool IHS_HIDHandleSDLEvent(IHS_Session *session, const SDL_Event *event);
 
 /**
+ * Force-send the current SDL controller state for all open SDL game controllers
+ * whose host has started input reports. Intended for low-rate idle refreshes; do
+ * not call per frame.
+ * @param session
+ * @return true if a report was queued and sent
+ */
+bool IHS_HIDRefreshSDLGameControllers(IHS_Session *session);
+
+/**
  * Reset input state for all SDL game controllers
  * @param session
  * @return

@@ -125,7 +125,7 @@ bool IHS_SessionSendPacket(IHS_Session *session, IHS_SessionPacket *packet);
  * Add packet to send queue
  * @param session Session instance
  * @param packet Packet
- * @param retransmit If true, the packet will be retransmitted 10 times before cancellation
+ * @param retransmit If true, retain and retry the packet until its exact ACK arrives
  * @return
  */
 bool IHS_SessionQueuePacket(IHS_Session *session, IHS_SessionPacket *packet, bool retransmit);
@@ -144,6 +144,3 @@ bool IHS_SessionInputEnabled(IHS_Session *session);
  * check this — it accepts an early packet, then abandons the session.
  */
 bool IHS_SessionStreaming(IHS_Session *session);
-
-bool IHS_SessionCancelRetransmission(IHS_Session *session, IHS_SessionChannelId channelId, uint16_t packetId,
-                                     uint16_t fragmentId);

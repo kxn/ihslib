@@ -1,60 +1,80 @@
 /*
- *  _____  _   _  _____  _  _  _
- * |_   _|| | | |/  ___|| |(_)| |     Steam
- *   | |  | |_| |\ `--. | | _ | |__     In-Home
- *   | |  |  _  | `--. \| || || '_ \      Streaming
- *  _| |_ | | | |/\__/ /| || || |_) |       Library
- *  \___/ \_| |_/\____/ |_||_||_.__/
- *
  * Copyright (c) 2022 Mariotaku <https://github.com/mariotaku>.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 3 of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
- *
+ * SPDX-License-Identifier: LGPL-3.0-or-later
  */
 
 #pragma once
 
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
 #include "ihs_thread.h"
-#include "ihs_queue.h"
 #include "ihs_timer.h"
 #include "packet.h"
 
 typedef struct IHS_Session IHS_Session;
+typedef struct IHS_RetransmissionPending IHS_RetransmissionPending;
 
-typedef struct IHS_RetransmissionCancelled {
-    IHS_SessionChannelId channelId;
-    uint16_t packetId, fragmentId;
-    bool valid;
-} IHS_RetransmissionCancelled;
+typedef bool (*IHS_RetransmissionSendFunction)(IHS_SessionPacket *packet, void *context);
 
+typedef struct IHS_RetransmissionStats {
+    uint64_t tracked;
+    uint64_t acknowledged;
+    uint64_t superseded;
+    uint64_t nacks;
+    uint64_t retries;
+    uint64_t sendFailures;
+    uint32_t outstanding;
+    uint64_t oldestOutstandingMs;
+    uint32_t oldestChannelId;
+    uint32_t oldestPacketId;
+    int32_t oldestFragmentId;
+    uint32_t oldestRetryCount;
+    uint64_t maxAckLatencyMs;
+} IHS_RetransmissionStats;
+
+/**
+ * One session-owned reliability state machine. A packet is tracked before its
+ * first send is queued and remains here until the peer acknowledges the exact
+ * (channel, packet, fragment) identity, its owner retires a superseded packet
+ * after bounded gap filling, or the session is destroyed.
+ */
 typedef struct IHS_SessionRetransmission {
     IHS_Session *session;
     IHS_Mutex *lock;
-    IHS_Queue *queue;
-    /* Identities cancelled recently. The next retransmission of a packet is queued
-     * asynchronously by the send worker, so an ACK can land after the timer decided
-     * to retransmit but before the new entry exists; that twin must be dropped on
-     * arrival or it retransmits to the attempt limit. Ring, oldest overwritten. */
-    IHS_RetransmissionCancelled cancelled[16];
-    unsigned int cancelledHead;
+    IHS_RetransmissionPending *head;
+    IHS_TimerTask *timer;
+    IHS_RetransmissionStats stats;
 } IHS_SessionRetransmission;
 
 void IHS_RetransmissionInit(IHS_SessionRetransmission *retransmission, IHS_Session *session);
 
 void IHS_RetransmissionDeinit(IHS_SessionRetransmission *retransmission);
 
-bool IHS_RetransmissionQueue(IHS_SessionRetransmission *retransmission, IHS_SessionPacket *packet);
+bool IHS_RetransmissionTrack(IHS_SessionRetransmission *retransmission,
+                             const IHS_SessionPacket *packet, uint64_t nowMs);
 
-bool IHS_RetransmissionCancel(IHS_SessionRetransmission *retransmission, IHS_SessionChannelId channelId,
-                              uint16_t packetId, uint16_t fragmentId);
+bool IHS_RetransmissionAcknowledge(IHS_SessionRetransmission *retransmission,
+                                   IHS_SessionChannelId channelId, uint16_t packetId,
+                                   int16_t fragmentId, uint64_t nowMs);
+
+/** Mark an exact packet as superseded by a newer full-state message. It remains
+ * eligible for a small, bounded number of retries before being retired. */
+bool IHS_RetransmissionSupersede(IHS_SessionRetransmission *retransmission,
+                                 IHS_SessionChannelId channelId, uint16_t packetId,
+                                 int16_t fragmentId);
+
+bool IHS_RetransmissionNack(IHS_SessionRetransmission *retransmission,
+                            IHS_SessionChannelId channelId, uint16_t packetId,
+                            int16_t fragmentId, uint64_t nowMs);
+
+void IHS_RetransmissionNoteInitialSend(IHS_SessionRetransmission *retransmission,
+                                       const IHS_SessionPacketHeader *header, bool sent,
+                                       uint64_t nowMs);
+
+size_t IHS_RetransmissionProcessAt(IHS_SessionRetransmission *retransmission, uint64_t nowMs,
+                                   IHS_RetransmissionSendFunction send, void *context);
+
+void IHS_RetransmissionGetStats(IHS_SessionRetransmission *retransmission,
+                                IHS_RetransmissionStats *stats, uint64_t nowMs);

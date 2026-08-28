@@ -50,6 +50,32 @@ typedef struct IHS_SessionConfig {
     uint32_t maxBitrateKbps;
 } IHS_SessionConfig;
 
+/** Monotonic counters and current occupancy for the reliable transport and the
+ * HID snapshot admission state machine. Safe to sample from a diagnostics thread. */
+typedef struct IHS_SessionReliabilityStats {
+    uint64_t reliableTracked;
+    uint64_t reliableAcknowledged;
+    uint64_t reliableSuperseded;
+    uint64_t reliableNacks;
+    uint64_t reliableRetries;
+    uint64_t reliableSendFailures;
+    uint32_t reliableOutstanding;
+    uint64_t reliableOldestOutstandingMs;
+    uint32_t reliableOldestChannelId;
+    uint32_t reliableOldestPacketId;
+    int32_t reliableOldestFragmentId;
+    uint32_t reliableOldestRetryCount;
+    uint64_t reliableMaxAckLatencyMs;
+    uint64_t hidSubmitted;
+    uint64_t hidCoalesced;
+    uint64_t hidSent;
+    uint64_t hidAcknowledged;
+    uint64_t hidSuperseded;
+    uint32_t hidPending;
+    uint32_t hidInFlight;
+    int32_t hidOldestInFlightPacketId;
+} IHS_SessionReliabilityStats;
+
 typedef struct IHS_StreamSessionCallbacks {
     void (*initialized)(IHS_Session *session, void *context);
 
@@ -201,3 +227,6 @@ void IHS_SessionStatsSetFullReporting(IHS_Session *session, bool enabled);
 void IHS_SessionSetLogFunction(IHS_Session *session, IHS_LogFunction *logFunction);
 
 const IHS_SessionInfo *IHS_SessionGetInfo(const IHS_Session *session);
+
+void IHS_SessionGetReliabilityStats(IHS_Session *session,
+                                    IHS_SessionReliabilityStats *stats);

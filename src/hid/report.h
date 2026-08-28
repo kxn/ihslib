@@ -91,6 +91,13 @@ void IHS_HIDReportHolderSetReportLength(IHS_HIDReportHolder *holder, size_t repo
 
 void IHS_HIDReportHolderAddFull(IHS_HIDReportHolder *holder, const uint8_t *current, size_t len);
 
+void IHS_HIDReportHolderAddFullForced(IHS_HIDReportHolder *holder, const uint8_t *current, size_t len);
+
+/** Discard unsent report items without advancing the sent baseline, then queue
+ * exactly one self-contained full report for the supplied current state. */
+void IHS_HIDReportHolderReplaceWithFullForced(IHS_HIDReportHolder *holder,
+                                              const uint8_t *current, size_t len);
+
 void IHS_HIDReportHolderAddDelta(IHS_HIDReportHolder *holder, const uint8_t *previous, const uint8_t *current,
                                  size_t len);
 

@@ -44,7 +44,7 @@ static const unsigned char PACKET_MAGIC[8] = {0xff, 0xff, 0xff, 0xff, 0x21, 0x4c
 
 static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data);
 
-static const ProtobufCMessageDescriptor *MessageDescriptors[k_ERemoteDeviceStreamingProgress + 1] = {
+static const ProtobufCMessageDescriptor *MessageDescriptors[k_ERemoteClientBroadcastMsgPairingExclusivity + 1] = {
         &cmsg_remote_client_broadcast_discovery__descriptor,
         &cmsg_remote_client_broadcast_status__descriptor,
         NULL,
@@ -59,6 +59,9 @@ static const ProtobufCMessageDescriptor *MessageDescriptors[k_ERemoteDeviceStrea
         &cmsg_remote_client_broadcast_client_iddeconflict__descriptor,
         &cmsg_remote_device_stream_transport_signal__descriptor,
         &cmsg_remote_device_streaming_progress__descriptor,
+        &cmsg_remote_device_authorization_confirmed__descriptor,
+        &cmsg_remote_client_broadcast_client_pairing_state__descriptor,
+        &cmsg_remote_client_broadcast_client_pairing_exclusivity__descriptor,
 };
 
 static IHS_BaseRunCallbacks ClientRunCallbacks = {
@@ -186,7 +189,7 @@ static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
     }
 
     ERemoteClientBroadcastMsg type = header->msg_type;
-    // The MessageDescriptors table only covers entries 0 .. k_ERemoteDeviceStreamingProgress.
+    // The MessageDescriptors table only covers entries explicitly known to this client.
     // Any enum value beyond that (or negative) would read OOB and dereference garbage.
     const ProtobufCMessageDescriptor *descriptor = NULL;
     if ((int) type >= 0 && (size_t) type < sizeof(MessageDescriptors) / sizeof(MessageDescriptors[0])) {
@@ -205,6 +208,7 @@ static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
         case k_ERemoteDeviceAuthorizationRequest:
         case k_ERemoteDeviceAuthorizationResponse:
         case k_ERemoteDeviceAuthorizationCancelRequest:
+        case k_ERemoteDeviceAuthorizationConfirmed:
             client->privCallbacks.authorization(client, address, header, message);
             break;
         case k_ERemoteDeviceStreamingRequest:
@@ -214,6 +218,12 @@ static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
         case k_ERemoteDeviceProofRequest:
         case k_ERemoteDeviceProofResponse:
             client->privCallbacks.streaming(client, address, header, message);
+            break;
+        case k_ERemoteClientBroadcastMsgPairingState:
+        case k_ERemoteClientBroadcastMsgPairingExclusivity:
+            IHS_BaseLog(base, IHS_LogLevelInfo, "Client",
+                        "Unhandled pairing broadcast msg_type=%d payload_size=%u",
+                        (int) type, payload_size);
             break;
         default:
             break;
@@ -232,4 +242,3 @@ static void ClientInitialized(IHS_Base *base, void *context) {
     IHS_UDPSocketSetBlocking(base->socket, true);
     IHS_UDPSocketSetRecvTimeout(base->socket, 10000 /* 10ms */);
 }
-

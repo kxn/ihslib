@@ -4,4 +4,6 @@ target_sources(ihslib PRIVATE
         manager.c
         report.c)
 
-add_subdirectory(sdl)
+if (IHSLIB_HID_SDL)
+    add_subdirectory(sdl)
+endif ()

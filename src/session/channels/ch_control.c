@@ -40,10 +40,6 @@
 
 static bool IsMessageEncrypted(EStreamControlMessage type);
 
-/* A lost HID report is superseded ~16 ms later, so three tries (~30 ms) is
- * plenty before letting the reliable channel move on. */
-#define HID_RETRANSMIT_ATTEMPTS 3
-
 static size_t EncryptedMessageCapacity(size_t plainSize);
 
 static void OnControlInit(IHS_SessionChannel *channel, const void *data);
@@ -77,12 +73,34 @@ IHS_SessionChannel *IHS_SessionChannelControlCreate(IHS_Session *session) {
                                     NULL);
 }
 
+static bool ControlSendLocked(IHS_SessionChannelControl *control, EStreamControlMessage type,
+                              const ProtobufCMessage *message, int32_t packetId,
+                              uint16_t *assignedPacketId);
+
+static bool ControlSendPendingHIDLocked(IHS_SessionChannelControl *control, bool force);
+
+static void ControlOnHIDPacketAck(IHS_SessionChannelControl *control, uint16_t packetId,
+                                  int16_t fragmentId);
+
 bool IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamControlMessage type,
                                    const ProtobufCMessage *message, int32_t packetId) {
     assert(channel->id == IHS_SessionChannelIdControl);
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
+    IHS_MutexLock(control->sendLock);
+    bool ret = ControlSendLocked(control, type, message, packetId, NULL);
+    IHS_MutexUnlock(control->sendLock);
+    if (!ret) {
+        IHS_SessionDisconnect(channel->session);
+    }
+    return ret;
+}
+
+static bool ControlSendLocked(IHS_SessionChannelControl *control, EStreamControlMessage type,
+                              const ProtobufCMessage *message, int32_t packetId,
+                              uint16_t *assignedPacketId) {
+    IHS_SessionChannel *channel = &control->base;
+    assert(channel->id == IHS_SessionChannelIdControl);
     size_t messageCapacity = protobuf_c_message_get_packed_size(message);
-    bool ret;
     const ProtobufCEnumValue *value = protobuf_c_enum_descriptor_get_value(&estream_control_message__descriptor,
                                                                            type);
     enum IHS_LogLevel logLevel;
@@ -94,20 +112,10 @@ bool IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamControlMe
             logLevel = IHS_LogLevelDebug;
             break;
     }
-    /* The packet id and the encryption sequence are two counters the host expects to
-     * advance together. Bumping them from two threads at once hands one message a
-     * sequence the host cannot place: it drops the message without acknowledging it,
-     * and we retransmit it twenty times into the void. */
-    IHS_MutexLock(control->sendLock);
     IHS_SessionFrame frame;
     IHS_SessionChannelInitializeFrame(channel, &frame, IHS_SessionPacketTypeReliable, true, packetId);
-    /* HID input is a full state snapshot: losing one is corrected by the next
-     * frame's report, but retransmitting a lost one 20 times (200 ms at the 10 ms
-     * interval) head-of-line-blocks every input behind it — a visible control
-     * freeze on lossy Wi-Fi. Cap it low; the host resyncs its sequence past the
-     * gap, exactly as it already does when we give up after 20. */
-    if (type == k_EStreamControlRemoteHID) {
-        frame.header.maxRetransmit = HID_RETRANSMIT_ATTEMPTS;
+    if (assignedPacketId != NULL) {
+        *assignedPacketId = frame.header.packetId;
     }
     IHS_SessionLog(channel->session, logLevel, "Control", "Send control message: %s, id=%u", value->name,
                    frame.header.packetId);
@@ -115,15 +123,17 @@ bool IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamControlMe
     if (IsMessageEncrypted(type)) {
         size_t cipherSize = EncryptedMessageCapacity(messageCapacity);
         uint8_t *serialized = calloc(1, messageCapacity);
+        if (serialized == NULL) {
+            IHS_SessionFrameClear(&frame, true);
+            return false;
+        }
         size_t serializedLen = protobuf_c_message_pack(message, serialized);
         uint8_t *cipher = IHS_BufferPointerForAppend(&frame.body, cipherSize);
         if (IHS_SessionFrameEncrypt(channel->session, serialized, serializedLen, cipher, &cipherSize,
                                     control->sendEncryptSequence++) != 0) {
             free(serialized);
             IHS_SessionFrameClear(&frame, true);
-            IHS_MutexUnlock(control->sendLock); /* Disconnect sends a StopRequest through here */
             IHS_SessionLog(channel->session, IHS_LogLevelError, "Control", "Failed to encrypt payload\n");
-            IHS_SessionDisconnect(channel->session);
             return false;
         }
         free(serialized);
@@ -131,10 +141,107 @@ bool IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamControlMe
     } else {
         IHS_BufferAppendMessage(&frame.body, message);
     }
-    ret = IHS_SessionChannelQueueFrame(channel, &frame, true);
-    IHS_MutexUnlock(control->sendLock);
+    bool ret = IHS_SessionChannelQueueFrame(channel, &frame, true);
     IHS_SessionFrameClear(&frame, true);
     return ret;
+}
+
+static bool ControlSendPendingHIDLocked(IHS_SessionChannelControl *control, bool force) {
+    if (!control->hidPendingValid ||
+        (!force && control->hidInFlightCount >= IHS_CONTROL_HID_MAX_IN_FLIGHT)) {
+        return true;
+    }
+    if (control->hidInFlightCount >= sizeof(control->hidInFlightIds) /
+                                     sizeof(control->hidInFlightIds[0])) {
+        IHS_SessionLog(control->base.session, IHS_LogLevelError, "HID",
+                       "HID in-flight set exhausted");
+        return false;
+    }
+
+    CRemoteHIDMsg wrapped = CREMOTE_HIDMSG__INIT;
+    wrapped.has_data = true;
+    wrapped.data.data = IHS_BufferPointer(&control->hidPending);
+    wrapped.data.len = control->hidPending.size;
+    wrapped.has_active_input = true;
+    wrapped.active_input = true;
+    uint16_t packetId;
+    if (!ControlSendLocked(control, k_EStreamControlRemoteHID,
+                           (const ProtobufCMessage *) &wrapped, IHS_PACKET_ID_NEXT,
+                           &packetId)) {
+        return false;
+    }
+    control->hidInFlightIds[control->hidInFlightCount++] = packetId;
+    control->hidSent++;
+    control->hidPendingValid = false;
+    IHS_BufferClear(&control->hidPending, false);
+    return true;
+}
+
+bool IHS_SessionChannelControlSubmitHIDReport(IHS_SessionChannel *channel,
+                                              const uint8_t *data, size_t dataLen) {
+    assert(channel->id == IHS_SessionChannelIdControl);
+    IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
+    IHS_MutexLock(control->sendLock);
+    control->hidSubmitted++;
+    if (control->hidPendingValid ||
+        control->hidInFlightCount >= IHS_CONTROL_HID_MAX_IN_FLIGHT) {
+        control->hidCoalesced++;
+    }
+    IHS_BufferClear(&control->hidPending, false);
+    IHS_BufferAppendMem(&control->hidPending, data, dataLen);
+    control->hidPendingValid = true;
+    bool ret = ControlSendPendingHIDLocked(control, false);
+    IHS_MutexUnlock(control->sendLock);
+    if (!ret) {
+        IHS_SessionDisconnect(channel->session);
+    }
+    return ret;
+}
+
+bool IHS_SessionChannelControlFlushPendingHID(IHS_SessionChannel *channel) {
+    assert(channel->id == IHS_SessionChannelIdControl);
+    IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
+    IHS_MutexLock(control->sendLock);
+    bool ret = ControlSendPendingHIDLocked(control, true);
+    IHS_MutexUnlock(control->sendLock);
+    return ret;
+}
+
+static void ControlOnHIDPacketAck(IHS_SessionChannelControl *control, uint16_t packetId,
+                                  int16_t fragmentId) {
+    if (fragmentId != 0) {
+        return;
+    }
+    IHS_MutexLock(control->sendLock);
+    size_t found = control->hidInFlightCount;
+    for (size_t i = 0; i < control->hidInFlightCount; i++) {
+        if (control->hidInFlightIds[i] == packetId) {
+            found = i;
+            break;
+        }
+    }
+    bool ret = true;
+    if (found < control->hidInFlightCount) {
+        for (size_t i = 0; i < found; i++) {
+            if (IHS_RetransmissionSupersede(&control->base.session->retransmission,
+                                            IHS_SessionChannelIdControl,
+                                            control->hidInFlightIds[i], 0)) {
+                control->hidSuperseded++;
+            }
+        }
+        size_t removed = found + 1;
+        if (removed < control->hidInFlightCount) {
+            memmove(control->hidInFlightIds, &control->hidInFlightIds[removed],
+                    (control->hidInFlightCount - removed) * sizeof(control->hidInFlightIds[0]));
+        }
+        control->hidInFlightCount -= removed;
+        control->hidAcknowledged++;
+        ret = ControlSendPendingHIDLocked(control, false);
+    }
+    IHS_MutexUnlock(control->sendLock);
+    if (!ret) {
+        IHS_SessionDisconnect(control->base.session);
+    }
 }
 
 void IHS_SessionChannelControlHandshake(IHS_SessionChannel *channel, bool networkTest) {
@@ -158,12 +265,14 @@ static void OnControlInit(IHS_SessionChannel *channel, const void *data) {
     IHS_UNUSED(data);
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
     control->sendLock = IHS_MutexCreate();
+    IHS_BufferInit(&control->hidPending, 256, 64 * 1024);
     control->framePacketWindow = IHS_SessionPacketsWindowCreate(128);
 }
 
 static void OnControlDeinit(IHS_SessionChannel *channel) {
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
     IHS_SessionPacketsWindowDestroy(control->framePacketWindow);
+    IHS_BufferClear(&control->hidPending, true);
     IHS_MutexDestroy(control->sendLock);
 }
 
@@ -183,11 +292,14 @@ static void OnControlReceived(IHS_SessionChannel *channel, IHS_SessionPacket *pa
                 }
                 return;
             }
-            IHS_SessionChannelPacketAck(channel, packet->header.packetId, true);
+            IHS_SessionChannelPacketAck(channel, packet->header.packetId,
+                                        packet->header.fragmentId, true);
             break;
         case IHS_SessionPacketTypeACK:
+            ControlOnHIDPacketAck(control, packet->header.packetId,
+                                  packet->header.fragmentId);
+            break;
         case IHS_SessionPacketTypeNACK:
-            // Stop retransmit of the packet
             break;
         default:
             // Other items should not come here

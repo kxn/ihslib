@@ -274,16 +274,11 @@ bool IHS_SessionHIDSendReport(IHS_Session *session) {
 
     bool ret = false;
     if (packed != NULL) {
-        // Wrap the pre-packed CHIDMessageFromRemote in a CRemoteHIDMsg and ship it. The
-        // crypto and send-queue work happens with zero device locks held; SDL events on
-        // those devices can now proceed concurrently with the wire send.
-        CRemoteHIDMsg wrapped = CREMOTE_HIDMSG__INIT;
-        wrapped.has_data = true;
-        wrapped.data.data = packed;
-        wrapped.data.len = packedLen;
+        /* The control channel owns admission: while one complete snapshot awaits
+         * ACK this replaces the queued snapshot instead of allocating another
+         * reliable packet ID. */
         IHS_SessionChannel *channel = IHS_SessionChannelForType(session, IHS_SessionChannelTypeControl);
-        ret = IHS_SessionChannelControlSend(channel, k_EStreamControlRemoteHID,
-                                            (const ProtobufCMessage *) &wrapped, IHS_PACKET_ID_NEXT);
+        ret = IHS_SessionChannelControlSubmitHIDReport(channel, packed, packedLen);
         free(packed);
     }
     return ret;
@@ -516,6 +511,9 @@ static void HandleDeviceStartInputReports(IHS_SessionChannel *channel, IHS_HIDMa
 
     IHS_HIDReportHolderSetReportLength(&managed->reportHolder, cmd->length);
     if (IHS_HIDDeviceStartInputReports(managed->device, cmd->length) == 0) {
+        IHS_SessionLog(channel->session, IHS_LogLevelDebug, "HID",
+                       "Message %u: StartInputReports(id=%u, length=%u)",
+                       message->request_id, cmd->device, cmd->length);
         // Here we assume this managed has generated one full report, and send it right away.
         // This design may require change later...
         IHS_SessionHIDSendReport(channel->session);
@@ -535,6 +533,9 @@ static void HandleDeviceRequestFullReport(IHS_SessionChannel *channel, IHS_HIDMa
     }
 
     if (IHS_HIDDeviceRequestFullReport(managed->device) == 0) {
+        IHS_SessionLog(channel->session, IHS_LogLevelDebug, "HID",
+                       "Message %u: RequestFullReport(id=%u)",
+                       message->request_id, cmd->device);
         // Here we assume this device has generated one full report, and send it right away.
         // This design may require change later...
         IHS_SessionHIDSendReport(channel->session);

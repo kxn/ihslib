@@ -110,7 +110,9 @@ static void OnConnectACK(IHS_SessionChannel *channel, const IHS_SessionPacket *p
     // Drop stale / replayed ACKs that arrive after the handshake has progressed.
     if (session->state.connectionState != IHS_SessionConnectionStateConnecting) return;
     session->state.hostConnectionId = packet->header.srcConnectionId;
-    IHS_SessionCancelRetransmission(session, IHS_SessionChannelIdDiscovery, 0, 0);
+    IHS_RetransmissionAcknowledge(&session->retransmission,
+                                 IHS_SessionChannelIdDiscovery, 0, 0,
+                                 IHS_TimerNow());
 
     IHS_SessionChannel *control = IHS_SessionChannelFor(session, IHS_SessionChannelIdControl);
     IHS_SessionChannelControlHandshake(control, false);

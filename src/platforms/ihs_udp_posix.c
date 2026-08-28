@@ -58,9 +58,13 @@ IHS_UDPSocket *IHS_UDPSocketOpen(bool broadcast) {
      * remainder, so frames never reassemble. SO_RCVBUF is clamped to
      * net.core.rmem_max; SO_RCVBUFFORCE ignores the clamp but needs CAP_NET_ADMIN. */
     int rcvbuf = 4 * 1024 * 1024;
+#ifdef SO_RCVBUFFORCE
     if (setsockopt(s->fd, SOL_SOCKET, SO_RCVBUFFORCE, &rcvbuf, sizeof(rcvbuf)) != 0) {
         setsockopt(s->fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
     }
+#else
+    setsockopt(s->fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+#endif
     int actual = 0;
     socklen_t actualLen = sizeof(actual);
     if (getsockopt(s->fd, SOL_SOCKET, SO_RCVBUF, &actual, &actualLen) == 0 && actual < rcvbuf) {
