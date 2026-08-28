@@ -76,23 +76,31 @@ int main(void) {
     assert(!IHS_RetransmissionAcknowledge(&retransmission,
                                           IHS_SessionChannelIdControl, 42, 3, 1031));
 
-    /* Reliable ordered traffic is never forgotten at an arbitrary attempt cap. */
+    /* An unacked reliable packet is retired after a bounded give-up window:
+     * once the peer resyncs its decrypt sequence past the gap, retransmitted
+     * copies are stale replays the peer will silently drop, so they can never
+     * be ACKed. Field evidence: packet 1875 retransmitted 189 s, 8000+ copies.
+     * State convergence relies on the periodic full-state HID heartbeat. */
     IHS_SessionPacketClear(&packet, true);
     InitPacket(&packet, 43, 0, 0x5a);
     assert(IHS_RetransmissionTrack(&retransmission, &packet, 200));
     IHS_RetransmissionNoteInitialSend(&retransmission, &packet.header, true, 200);
-    for (uint64_t now = 225; now <= 5225; now += 100) {
+    for (uint64_t now = 225; now <= 3199; now += 100) {
         IHS_RetransmissionProcessAt(&retransmission, now, CaptureSend, &capture);
     }
-    IHS_RetransmissionGetStats(&retransmission, &stats, 5225);
+    IHS_RetransmissionGetStats(&retransmission, &stats, 3199);
     assert(stats.retries > 20);
     assert(stats.outstanding == 1);
-    assert(IHS_RetransmissionAcknowledge(&retransmission,
-                                         IHS_SessionChannelIdControl, 43, 0, 5226));
-
-    IHS_RetransmissionGetStats(&retransmission, &stats, 5226);
+    /* At 3200 ms the give-up window closes: retired without pretending an ACK. */
+    assert(IHS_RetransmissionProcessAt(&retransmission, 3200, CaptureSend, &capture) == 0);
+    IHS_RetransmissionGetStats(&retransmission, &stats, 3200);
+    assert(stats.giveUps == 1);
     assert(stats.outstanding == 0);
-    assert(stats.acknowledged == 2);
+    assert(!IHS_RetransmissionAcknowledge(&retransmission,
+                                          IHS_SessionChannelIdControl, 43, 0, 3300));
+    IHS_RetransmissionGetStats(&retransmission, &stats, 3300);
+    assert(stats.outstanding == 0);
+    assert(stats.acknowledged == 1);
 
     /* A newer full-state message may supersede an older one. Preserve three
      * gap-filling retries, then retire it without pretending an ACK arrived. */
@@ -111,8 +119,9 @@ int main(void) {
     assert(IHS_RetransmissionProcessAt(&retransmission, 6176, CaptureSend, &capture) == 0);
     IHS_RetransmissionGetStats(&retransmission, &stats, 6176);
     assert(stats.outstanding == 0);
-    assert(stats.acknowledged == 2);
+    assert(stats.acknowledged == 1);
     assert(stats.superseded == 1);
+    assert(stats.giveUps == 1);
     IHS_SessionPacketClear(&packet, true);
     IHS_RetransmissionDeinit(&retransmission);
     puts("retransmission state machine OK");

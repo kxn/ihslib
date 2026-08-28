@@ -274,6 +274,7 @@ void IHS_SessionGetReliabilityStats(IHS_Session *session,
     stats->reliableTracked = reliable.tracked;
     stats->reliableAcknowledged = reliable.acknowledged;
     stats->reliableSuperseded = reliable.superseded;
+    stats->reliableGiveUps = reliable.giveUps;
     stats->reliableNacks = reliable.nacks;
     stats->reliableRetries = reliable.retries;
     stats->reliableSendFailures = reliable.sendFailures;

@@ -15,6 +15,11 @@
 #define RETRANSMISSION_INITIAL_MS 25
 #define RETRANSMISSION_MAX_MS 100
 #define RETRANSMISSION_SUPERSEDE_MIN_RETRIES 3
+/* A reliable packet unacked for this long will never be ACKed: after the peer
+ * resyncs its decrypt sequence past the gap, retransmitted copies carry stale
+ * sequence numbers and are dropped as replays. Retire it so the queue drains;
+ * state convergence relies on the periodic full-state HID heartbeat. */
+#define RETRANSMISSION_GIVE_UP_MS 3000
 
 struct IHS_RetransmissionPending {
     IHS_SessionPacket packet;
@@ -229,12 +234,20 @@ size_t IHS_RetransmissionProcessAt(IHS_SessionRetransmission *retransmission, ui
     IHS_RetransmissionPending **link = &retransmission->head;
     while (*link != NULL) {
         IHS_RetransmissionPending *pending = *link;
-        if (pending->superseded &&
-            pending->retryCount >= RETRANSMISSION_SUPERSEDE_MIN_RETRIES) {
+        bool giveUp = pending->initialSent &&
+                      nowMs >= pending->firstTrackedMs &&
+                      nowMs - pending->firstTrackedMs >= RETRANSMISSION_GIVE_UP_MS;
+        if ((pending->superseded &&
+             pending->retryCount >= RETRANSMISSION_SUPERSEDE_MIN_RETRIES) ||
+            giveUp) {
             *link = pending->next;
             pending->next = retired;
             retired = pending;
-            retransmission->stats.superseded++;
+            if (giveUp) {
+                retransmission->stats.giveUps++;
+            } else {
+                retransmission->stats.superseded++;
+            }
             retransmission->stats.outstanding--;
             continue;
         }

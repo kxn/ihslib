@@ -22,6 +22,7 @@ typedef struct IHS_RetransmissionStats {
     uint64_t tracked;
     uint64_t acknowledged;
     uint64_t superseded;
+    uint64_t giveUps;
     uint64_t nacks;
     uint64_t retries;
     uint64_t sendFailures;
@@ -38,7 +39,9 @@ typedef struct IHS_RetransmissionStats {
  * One session-owned reliability state machine. A packet is tracked before its
  * first send is queued and remains here until the peer acknowledges the exact
  * (channel, packet, fragment) identity, its owner retires a superseded packet
- * after bounded gap filling, or the session is destroyed.
+ * after bounded gap filling, the give-up window (3 s) closes on an unacked
+ * packet — the peer's decrypt-sequence resync makes later retransmissions
+ * stale replays — or the session is destroyed.
  */
 typedef struct IHS_SessionRetransmission {
     IHS_Session *session;

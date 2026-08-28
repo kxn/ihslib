@@ -56,6 +56,7 @@ typedef struct IHS_SessionReliabilityStats {
     uint64_t reliableTracked;
     uint64_t reliableAcknowledged;
     uint64_t reliableSuperseded;
+    uint64_t reliableGiveUps;
     uint64_t reliableNacks;
     uint64_t reliableRetries;
     uint64_t reliableSendFailures;
