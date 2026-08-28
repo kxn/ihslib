@@ -101,6 +101,11 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
     IHS_SessionLog(session, IHS_LogLevelInfo, "Negotiation", "Requesting at most %ux%u @ %u fps, %u kbps%s%s",
                    ihsConf.maxWidth, ihsConf.maxHeight, ihsConf.maxFps, ihsConf.maxBitrateKbps,
                    ihsConf.enableHevc ? ", HEVC" : "", ihsConf.enableAudio ? ", audio" : "");
+    IHS_SessionLog(session, IHS_LogLevelInfo, "Negotiation",
+                   "Host init offers: reliable_data=%d supports_remote_hid=%d supports_touch_input=%d",
+                   message->has_reliable_data ? (int) message->reliable_data : -1,
+                   message->has_supports_remote_hid ? (int) message->supports_remote_hid : -1,
+                   message->has_supports_touch_input ? (int) message->supports_touch_input : -1);
 
     for (int i = 0; i < message->n_supported_video_codecs; i++) {
         IHS_SessionLog(session, IHS_LogLevelInfo, "Negotiation", "Host offers video codec %d%s",
