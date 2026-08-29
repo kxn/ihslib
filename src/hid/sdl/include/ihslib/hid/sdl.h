@@ -101,3 +101,13 @@ typedef struct IHS_HIDSDLLastSubmitted {
 } IHS_HIDSDLLastSubmitted;
 
 bool IHS_HIDSDLGetLastSubmittedReport(IHS_Session *session, IHS_HIDSDLLastSubmitted *out);
+
+/**
+ * Flush pending input deltas for all open SDL game controllers whose host has
+ * started input reports: one masked-delta report per device carrying every
+ * state change since the previous flush. This is the per-frame send path;
+ * IHS_HIDRefreshSDLGameControllers remains the forced-full heartbeat.
+ * @param session
+ * @return true if any delta was queued and sent
+ */
+bool IHS_HIDFlushSDLGameControllers(IHS_Session *session);

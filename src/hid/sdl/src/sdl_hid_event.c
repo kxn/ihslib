@@ -40,6 +40,46 @@ static bool HandleCAxisEvent(IHS_HIDManager *manager, const SDL_GamepadAxisEvent
 
 static bool HandleSensorEvent(IHS_HIDManager *manager, const SDL_GamepadSensorEvent *event);
 
+bool IHS_HIDFlushSDLGameControllers(IHS_Session *session) {
+    /* Official-client semantics: input reports are masked deltas against the
+     * previous flushed state, batched once per frame. full_report is never
+     * sent on this path (set_full_report has zero call sites in the official
+     * client); periodic full state is the heartbeat's job. */
+    IHS_HIDManager *manager = session->hidManager;
+    bool queued = false;
+    size_t count;
+    IHS_HIDManagedDevice **snapshot = IHS_HIDManagerSnapshotOpenDevices(manager, &count);
+    for (size_t i = 0; i < count; ++i) {
+        IHS_HIDManagedDevice *managed = snapshot[i];
+        if (!IHS_HIDDeviceIsSDL(managed->device)) {
+            continue;
+        }
+        if (managed->reportHolder.reportLength == 0) {
+            continue;
+        }
+        IHS_HIDDeviceLock(managed->device);
+        IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) managed->device;
+        if (memcmp(&device->states.previous, &device->states.current,
+                   sizeof(IHS_HIDStateSDL)) == 0) {
+            IHS_HIDDeviceUnlock(managed->device);
+            continue;
+        }
+        IHS_HIDDeviceReportAddDelta((IHS_HIDDevice *) device,
+                                    (const uint8_t *) &device->states.previous,
+                                    (const uint8_t *) &device->states.current, 48);
+        device->lastSubmitted = device->states.current;
+        device->lastSubmittedSeq++;
+        device->states.previous = device->states.current;
+        IHS_HIDDeviceUnlock(managed->device);
+        queued = true;
+    }
+    free(snapshot);
+    if (!queued) {
+        return false;
+    }
+    return IHS_SessionHIDSendReport(session);
+}
+
 bool IHS_HIDRefreshSDLGameControllers(IHS_Session *session) {
     IHS_HIDManager *manager = session->hidManager;
     bool queued = false;
