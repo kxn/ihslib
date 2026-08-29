@@ -132,9 +132,10 @@ void IHS_SessionPacketClear(IHS_SessionPacket *packet, bool freeData) {
 }
 
 uint32_t IHS_SessionPacketTimestamp() {
+    /* Milliseconds, matching the official client's GetStreamTimestamp: the host
+     * reads sendTimestamp/feed timestamps as milliseconds (SessionStats
+     * AvgNetworkMS was ~58.5M "ms" - 16 hours - when we sent 1/65536-s ticks). */
     struct timespec tp;
     clock_gettime(CLOCK_MONOTONIC, &tp);
-    uint64_t nsec = tp.tv_nsec * 65536 / 1000000000;
-    uint32_t sec = tp.tv_sec * 65536;
-    return sec + nsec;
+    return (uint32_t) ((uint64_t) tp.tv_sec * 1000 + tp.tv_nsec / 1000000);
 }

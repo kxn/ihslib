@@ -54,13 +54,12 @@ enum {
     EV_COMPLETE = 18,
 };
 
-/* Convert a delta in 1/65536-second ticks to milliseconds (float).
- * Matches Steam's GetStreamTimestampDeltaMS arithmetic. Wrapped subtraction
- * keeps timestamps that crossed the uint32 boundary correct (they never will
- * in practice — 65536 wraps every ~18 hours — but the cost is one cast). */
+/* Timestamps are now milliseconds (matching the host's interpretation).
+ * Wrapped subtraction keeps timestamps that crossed the uint32 boundary
+ * correct (ms wraps every ~49.7 days; the cost is one cast). */
 static float ticks_to_ms(uint32_t earlier, uint32_t later) {
     uint32_t delta = later - earlier;
-    return (float) (delta * 1000.0 / 65536.0);
+    return (float) delta;
 }
 
 IHS_FrameStatsAggregator *IHS_FrameStatsAggregatorCreate(void) {

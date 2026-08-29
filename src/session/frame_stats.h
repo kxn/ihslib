@@ -38,7 +38,7 @@
  * carries up to 19 event timestamps (one per EStreamFrameEvent), the size of
  * the frame data, and the final IHS_VideoFrameResult.
  *
- * Timestamps are in IHS_SessionPacketTimestamp units (1/65536 second).
+ * Timestamps are in IHS_SessionPacketTimestamp units (milliseconds).
  *
  * `eventMask` bit i is set when `events[i]` has been recorded — distinguishes
  * "not yet observed" from "recorded as zero" (frameId 0 / frame 0 / etc).
@@ -98,7 +98,7 @@ void IHS_FrameStatsAggregatorSetFullReporting(IHS_FrameStatsAggregator *agg, boo
 
 /**
  * Record one of the four app-driven events (DecodeBegin/DecodeEnd/UploadBegin/UploadEnd).
- * `timestamp` is in 1/65536-second units; `0` means "use IHS_SessionTimestampNow".
+ * `timestamp` is in milliseconds; `0` means "use IHS_SessionTimestampNow".
  *
  * Ring-slot policy: if the slot's frameId doesn't match, the slot is reset
  * and the new frameId takes ownership (i.e. late events for a wrapped-out

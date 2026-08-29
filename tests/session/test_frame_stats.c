@@ -47,12 +47,12 @@ static void expect_slot(const IHS_FrameStatsAggregator *agg, int slot, uint32_t 
         float got = (float) (agg->accumulator.slots[slot].sum / agg->accumulator.slots[slot].count);
         float diff = got - average;
         if (diff < 0) diff = -diff;
-        assert(diff < 0.5f);  /* 1/65536-s → ms quantisation slop */
+        assert(diff < 0.5f);
     }
 }
 
-/* 1 ms in IHS_SessionPacketTimestamp ticks (1/65536-second). */
-#define MS_TICKS(ms) ((uint32_t)((ms) * 65536u / 1000u))
+/* Timestamps are milliseconds now. */
+#define MS_TICKS(ms) ((uint32_t)(ms))
 
 int main(void) {
     IHS_FrameStatsAggregator *agg = IHS_FrameStatsAggregatorCreate();
