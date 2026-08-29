@@ -88,5 +88,7 @@ void IHS_HIDDeviceReportAddFullForced(IHS_HIDDevice *device, const uint8_t *curr
 void IHS_HIDDeviceReportReplaceWithFullForced(IHS_HIDDevice *device,
                                               const uint8_t *current, size_t len);
 
+void IHS_HIDDeviceReportAddForcedFullMaskDelta(IHS_HIDDevice *device, const uint8_t *current, size_t len);
+
 void IHS_HIDDeviceReportAddDelta(IHS_HIDDevice *device, const uint8_t *previous,
                                  const uint8_t *current, size_t len);

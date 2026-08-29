@@ -101,6 +101,13 @@ void IHS_HIDReportHolderReplaceWithFullForced(IHS_HIDReportHolder *holder,
 void IHS_HIDReportHolderAddDelta(IHS_HIDReportHolder *holder, const uint8_t *previous, const uint8_t *current,
                                  size_t len);
 
+/** Queue a delta report whose mask covers every state byte, carrying the full
+ * current state. Wire shape matches the official client: it queues deltas
+ * exclusively (set_full_report has no call sites) and expresses resync state
+ * as a full-mask delta verified by the host via delta_report_crc. */
+void IHS_HIDReportHolderAddForcedFullMaskDelta(IHS_HIDReportHolder *holder,
+                                               const uint8_t *current, size_t len);
+
 /**
  *
  * @return Pointer for input report, or NULL if there is no report item. Please lock the holder to prevent it being

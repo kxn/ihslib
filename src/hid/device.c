@@ -107,6 +107,10 @@ void IHS_HIDDeviceReportReplaceWithFullForced(IHS_HIDDevice *device,
     IHS_HIDReportHolderReplaceWithFullForced(&device->managed->reportHolder, current, len);
 }
 
+void IHS_HIDDeviceReportAddForcedFullMaskDelta(IHS_HIDDevice *device, const uint8_t *current, size_t len) {
+    IHS_HIDReportHolderAddForcedFullMaskDelta(&device->managed->reportHolder, current, len);
+}
+
 void IHS_HIDDeviceReportAddDelta(IHS_HIDDevice *device, const uint8_t *previous, const uint8_t *current, size_t len) {
     IHS_HIDReportHolderAddDelta(&device->managed->reportHolder, previous, current, len);
 }

@@ -98,10 +98,10 @@ bool IHS_HIDRefreshSDLGameControllers(IHS_Session *session) {
         }
         IHS_HIDDeviceLock(managed->device);
         IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) managed->device;
-        uint8_t current[IHS_HID_SDL_WIRE_REPORT_MAX];
-        size_t reportLen = IHS_HIDDeviceSDLWireReportLength(managed);
-        IHS_HIDReportSDLPackWire(current, reportLen, &device->states.current);
-        IHS_HIDDeviceReportReplaceWithFullForced((IHS_HIDDevice *) device, current, reportLen);
+        /* Resync state rides a full-mask delta: the official client never sends
+         * the full_report field (set_full_report has zero call sites). */
+        IHS_HIDDeviceReportAddForcedFullMaskDelta((IHS_HIDDevice *) device,
+                                                  (const uint8_t *) &device->states.current, 48);
         device->lastSubmitted = device->states.current;
         device->lastSubmittedSeq++;
         device->states.previous = device->states.current;
@@ -184,11 +184,10 @@ bool IHS_HIDResetSDLGameControllers(IHS_Session *session) {
         IHS_HIDDeviceLock(managed->device);
         if (IHS_HIDReportSDLClear(&device->states.current)) {
             changed = true;
-            uint8_t current[IHS_HID_SDL_WIRE_REPORT_MAX];
-            size_t reportLen = IHS_HIDDeviceSDLWireReportLength(managed);
-            if (reportLen > 0) {
-                IHS_HIDReportSDLPackWire(current, reportLen, &device->states.current);
-                IHS_HIDDeviceReportReplaceWithFullForced(managed->device, current, reportLen);
+            if (managed->reportHolder.reportLength > 0) {
+                /* Neutral-state resync also rides a full-mask delta. */
+                IHS_HIDDeviceReportAddForcedFullMaskDelta(managed->device,
+                                                          (const uint8_t *) &device->states.current, 48);
             }
             device->states.previous = device->states.current;
         }

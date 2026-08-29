@@ -126,6 +126,36 @@ void IHS_HIDReportHolderReplaceWithFullForced(IHS_HIDReportHolder *holder,
     AddFull(holder, current, len, true);
 }
 
+void IHS_HIDReportHolderAddForcedFullMaskDelta(IHS_HIDReportHolder *holder,
+                                               const uint8_t *current, size_t len) {
+    /* Same wire shape as a delta report, but with every mask bit forced so the
+     * payload carries the complete state: the host can resync from any baseline.
+     * The official client expresses resync state this way - its
+     * CHIDDeviceInputReport::set_full_report has no call sites. */
+    assert(holder->reportLength >= len);
+    Stash(holder, current, len);
+    size_t offset = holder->dataBuffer.size;
+    size_t maskSize = ((holder->reportLength + 7) >> 3);
+    size_t deltaMax = maskSize + len;
+    uint8_t *data = IHS_BufferPointerForAppend(&holder->dataBuffer, deltaMax);
+    memset(data, 0, maskSize);
+    memcpy(data + maskSize, current, len);
+    for (size_t i = 0; i < len; ++i) {
+        data[i >> 3] |= 1 << (i % 8);
+    }
+    holder->dataBuffer.size += deltaMax;
+    CHIDDeviceInputReport *item = IHS_ArrayListAppend(&holder->reportItems, NULL);
+
+    chiddevice_input_report__init(item);
+    item->has_delta_report = true;
+    item->delta_report.data = NULL; /* bound in GetMessage */
+    item->delta_report.len = deltaMax;
+    PROTOBUF_C_P_SET_VALUE(item, delta_report_crc, IHS_CRC32(current, len));
+    PROTOBUF_C_P_SET_VALUE(item, delta_report_size, len);
+
+    IHS_ArrayListAppend(&holder->reportOffsets, &offset);
+}
+
 void IHS_HIDReportHolderAddDelta(IHS_HIDReportHolder *holder, const uint8_t *previous, const uint8_t *current,
                                  size_t len) {
     /* Never drop a delta, even one that lands back on the last flushed state. Deltas
