@@ -136,6 +136,6 @@ uint32_t IHS_SessionPacketTimestamp() {
      * reads sendTimestamp/feed timestamps as milliseconds (SessionStats
      * AvgNetworkMS was ~58.5M "ms" - 16 hours - when we sent 1/65536-s ticks). */
     struct timespec tp;
-    clock_gettime(CLOCK_MONOTONIC, &tp);
+    clock_gettime(CLOCK_REALTIME, &tp);
     return (uint32_t) ((uint64_t) tp.tv_sec * 1000 + tp.tv_nsec / 1000000);
 }
