@@ -260,10 +260,12 @@ static void OnControlReceived(IHS_SessionChannel *channel, IHS_SessionPacket *pa
             ControlOnNackPacket(control, packet);
             break;
         default:
-            // Other items should not come here
-            IHS_SessionLog(channel->session, IHS_LogLevelError, "Control", "Unrecognized packet %u\n",
-                           packet->header.type);
-            IHS_SessionDisconnect(channel->session);
+            /* Official ignores unrecognized channel packet types (its channel
+             * HandlePacket default falls through without action). Killing the
+             * session on one unexpected packet turns a harmless difference
+             * into a dead stream. */
+            IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Control",
+                           "Ignoring unrecognized packet type %u\n", packet->header.type);
             break;
     }
     IHS_SessionFrame frame;
@@ -594,6 +596,18 @@ void IHS_SessionChannelControlOnMessageReceived(IHS_SessionChannel *channel, ESt
             ccontroller_personalization_update_msg__free_unpacked(message, NULL);
             break;
         }
+        case k_EStreamControlKeepAlive:
+            /* Official consumes KeepAlive inline before dispatch
+             * (OnStreamPacket 0x7ad0b4) — no log, no response. */
+            break;
+        case k_EStreamControlCaptureFailed:
+            IHS_SessionLog(channel->session, IHS_LogLevelError, "Control",
+                           "Host capture failed (OnCaptureFailed)");
+            break;
+        case k_EStreamControlSystemSuspend:
+            IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Control",
+                           "Host is suspending (OnSystemSuspend)");
+            break;
         default: {
             IHS_SessionLog(channel->session, IHS_LogLevelInfo, "Control", "Unhandled control message: %s",
                            ControlMessageTypeName(type));
