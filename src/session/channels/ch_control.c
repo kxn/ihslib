@@ -367,8 +367,11 @@ static void ControlSendGapNack(IHS_SessionChannelControl *control) {
         return;
     }
     uint64_t nowMs = IHS_TimerNow();
+    /* Official hole-age threshold is 65 units (~1 ms, [f47000+2444] from the
+     * 0x7fe284 initializer); the effective cadence is the channel update tick
+     * (5 ms), which the retransmission tick matches. */
     if (control->lastNackSentMs != 0 &&
-        nowMs - control->lastNackSentMs < 50) {
+        nowMs - control->lastNackSentMs < 5) {
         return;
     }
     control->lastNackSentMs = nowMs;

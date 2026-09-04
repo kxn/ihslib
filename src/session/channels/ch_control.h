@@ -57,7 +57,8 @@ typedef struct IHS_SessionChannelControl {
     /** Set once the frame window overflowed, so we disconnect only once. */
     bool overflowed;
     IHS_TimerTask *keepAliveTimer;
-    /** Rate limit for gap NACKs we emit (ms clock). Exact official interval
+    /** Gap-NACK cadence: official hole-age threshold ~1ms with 5ms update
+     * ticks ([f47000+2444], 0x7fe284); see docs/STEAMLINK_PROTOCOL_RE.md §9.1.
      * unknown; see docs/STEAMLINK_PROTOCOL_RE.md §9.1. */
     uint64_t lastNackSentMs;
 } IHS_SessionChannelControl;

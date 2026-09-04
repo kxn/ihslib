@@ -13,7 +13,11 @@
 
 #define RETRANSMISSION_TICK_MS 5
 #define RETRANSMISSION_INITIAL_MS 25
-#define RETRANSMISSION_MAX_MS 100
+/* Official pacing: timeout = 1.25 x clamp(conn timeout estimate, 65..3276
+ * (0.99..50.0 ms in 16.16s units)) -- libmain 0x7f8ac4 with the static
+ * initializer at 0x7fe284 ([f47000+2436]=65, [+2440]=3276). The dynamic
+ * estimate is not replicated; 62 ms matches the official ceiling. */
+#define RETRANSMISSION_MAX_MS 62
 #define RETRANSMISSION_SUPERSEDE_MIN_RETRIES 3
 /* No give-up: the official client retransmits reliable packets until they are
  * ACKed or released by a peer NACK (libmain.so 0x7f8ac4 SendReliablePackets /
