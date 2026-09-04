@@ -180,10 +180,12 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
      * (0x7ad9cc/0x7ad9e8). Gamepads reach the host over the HID channel;
      * without the flag the host sees no controller at all, so default to
      * enabled when the host did not announce support either way. */
-    PROTOBUF_C_SET_VALUE(config, enable_remote_hid,
-                         !message->has_supports_remote_hid || message->supports_remote_hid);
-    PROTOBUF_C_SET_VALUE(config, enable_touch_input,
-                         !message->has_supports_touch_input || message->supports_touch_input);
+    if (message->has_supports_remote_hid && message->supports_remote_hid) {
+        PROTOBUF_C_SET_VALUE(config, enable_remote_hid, 1);
+    }
+    if (message->has_supports_touch_input && message->supports_touch_input) {
+        PROTOBUF_C_SET_VALUE(config, enable_touch_input, 1);
+    }
 
     CStreamingClientConfig clientConfig = CSTREAMING_CLIENT_CONFIG__INIT;
 

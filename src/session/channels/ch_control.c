@@ -221,7 +221,7 @@ static void OnControlInit(IHS_SessionChannel *channel, const void *data) {
     IHS_UNUSED(data);
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
     control->sendLock = IHS_MutexCreate();
-    control->framePacketWindow = IHS_SessionPacketsWindowCreate(128);
+    control->framePacketWindow = IHS_SessionPacketsWindowCreate(320);
 }
 
 static void OnControlDeinit(IHS_SessionChannel *channel) {
@@ -284,11 +284,14 @@ static void OnControlReceived(IHS_SessionChannel *channel, IHS_SessionPacket *pa
                     break;
                 }
                 case IHS_SessionFrameDecryptSequenceMismatch: {
+                    /* Official has no resync: BDecrypt's counter advances per
+                     * received frame (0x7ad06c `(*(this+136))++`), a mismatched
+                     * frame is logged and dropped with the counter left alone.
+                     * Resyncing here used to silently skip control messages. */
                     IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Control",
                                    "Mismatched message sequence %llu (expect %llu). id=%d, retransmit=%d, type=%s",
                                    actualSequence, expectSequence, frame.header.packetId, frame.header.retransmitCount,
                                    ControlMessageTypeName(type));
-                    control->recvEncryptSequence = actualSequence + 1;
                     break;
                 }
                 case IHS_SessionFrameDecryptFailed: {
@@ -352,7 +355,11 @@ static void ControlOnNackPacket(IHS_SessionChannelControl *control, IHS_SessionP
 static void ControlSendGapNack(IHS_SessionChannelControl *control) {
     IHS_Session *session = control->base.session;
     IHS_SessionPacketsWindow *window = control->framePacketWindow;
-    if (IHS_SessionPacketsWindowSize(window) == 0) {
+    /* Only when a packet slot is actually MISSING: a partially received
+     * frame (fragments still in flight) leaves all buffered slots used and
+     * must not trigger a NACK. Official scans its receive ring the same way
+     * (UpdateReliableState 0x7f9d0c). */
+    if (!IHS_SessionPacketsWindowHasHole(window)) {
         return;
     }
     uint16_t needed = IHS_SessionPacketsWindowNextNeededPacketId(window);

@@ -299,3 +299,16 @@ size_t IHS_SessionPacketsWindowHoleBitmap(const IHS_SessionPacketsWindow *window
     }
     return size;
 }
+
+bool IHS_SessionPacketsWindowHasHole(const IHS_SessionPacketsWindow *window) {
+    uint16_t size = IHS_SessionPacketsWindowSize(window);
+    if (size == 0) {
+        return false;
+    }
+    for (int i = window->head.pos, j = window->head.pos + size; i < j; i++) {
+        if (!FrameItemIsUsed(&window->data[i % window->capacity])) {
+            return true;
+        }
+    }
+    return false;
+}

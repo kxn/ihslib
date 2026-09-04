@@ -72,5 +72,10 @@ bool IHS_SessionPacketsWindowHasFrame(const IHS_SessionPacketsWindow *window);
  * and a presence bitmap for ids from startId on (bit=1: held, bit=0: hole). */
 uint16_t IHS_SessionPacketsWindowNextNeededPacketId(const IHS_SessionPacketsWindow *window);
 
+/* True when at least one packet slot between head and tail is missing — the
+ * official condition for emitting a gap NACK (in-flight fragments that have
+ * not arrived yet leave used slots and do NOT count as holes). */
+bool IHS_SessionPacketsWindowHasHole(const IHS_SessionPacketsWindow *window);
+
 size_t IHS_SessionPacketsWindowHoleBitmap(const IHS_SessionPacketsWindow *window,
                                           uint16_t startId, uint8_t *bitmap, size_t maxPackets);
