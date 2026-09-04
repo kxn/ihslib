@@ -174,12 +174,28 @@ void IHS_HIDReportHolderAddDelta(IHS_HIDReportHolder *holder, const uint8_t *pre
     uint8_t *data = IHS_BufferPointerForAppend(&holder->dataBuffer, deltaMax);
     int deltaLen = ComputeDelta(previous, current, len, holder->reportLength, data);
     assert(deltaLen >= 0 && (size_t) deltaLen <= deltaMax);
-    holder->dataBuffer.size += deltaLen;
-    // Send the data and CRC
     uint32_t crc = IHS_CRC32(current, len);
     CHIDDeviceInputReport *item = IHS_ArrayListAppend(&holder->reportItems, NULL);
-
     chiddevice_input_report__init(item);
+
+    /* Official adaptive rule (libmain 0x7d035c): delta only when it actually
+     * compresses — deltaLen + 8 < fullLen — otherwise emit the full state.
+     * On a 48-byte gamepad state this almost always stays a delta, matching
+     * the official wire shape. */
+    if ((size_t) deltaLen + 8 >= len) {
+        holder->dataBuffer.size += deltaMax; /* reserve; full path binds below */
+        size_t offset = holder->dataBuffer.size;
+        uint8_t *full = IHS_BufferPointerForAppend(&holder->dataBuffer, len);
+        memcpy(full, current, len);
+        holder->dataBuffer.size += len;
+        item->has_full_report = true;
+        item->full_report.data = NULL; /* bound in GetMessage */
+        item->full_report.len = len;
+        IHS_ArrayListAppend(&holder->reportOffsets, &offset);
+        holder->report.n_reports = holder->reportItems.size;
+        return;
+    }
+    holder->dataBuffer.size += deltaLen;
     item->has_delta_report = true;
     item->delta_report.data = NULL; /* bound in GetMessage */
     item->delta_report.len = deltaLen;
