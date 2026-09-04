@@ -70,7 +70,8 @@ bool IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamControlMe
 /** Submit a complete CHID input-report snapshot. New snapshots replace the queued
  * snapshot while an older one awaits ACK; packet IDs are allocated only when sent. */
 bool IHS_SessionChannelControlSubmitHIDReport(IHS_SessionChannel *channel,
-                                              const uint8_t *data, size_t dataLen);
+                                              const uint8_t *data, size_t dataLen,
+                                              bool activeInput);
 
 /** Commit a queued snapshot even if another HID snapshot is still in flight. Used
  * only to order the final neutral controller state before StopRequest. */

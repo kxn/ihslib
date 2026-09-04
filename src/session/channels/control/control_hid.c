@@ -252,7 +252,8 @@ bool IHS_SessionHIDSendReport(IHS_Session *session) {
     // before doing the expensive encrypt + send work.
     uint8_t *packed = NULL;
     size_t packedLen = 0;
-    if (session->hidManager->inputReports.size > 0) {
+    bool hasActiveInput = session->hidManager->inputReports.size > 0;
+    if (hasActiveInput) {
         reports.n_device_reports = session->hidManager->inputReports.size;
         reports.device_reports = (IHS_HIDDeviceReportMessage **) session->hidManager->inputReports.data;
         packedLen = chidmessage_from_remote__get_packed_size(&outMessage);
@@ -278,7 +279,7 @@ bool IHS_SessionHIDSendReport(IHS_Session *session) {
          * ACK this replaces the queued snapshot instead of allocating another
          * reliable packet ID. */
         IHS_SessionChannel *channel = IHS_SessionChannelForType(session, IHS_SessionChannelTypeControl);
-        ret = IHS_SessionChannelControlSubmitHIDReport(channel, packed, packedLen);
+        ret = IHS_SessionChannelControlSubmitHIDReport(channel, packed, packedLen, hasActiveInput);
         free(packed);
     }
     return ret;

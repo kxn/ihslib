@@ -154,7 +154,8 @@ static bool ControlSendLocked(IHS_SessionChannelControl *control, EStreamControl
  * (retransmission until ACK/NACK). Superseding an unacked DELTA would break
  * the delta chain on the host. */
 bool IHS_SessionChannelControlSubmitHIDReport(IHS_SessionChannel *channel,
-                                              const uint8_t *data, size_t dataLen) {
+                                              const uint8_t *data, size_t dataLen,
+                                              bool activeInput) {
     assert(channel->id == IHS_SessionChannelIdControl);
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
     IHS_MutexLock(control->sendLock);
@@ -163,10 +164,10 @@ bool IHS_SessionChannelControlSubmitHIDReport(IHS_SessionChannel *channel,
     wrapped.has_data = true;
     wrapped.data.data = (uint8_t *) data;
     wrapped.data.len = dataLen;
-    /* Official passes the tick's actual input-activity state here; we have no
-     * per-tick signal yet, so report active (matches the previous behaviour). */
+    /* Official passes the tick's actual input-activity state here
+     * (SendRemoteHIDMessage bool → CRemoteHIDMsg.active_input, 0x7ab4c8). */
     wrapped.has_active_input = true;
-    wrapped.active_input = true;
+    wrapped.active_input = activeInput;
     bool ret = ControlSendLocked(control, k_EStreamControlRemoteHID,
                                  (const ProtobufCMessage *) &wrapped, IHS_PACKET_ID_NEXT,
                                  NULL);
