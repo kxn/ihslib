@@ -233,6 +233,11 @@ static void OnControlDeinit(IHS_SessionChannel *channel) {
 static void OnControlReceived(IHS_SessionChannel *channel, IHS_SessionPacket *packet) {
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
     IHS_SessionPacketsWindow *window = control->framePacketWindow;
+    /* Official ACK policy (UpdateReliableState 0x7f9e70): one ACK per receive
+     * batch, carrying the contiguous delivery point, emitted after frames are
+     * pulled from the window — not one ACK per received packet. */
+    bool ackNeeded = false;
+    uint16_t ackThroughId = 0;
     switch (packet->header.type) {
         case IHS_SessionPacketTypeReliable:
         case IHS_SessionPacketTypeReliableFrag:
@@ -246,8 +251,6 @@ static void OnControlReceived(IHS_SessionChannel *channel, IHS_SessionPacket *pa
                 }
                 return;
             }
-            IHS_SessionChannelPacketAck(channel, packet->header.packetId,
-                                        packet->header.fragmentId, true);
             break;
         case IHS_SessionPacketTypeACK:
             ControlOnHIDPacketAck(control, packet->header.packetId,
@@ -269,6 +272,10 @@ static void OnControlReceived(IHS_SessionChannel *channel, IHS_SessionPacket *pa
     for (; IHS_SessionPacketsWindowPoll(window, &frame); IHS_SessionPacketsWindowReleaseFrame(&frame)) {
         EStreamControlMessage type = *IHS_BufferPointer(&frame.body);
         IHS_BufferOffsetBy(&frame.body, 1);
+        /* Delivery point after this frame: the head packet id plus the number
+         * of fragments that follow it (window.c packetsCount = 1 + fragmentId). */
+        ackThroughId = (uint16_t) (frame.header.packetId + frame.header.fragmentId);
+        ackNeeded = true;
         if (IsMessageEncrypted(type)) {
             IHS_Buffer plain;
             IHS_BufferInit(&plain, 1024, 1024 * 1024);
@@ -308,6 +315,11 @@ static void OnControlReceived(IHS_SessionChannel *channel, IHS_SessionPacket *pa
     }
 
     IHS_BufferClear(&frame.body, true);
+
+    /* One ACK per receive batch at the new contiguous delivery point. */
+    if (ackNeeded) {
+        IHS_SessionChannelPacketAck(channel, ackThroughId, 0, true);
+    }
 
     /* Gap in our receive window: tell the peer so it resends from the hole
      * instead of relying on its retransmit timeout (official fast-recovery
