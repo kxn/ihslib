@@ -183,8 +183,9 @@ void IHS_HIDReportHolderAddDelta(IHS_HIDReportHolder *holder, const uint8_t *pre
      * On a 48-byte gamepad state this almost always stays a delta, matching
      * the official wire shape. */
     if ((size_t) deltaLen + 8 >= len) {
-        holder->dataBuffer.size += deltaMax; /* reserve; full path binds below */
-        size_t offset = holder->dataBuffer.size;
+        /* Discard the delta encoding ComputeDelta already wrote at `offset`
+         * and store the full state there instead. */
+        holder->dataBuffer.size = offset;
         uint8_t *full = IHS_BufferPointerForAppend(&holder->dataBuffer, len);
         memcpy(full, current, len);
         holder->dataBuffer.size += len;
