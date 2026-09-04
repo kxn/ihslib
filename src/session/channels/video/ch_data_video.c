@@ -437,7 +437,9 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
         return 1000;
     }
     uint16_t latest = 0;
-    size_t folded = IHS_FrameStatsAggregatorDrain(session->frameStats, &latest);
+    IHS_FrameStatsSlot drained[IHS_FRAME_STATS_RING_SIZE];
+    size_t folded = IHS_FrameStatsAggregatorDrainSlots(session->frameStats, drained,
+                                                       IHS_FRAME_STATS_RING_SIZE, &latest);
     if (folded == 0) {
         return 1000;
     }
@@ -482,6 +484,54 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
     }
     message.n_accumulated_stats = rowCount;
     message.accumulated_stats = accumPtrs;
+
+    /* Per-frame rows with event timestamps relative to the stream-time base
+     * (official CFastFrameStats::Save subtracts the connection base). The
+     * host's per-frame network-time judgment consumes these events. */
+    uint32_t timeBase = session->frameStats->timeBase;
+    static CFrameStats frameRows[IHS_FRAME_STATS_RING_SIZE];
+    static CFrameEvent eventRows[IHS_FRAME_STATS_RING_SIZE * IHS_FRAME_STATS_EVENT_COUNT];
+    static CFrameEvent *eventPtrs[IHS_FRAME_STATS_RING_SIZE * IHS_FRAME_STATS_EVENT_COUNT];
+    static CFrameStats *framePtrs[IHS_FRAME_STATS_RING_SIZE];
+    size_t frameCount = 0;
+    size_t eventCount = 0;
+    if (session->frameStats->fullReporting) {
+        for (size_t i = 0; i < folded; i++) {
+            const IHS_FrameStatsSlot *slot = &drained[i];
+            CFrameStats *row = &frameRows[frameCount];
+            cframe_stats__init(row);
+            row->frame_id = slot->frameId;
+            row->n_events = 0;
+            row->events = &eventPtrs[eventCount];
+            for (int e = 0; e < IHS_FRAME_STATS_EVENT_COUNT; e++) {
+                if (!(slot->eventMask & (1u << e))) {
+                    continue;
+                }
+                CFrameEvent *ev = &eventRows[eventCount];
+                cframe_event__init(ev);
+                ev->event_id = (EStreamFrameEvent) e;
+                ev->timestamp = slot->events[e] - timeBase;
+                eventPtrs[eventCount] = ev;
+                eventCount++;
+                row->n_events++;
+            }
+            row->result = slot->result;
+            if (slot->inputMark != 0) {
+                row->has_input_mark = 1;
+                row->input_mark = slot->inputMark;
+            }
+            if (slot->frameSize != 0) {
+                row->has_frame_size = 1;
+                row->frame_size = slot->frameSize;
+            }
+            frameCount++;
+        }
+        for (size_t r = 0; r < frameCount; r++) {
+            framePtrs[r] = &frameRows[r];
+        }
+        message.n_stats = frameCount;
+        message.stats = framePtrs;
+    }
 
     IHS_SessionChannelStatsSend(stats, k_EStreamStatsFrameEvents, (const ProtobufCMessage *) &message,
                                 IHS_PACKET_ID_NEXT);

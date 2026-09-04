@@ -33,8 +33,14 @@ static uint64_t SendKeepAlive(int runCount, void *data);
 void IHS_SessionChannelControlStartHeartbeat(IHS_SessionChannel *channel) {
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
     if (control->keepAliveTimer) return;
+    /* Official sends the first KeepAlive immediately upon entering the
+     * streaming state (HandleStreaming 0x7a7140: last==0 → send now), then
+     * every 10.0 s (0xA0000 in 16.16 fixed-point seconds). */
+    CKeepAliveMsg first = CKEEP_ALIVE_MSG__INIT;
+    IHS_SessionChannelControlSend(channel, k_EStreamControlKeepAlive,
+                                  (const ProtobufCMessage *) &first, IHS_PACKET_ID_NEXT);
     control->keepAliveTimer = IHS_TimerTaskStart(channel->session->timers, SendKeepAlive, NULL,
-                                                 5000, control);
+                                                 10000, control);
 }
 
 void IHS_SessionChannelControlStopHeartbeat(IHS_SessionChannel *channel) {

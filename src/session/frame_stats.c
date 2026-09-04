@@ -83,6 +83,12 @@ void IHS_FrameStatsAggregatorDestroy(IHS_FrameStatsAggregator *agg) {
     free(agg);
 }
 
+void IHS_FrameStatsAggregatorSetTimeBase(IHS_FrameStatsAggregator *agg, uint32_t timeBase) {
+    IHS_MutexLock(agg->lock);
+    agg->timeBase = timeBase;
+    IHS_MutexUnlock(agg->lock);
+}
+
 void IHS_FrameStatsAggregatorSetFullReporting(IHS_FrameStatsAggregator *agg, bool enabled) {
     IHS_MutexLock(agg->lock);
     agg->fullReporting = enabled;
@@ -216,7 +222,8 @@ static void fold_slot(IHS_FrameStatsAggregator *agg, IHS_FrameStatsSlot *slot) {
      * left out of this MVP; when those signals land they can fold in here. */
 }
 
-size_t IHS_FrameStatsAggregatorDrain(IHS_FrameStatsAggregator *agg, uint16_t *outLatestFrameId) {
+static size_t FrameStatsDrainCore(IHS_FrameStatsAggregator *agg, IHS_FrameStatsSlot *out,
+                                  size_t max, uint16_t *outLatestFrameId) {
     size_t folded = 0;
     IHS_MutexLock(agg->lock);
 
@@ -233,6 +240,9 @@ size_t IHS_FrameStatsAggregatorDrain(IHS_FrameStatsAggregator *agg, uint16_t *ou
                 slot->complete = true;
             }
             fold_slot(agg, slot);
+            if (out != NULL && folded < max) {
+                out[folded] = *slot;
+            }
             memset(slot, 0, sizeof(*slot));
             folded++;
         }
@@ -245,4 +255,14 @@ size_t IHS_FrameStatsAggregatorDrain(IHS_FrameStatsAggregator *agg, uint16_t *ou
     }
     IHS_MutexUnlock(agg->lock);
     return folded;
+}
+
+size_t IHS_FrameStatsAggregatorDrain(IHS_FrameStatsAggregator *agg, uint16_t *outLatestFrameId) {
+    return FrameStatsDrainCore(agg, NULL, 0, outLatestFrameId);
+}
+
+size_t IHS_FrameStatsAggregatorDrainSlots(IHS_FrameStatsAggregator *agg,
+                                          IHS_FrameStatsSlot *out, size_t max,
+                                          uint16_t *outLatestFrameId) {
+    return FrameStatsDrainCore(agg, out, max, outLatestFrameId);
 }

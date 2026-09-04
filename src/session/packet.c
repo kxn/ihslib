@@ -132,10 +132,16 @@ void IHS_SessionPacketClear(IHS_SessionPacket *packet, bool freeData) {
 }
 
 uint32_t IHS_SessionPacketTimestamp() {
-    /* Milliseconds, matching the official client's GetStreamTimestamp: the host
-     * reads sendTimestamp/feed timestamps as milliseconds (SessionStats
-     * AvgNetworkMS was ~58.5M "ms" - 16 hours - when we sent 1/65536-s ticks). */
+    /* 16.16 fixed-point seconds on CLOCK_MONOTONIC, matching the official
+     * client's GetStreamTimestamp (libmain.so 0x802a88: Plat_RelativeTicks is
+     * clock_gettime(MONOTONIC) scaled by 1e9; Plat_RelativeTickFrequency
+     * returns 1e9; result = (sec<<16) | frac). All on-wire timestamps —
+     * packet headers, ACK echoes, frame-stats events — use this unit. The
+     * earlier epoch-ms formats put the host's stream clock arithmetic out of
+     * base and inflated SessionStats network time to ~58.5M ms. */
     struct timespec tp;
-    clock_gettime(CLOCK_REALTIME, &tp);
-    return (uint32_t) ((uint64_t) tp.tv_sec * 1000 + tp.tv_nsec / 1000000);
+    clock_gettime(CLOCK_MONOTONIC, &tp);
+    uint64_t secs = (uint64_t) tp.tv_sec;
+    uint64_t frac = (uint64_t) ((tp.tv_nsec * 65536) / 1000000000ull);
+    return (uint32_t) ((secs << 16) | (frac & 0xffffu));
 }

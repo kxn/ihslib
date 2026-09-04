@@ -27,6 +27,7 @@
 #include <stdio.h>
 
 #include "ch_control.h"
+#include "../frame_stats.h"
 
 #include "session/session_pri.h"
 
@@ -259,6 +260,12 @@ static void OnNegotiationSetConfig(IHS_SessionChannel *channel, const CNegotiati
 static void OnConnected(IHS_SessionChannel *channel) {
     IHS_Session *session = channel->session;
     session->state.connectionState = IHS_SessionConnectionStateConnected;
+    /* Stream-time origin for frame-stats wire timestamps (official
+     * conn+848 base, STEAMLINK_PROTOCOL_RE.md §9c). */
+    if (session->frameStats != NULL) {
+        IHS_FrameStatsAggregatorSetTimeBase(session->frameStats,
+                                            IHS_SessionPacketTimestamp());
+    }
     IHS_SessionChannelControlStartHeartbeat(channel);
     if (session->callbacks.session && session->callbacks.session->connected) {
         session->callbacks.session->connected(session, session->callbackContexts.session);

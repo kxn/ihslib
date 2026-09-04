@@ -88,6 +88,10 @@ typedef struct IHS_FrameStatsAggregator {
     uint16_t lastDisplayedFrameId;
     uint32_t lastFrameTimestamp;    /* event 18 of the previous *completed* frame */
     bool fullReporting;             /* mirrors CStreamClient::sendFullFrameStats */
+    /** Stream-time origin: IHS_SessionPacketTimestamp() captured when the
+     * session reached Connected. Wire timestamps are relative to this,
+     * matching CFastFrameStats::Save(stats, full, connTimeBase). */
+    uint32_t timeBase;
 } IHS_FrameStatsAggregator;
 
 IHS_FrameStatsAggregator *IHS_FrameStatsAggregatorCreate(void);
@@ -95,6 +99,16 @@ IHS_FrameStatsAggregator *IHS_FrameStatsAggregatorCreate(void);
 void IHS_FrameStatsAggregatorDestroy(IHS_FrameStatsAggregator *agg);
 
 void IHS_FrameStatsAggregatorSetFullReporting(IHS_FrameStatsAggregator *agg, bool enabled);
+
+void IHS_FrameStatsAggregatorSetTimeBase(IHS_FrameStatsAggregator *agg, uint32_t timeBase);
+
+/**
+ * Drain like IHS_FrameStatsAggregatorDrain, additionally copying each folded
+ * slot (events still in absolute timestamp units) into `out` (up to max).
+ * Returns the number of slots drained. */
+size_t IHS_FrameStatsAggregatorDrainSlots(IHS_FrameStatsAggregator *agg,
+                                          IHS_FrameStatsSlot *out, size_t max,
+                                          uint16_t *outLatestFrameId);
 
 /**
  * Record one of the four app-driven events (DecodeBegin/DecodeEnd/UploadBegin/UploadEnd).
