@@ -295,10 +295,9 @@ void IHS_SessionGetReliabilityStats(IHS_Session *session,
         stats->hidSent = control->hidSent;
         stats->hidAcknowledged = control->hidAcknowledged;
         stats->hidSuperseded = control->hidSuperseded;
-        stats->hidPending = control->hidPendingValid ? 1U : 0U;
-        stats->hidInFlight = (uint32_t) control->hidInFlightCount;
-        stats->hidOldestInFlightPacketId = control->hidInFlightCount > 0
-                                          ? control->hidInFlightIds[0] : -1;
+        stats->hidPending = 0U;
+        stats->hidInFlight = 0U;
+        stats->hidOldestInFlightPacketId = -1;
         IHS_MutexUnlock(control->sendLock);
     }
 }

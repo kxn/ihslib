@@ -270,3 +270,32 @@ static inline void FrameItemRecycle(IHS_SessionWindowItem *item) {
     IHS_BufferClear(&item->body, true);
     memset(item, 0, sizeof(IHS_SessionWindowItem));
 }
+uint16_t IHS_SessionPacketsWindowNextNeededPacketId(const IHS_SessionPacketsWindow *window) {
+    uint16_t size = IHS_SessionPacketsWindowSize(window);
+    if (size == 0) {
+        return 0;
+    }
+    return (uint16_t) (window->tail.id - (uint16_t) (size - 1));
+}
+
+size_t IHS_SessionPacketsWindowHoleBitmap(const IHS_SessionPacketsWindow *window,
+                                          uint16_t startId, uint8_t *bitmap, size_t maxPackets) {
+    uint16_t size = IHS_SessionPacketsWindowSize(window);
+    if (size == 0 || maxPackets == 0) {
+        return 0;
+    }
+    memset(bitmap, 0, (maxPackets + 7) / 8);
+    for (int i = window->head.pos, j = window->head.pos + size; i < j; i++) {
+        const IHS_SessionWindowItem *item = &window->data[i % window->capacity];
+        if (!FrameItemIsUsed(item)) {
+            continue;
+        }
+        uint16_t id = (uint16_t) (window->tail.id - (uint16_t) (j - 1 - i));
+        uint32_t offset = (uint32_t) (uint16_t) (id - startId);
+        if (offset >= maxPackets) {
+            continue;
+        }
+        bitmap[offset / 8] |= (uint8_t) (1u << (offset % 8));
+    }
+    return size;
+}

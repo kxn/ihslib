@@ -43,6 +43,8 @@ static bool IsMessageEncrypted(EStreamControlMessage type);
 static size_t EncryptedMessageCapacity(size_t plainSize);
 
 static void OnControlInit(IHS_SessionChannel *channel, const void *data);
+static void ControlOnNackPacket(IHS_SessionChannelControl *control, IHS_SessionPacket *packet);
+static void ControlSendGapNack(IHS_SessionChannelControl *control);
 
 static void OnControlDeinit(IHS_SessionChannel *channel);
 
@@ -146,62 +148,29 @@ static bool ControlSendLocked(IHS_SessionChannelControl *control, EStreamControl
     return ret;
 }
 
-static bool ControlSendPendingHIDLocked(IHS_SessionChannelControl *control, bool force) {
-    /* Reclaim in-flight slots whose retransmission tracking was retired by the
-     * give-up window: their ACKs will never arrive, and without this the slot
-     * array leaks one entry per permanently-lost report until HID goes silent. */
-    while (control->hidInFlightCount > 0 &&
-           !IHS_RetransmissionIsTracked(&control->base.session->retransmission,
-                                        IHS_SessionChannelIdControl,
-                                        control->hidInFlightIds[0], 0)) {
-        memmove(control->hidInFlightIds, &control->hidInFlightIds[1],
-                (control->hidInFlightCount - 1) * sizeof(control->hidInFlightIds[0]));
-        control->hidInFlightCount--;
-    }
-    if (!control->hidPendingValid ||
-        (!force && control->hidInFlightCount >= IHS_CONTROL_HID_MAX_IN_FLIGHT)) {
-        return true;
-    }
-    if (control->hidInFlightCount >= sizeof(control->hidInFlightIds) /
-                                     sizeof(control->hidInFlightIds[0])) {
-        IHS_SessionLog(control->base.session, IHS_LogLevelError, "HID",
-                       "HID in-flight set exhausted");
-        return false;
-    }
-
-    CRemoteHIDMsg wrapped = CREMOTE_HIDMSG__INIT;
-    wrapped.has_data = true;
-    wrapped.data.data = IHS_BufferPointer(&control->hidPending);
-    wrapped.data.len = control->hidPending.size;
-    wrapped.has_active_input = true;
-    wrapped.active_input = true;
-    uint16_t packetId;
-    if (!ControlSendLocked(control, k_EStreamControlRemoteHID,
-                           (const ProtobufCMessage *) &wrapped, IHS_PACKET_ID_NEXT,
-                           &packetId)) {
-        return false;
-    }
-    control->hidInFlightIds[control->hidInFlightCount++] = packetId;
-    control->hidSent++;
-    control->hidPendingValid = false;
-    IHS_BufferClear(&control->hidPending, false);
-    return true;
-}
-
+/* Official input path (docs/STEAMLINK_PROTOCOL_RE.md §9b.2): each 8ms tick
+ * sends every device's delta in ONE message; there is no input-layer in-flight
+ * window, coalescing, or supersede — reliable delivery is the transport's job
+ * (retransmission until ACK/NACK). Superseding an unacked DELTA would break
+ * the delta chain on the host. */
 bool IHS_SessionChannelControlSubmitHIDReport(IHS_SessionChannel *channel,
                                               const uint8_t *data, size_t dataLen) {
     assert(channel->id == IHS_SessionChannelIdControl);
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
     IHS_MutexLock(control->sendLock);
     control->hidSubmitted++;
-    if (control->hidPendingValid ||
-        control->hidInFlightCount >= IHS_CONTROL_HID_MAX_IN_FLIGHT) {
-        control->hidCoalesced++;
-    }
-    IHS_BufferClear(&control->hidPending, false);
-    IHS_BufferAppendMem(&control->hidPending, data, dataLen);
-    control->hidPendingValid = true;
-    bool ret = ControlSendPendingHIDLocked(control, false);
+    CRemoteHIDMsg wrapped = CREMOTE_HIDMSG__INIT;
+    wrapped.has_data = true;
+    wrapped.data.data = (uint8_t *) data;
+    wrapped.data.len = dataLen;
+    /* Official passes the tick's actual input-activity state here; we have no
+     * per-tick signal yet, so report active (matches the previous behaviour). */
+    wrapped.has_active_input = true;
+    wrapped.active_input = true;
+    bool ret = ControlSendLocked(control, k_EStreamControlRemoteHID,
+                                 (const ProtobufCMessage *) &wrapped, IHS_PACKET_ID_NEXT,
+                                 NULL);
+    control->hidSent++;
     IHS_MutexUnlock(control->sendLock);
     if (!ret) {
         IHS_SessionDisconnect(channel->session);
@@ -211,11 +180,10 @@ bool IHS_SessionChannelControlSubmitHIDReport(IHS_SessionChannel *channel,
 
 bool IHS_SessionChannelControlFlushPendingHID(IHS_SessionChannel *channel) {
     assert(channel->id == IHS_SessionChannelIdControl);
-    IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
-    IHS_MutexLock(control->sendLock);
-    bool ret = ControlSendPendingHIDLocked(control, true);
-    IHS_MutexUnlock(control->sendLock);
-    return ret;
+    IHS_UNUSED(channel);
+    /* Kept for API compatibility: reports are sent on submit, matching the
+     * official client. The transport retransmits until they are delivered. */
+    return true;
 }
 
 static void ControlOnHIDPacketAck(IHS_SessionChannelControl *control, uint16_t packetId,
@@ -223,36 +191,12 @@ static void ControlOnHIDPacketAck(IHS_SessionChannelControl *control, uint16_t p
     if (fragmentId != 0) {
         return;
     }
-    IHS_MutexLock(control->sendLock);
-    size_t found = control->hidInFlightCount;
-    for (size_t i = 0; i < control->hidInFlightCount; i++) {
-        if (control->hidInFlightIds[i] == packetId) {
-            found = i;
-            break;
-        }
-    }
-    bool ret = true;
-    if (found < control->hidInFlightCount) {
-        for (size_t i = 0; i < found; i++) {
-            if (IHS_RetransmissionSupersede(&control->base.session->retransmission,
-                                            IHS_SessionChannelIdControl,
-                                            control->hidInFlightIds[i], 0)) {
-                control->hidSuperseded++;
-            }
-        }
-        size_t removed = found + 1;
-        if (removed < control->hidInFlightCount) {
-            memmove(control->hidInFlightIds, &control->hidInFlightIds[removed],
-                    (control->hidInFlightCount - removed) * sizeof(control->hidInFlightIds[0]));
-        }
-        control->hidInFlightCount -= removed;
-        control->hidAcknowledged++;
-        ret = ControlSendPendingHIDLocked(control, false);
-    }
-    IHS_MutexUnlock(control->sendLock);
-    if (!ret) {
-        IHS_SessionDisconnect(control->base.session);
-    }
+    /* Input reports no longer carry admission state; the transport releases
+     * the packet from retransmission on this ACK. */
+    IHS_RetransmissionAcknowledge(&control->base.session->retransmission,
+                                  IHS_SessionChannelIdControl, packetId, fragmentId,
+                                  IHS_TimerNow());
+    control->hidAcknowledged++;
 }
 
 void IHS_SessionChannelControlHandshake(IHS_SessionChannel *channel, bool networkTest) {
@@ -276,14 +220,12 @@ static void OnControlInit(IHS_SessionChannel *channel, const void *data) {
     IHS_UNUSED(data);
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
     control->sendLock = IHS_MutexCreate();
-    IHS_BufferInit(&control->hidPending, 256, 64 * 1024);
     control->framePacketWindow = IHS_SessionPacketsWindowCreate(128);
 }
 
 static void OnControlDeinit(IHS_SessionChannel *channel) {
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
     IHS_SessionPacketsWindowDestroy(control->framePacketWindow);
-    IHS_BufferClear(&control->hidPending, true);
     IHS_MutexDestroy(control->sendLock);
 }
 
@@ -311,6 +253,7 @@ static void OnControlReceived(IHS_SessionChannel *channel, IHS_SessionPacket *pa
                                   packet->header.fragmentId);
             break;
         case IHS_SessionPacketTypeNACK:
+            ControlOnNackPacket(control, packet);
             break;
         default:
             // Other items should not come here
@@ -361,6 +304,80 @@ static void OnControlReceived(IHS_SessionChannel *channel, IHS_SessionPacket *pa
     }
 
     IHS_BufferClear(&frame.body, true);
+
+    /* Gap in our receive window: tell the peer so it resends from the hole
+     * instead of relying on its retransmit timeout (official fast-recovery
+     * loop, docs/STEAMLINK_PROTOCOL_RE.md §9.1). */
+    ControlSendGapNack(control);
+}
+
+/* Peer reports its receive state for OUR reliable stream. Extended NACK body
+ * (wire offsets after the 13B header): [0..3] u32 timestamp, [4..5] u16
+ * contiguous delivery point, [6..] presence mask (bit=1: peer holds it).
+ * bit=1 releases the packet from retransmission; bit=0 forces a resend.
+ * Header-only (empty body) is the simple form: everything the reference
+ * (header.packetId) covers is missing on the peer. */
+static void ControlOnNackPacket(IHS_SessionChannelControl *control, IHS_SessionPacket *packet) {
+    IHS_Session *session = control->base.session;
+    uint64_t nowMs = IHS_TimerNow();
+    if (packet->body.size >= 6) {
+        const uint8_t *body = IHS_BufferPointer(&packet->body);
+        uint16_t contiguous = (uint16_t) (body[0] | (body[1] << 8));
+        IHS_RetransmissionAcknowledgeThrough(&session->retransmission,
+                                             IHS_SessionChannelIdControl, contiguous, nowMs);
+        size_t maskLen = packet->body.size - 2;
+        for (size_t j = 0; j < maskLen; j++) {
+            uint8_t bits = body[2 + j];
+            for (size_t k = 0; k < 8; k++) {
+                uint16_t id = (uint16_t) (contiguous + j * 8 + k);
+                if ((bits >> k) & 1u) {
+                    IHS_RetransmissionAcknowledge(&session->retransmission,
+                                                  IHS_SessionChannelIdControl, id, 0, nowMs);
+                } else {
+                    IHS_RetransmissionNack(&session->retransmission,
+                                           IHS_SessionChannelIdControl, id, 0, nowMs);
+                }
+            }
+        }
+    } else {
+        /* Simple NACK: force retransmit of everything unacked at/below the
+         * referenced packet id. */
+        IHS_RetransmissionNackAllThrough(&session->retransmission,
+                                         IHS_SessionChannelIdControl,
+                                         packet->header.packetId, nowMs);
+    }
+}
+
+static void ControlSendGapNack(IHS_SessionChannelControl *control) {
+    IHS_Session *session = control->base.session;
+    IHS_SessionPacketsWindow *window = control->framePacketWindow;
+    if (IHS_SessionPacketsWindowSize(window) == 0) {
+        return;
+    }
+    uint16_t needed = IHS_SessionPacketsWindowNextNeededPacketId(window);
+    if (needed == 0) {
+        return;
+    }
+    uint64_t nowMs = IHS_TimerNow();
+    if (control->lastNackSentMs != 0 &&
+        nowMs - control->lastNackSentMs < 50) {
+        return;
+    }
+    control->lastNackSentMs = nowMs;
+
+    /* Extended NACK: presence mask covering up to 120 ids from the hole. */
+    uint8_t bitmap[15];
+    IHS_SessionPacketsWindowHoleBitmap(window, needed, bitmap, 120);
+
+    IHS_SessionPacket packet;
+    IHS_SessionChannelInitializePacket(&control->base, &packet, IHS_SessionPacketTypeNACK,
+                                       false, needed);
+    packet.header.fragmentId = 0;
+    IHS_BufferAppendUInt32LE(&packet.body, IHS_SessionPacketTimestamp());
+    IHS_BufferAppendUInt16LE(&packet.body, needed);
+    IHS_BufferAppendMem(&packet.body, bitmap, sizeof(bitmap));
+    IHS_SessionChannelQueuePacket(&control->base, &packet, false);
+    IHS_SessionPacketClear(&packet, true);
 }
 
 void IHS_SessionChannelControlOnMessageReceived(IHS_SessionChannel *channel, EStreamControlMessage type,

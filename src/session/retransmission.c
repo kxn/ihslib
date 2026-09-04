@@ -15,11 +15,13 @@
 #define RETRANSMISSION_INITIAL_MS 25
 #define RETRANSMISSION_MAX_MS 100
 #define RETRANSMISSION_SUPERSEDE_MIN_RETRIES 3
-/* A reliable packet unacked for this long will never be ACKed: after the peer
- * resyncs its decrypt sequence past the gap, retransmitted copies carry stale
- * sequence numbers and are dropped as replays. Retire it so the queue drains;
- * state convergence relies on the periodic full-state HID heartbeat. */
-#define RETRANSMISSION_GIVE_UP_MS 3000
+/* No give-up: the official client retransmits reliable packets until they are
+ * ACKed or released by a peer NACK (libmain.so 0x7f8ac4 SendReliablePackets /
+ * 0x7f94b8 HandleAckPacket / 0x7f95dc HandleNackPacket contain no retire
+ * path). The host delivers encrypted frames strictly in order, so a delayed
+ * retransmit keeps a valid sequence number and heals the hole. The former
+ * 3 s give-up created permanent holes that wedged the host's ordered window
+ * (~20 s apply stall). See docs/STEAMLINK_PROTOCOL_RE.md §9. */
 
 struct IHS_RetransmissionPending {
     IHS_SessionPacket packet;
@@ -249,20 +251,14 @@ size_t IHS_RetransmissionProcessAt(IHS_SessionRetransmission *retransmission, ui
     IHS_RetransmissionPending **link = &retransmission->head;
     while (*link != NULL) {
         IHS_RetransmissionPending *pending = *link;
-        bool giveUp = pending->initialSent &&
-                      nowMs >= pending->firstTrackedMs &&
-                      nowMs - pending->firstTrackedMs >= RETRANSMISSION_GIVE_UP_MS;
-        if ((pending->superseded &&
-             pending->retryCount >= RETRANSMISSION_SUPERSEDE_MIN_RETRIES) ||
-            giveUp) {
+        /* Only superseded packets are retired; unacked packets retransmit
+         * until ACKed or NACK-released, matching the official client. */
+        if (pending->superseded &&
+            pending->retryCount >= RETRANSMISSION_SUPERSEDE_MIN_RETRIES) {
             *link = pending->next;
             pending->next = retired;
             retired = pending;
-            if (giveUp) {
-                retransmission->stats.giveUps++;
-            } else {
-                retransmission->stats.superseded++;
-            }
+            retransmission->stats.superseded++;
             retransmission->stats.outstanding--;
             continue;
         }
@@ -350,4 +346,61 @@ void IHS_RetransmissionGetStats(IHS_SessionRetransmission *retransmission,
     }
     stats->oldestOutstandingMs = found && nowMs >= oldest ? nowMs - oldest : 0;
     IHS_MutexUnlock(retransmission->lock);
+}
+
+size_t IHS_RetransmissionAcknowledgeThrough(IHS_SessionRetransmission *retransmission,
+                                            IHS_SessionChannelId channelId, uint16_t packetId,
+                                            uint64_t nowMs) {
+    size_t released = 0;
+    IHS_MutexLock(retransmission->lock);
+    IHS_RetransmissionPending **link = &retransmission->head;
+    while (*link != NULL) {
+        IHS_RetransmissionPending *pending = *link;
+        if (pending->packet.header.channelId != channelId) {
+            link = &pending->next;
+            continue;
+        }
+        uint16_t below = (uint16_t) (packetId - pending->packet.header.packetId);
+        if (below == 0 || below >= 0x8000u) {
+            /* At/after the boundary (or equal): not strictly below. */
+            link = &pending->next;
+            continue;
+        }
+        *link = pending->next;
+        retransmission->stats.acknowledged++;
+        retransmission->stats.outstanding--;
+        PendingDestroy(pending);
+        released++;
+        continue;
+    }
+    IHS_MutexUnlock(retransmission->lock);
+    (void) nowMs;
+    return released;
+}
+
+size_t IHS_RetransmissionNackAllThrough(IHS_SessionRetransmission *retransmission,
+                                        IHS_SessionChannelId channelId, uint16_t packetId,
+                                        uint64_t nowMs) {
+    size_t nudged = 0;
+    IHS_MutexLock(retransmission->lock);
+    for (IHS_RetransmissionPending *pending = retransmission->head; pending != NULL;
+         pending = pending->next) {
+        if (pending->packet.header.channelId != channelId) {
+            continue;
+        }
+        uint16_t below = (uint16_t) (packetId - pending->packet.header.packetId);
+        if (below >= 0x8000u) {
+            /* Above the reference: not covered by this NACK. */
+            continue;
+        }
+        if (pending->initialSent) {
+            pending->nextRetryMs = nowMs;
+        } else {
+            pending->nackPending = true;
+        }
+        retransmission->stats.nacks++;
+        nudged++;
+    }
+    IHS_MutexUnlock(retransmission->lock);
+    return nudged;
 }

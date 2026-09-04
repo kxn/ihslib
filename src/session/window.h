@@ -66,3 +66,11 @@ uint16_t IHS_SessionPacketsWindowAvailable(const IHS_SessionPacketsWindow *windo
 uint16_t IHS_SessionPacketsWindowSize(const IHS_SessionPacketsWindow *window);
 
 bool IHS_SessionPacketsWindowHasFrame(const IHS_SessionPacketsWindow *window);
+
+/* NACK support (official protocol, docs/STEAMLINK_PROTOCOL_RE.md §9.1):
+ * the lowest packet id whose delivery is still pending at the window head,
+ * and a presence bitmap for ids from startId on (bit=1: held, bit=0: hole). */
+uint16_t IHS_SessionPacketsWindowNextNeededPacketId(const IHS_SessionPacketsWindow *window);
+
+size_t IHS_SessionPacketsWindowHoleBitmap(const IHS_SessionPacketsWindow *window,
+                                          uint16_t startId, uint8_t *bitmap, size_t maxPackets);

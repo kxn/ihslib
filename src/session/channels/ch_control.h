@@ -35,13 +35,9 @@
 #include "protobuf/remoteplay.pb-c.h"
 #include "protobuf/hiddevices.pb-c.h"
 
-/* Single in-flight HID report, matching the official client's serial sends:
- * the host's ordered control window rejects or holds out-of-order reports, so
- * concurrent in-flight reports risk reordered application. A lost report can
- * no longer wedge the channel - the retransmission give-up (3 s) retires it
- * and the in-flight slot is reclaimed, after which the pending report carries
- * the newest full state. */
-#define IHS_CONTROL_HID_MAX_IN_FLIGHT 1
+/* Official input path: reports are sent on submit (one batched message per
+ * 8ms tick); reliable delivery is handled entirely by the transport
+ * (retransmission until ACK/NACK). See docs/STEAMLINK_PROTOCOL_RE.md §9. */
 
 typedef struct IHS_SessionChannelControl {
     IHS_SessionChannel base;
@@ -52,13 +48,6 @@ typedef struct IHS_SessionChannelControl {
     IHS_Mutex *sendLock;
     uint64_t sendEncryptSequence;
     uint64_t recvEncryptSequence;
-    /** Latest complete input snapshot waiting behind the bounded HID window. */
-    IHS_Buffer hidPending;
-    bool hidPendingValid;
-    /** Sent HID report ids awaiting ACK. Entries whose retransmission tracking
-     * was retired by the give-up window are reclaimed on the next send. */
-    uint16_t hidInFlightIds[4];
-    size_t hidInFlightCount;
     uint64_t hidSubmitted;
     uint64_t hidCoalesced;
     uint64_t hidSent;
@@ -68,6 +57,9 @@ typedef struct IHS_SessionChannelControl {
     /** Set once the frame window overflowed, so we disconnect only once. */
     bool overflowed;
     IHS_TimerTask *keepAliveTimer;
+    /** Rate limit for gap NACKs we emit (ms clock). Exact official interval
+     * unknown; see docs/STEAMLINK_PROTOCOL_RE.md §9.1. */
+    uint64_t lastNackSentMs;
 } IHS_SessionChannelControl;
 
 IHS_SessionChannel *IHS_SessionChannelControlCreate(IHS_Session *session);

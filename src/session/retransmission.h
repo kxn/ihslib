@@ -76,6 +76,19 @@ bool IHS_RetransmissionNack(IHS_SessionRetransmission *retransmission,
                             IHS_SessionChannelId channelId, uint16_t packetId,
                             int16_t fragmentId, uint64_t nowMs);
 
+/* Release every tracked pending packet on the channel whose packetId is
+ * strictly below packetId (fragment-agnostic). Mirrors the official NACK
+ * semantics where the contiguous-delivery field confirms all lower ids. */
+/* Force retransmit (set due immediately) of every tracked pending packet on
+ * the channel at/below packetId. Used for the simple (header-only) NACK. */
+size_t IHS_RetransmissionNackAllThrough(IHS_SessionRetransmission *retransmission,
+                                        IHS_SessionChannelId channelId, uint16_t packetId,
+                                        uint64_t nowMs);
+
+size_t IHS_RetransmissionAcknowledgeThrough(IHS_SessionRetransmission *retransmission,
+                                            IHS_SessionChannelId channelId, uint16_t packetId,
+                                            uint64_t nowMs);
+
 void IHS_RetransmissionNoteInitialSend(IHS_SessionRetransmission *retransmission,
                                        const IHS_SessionPacketHeader *header, bool sent,
                                        uint64_t nowMs);
