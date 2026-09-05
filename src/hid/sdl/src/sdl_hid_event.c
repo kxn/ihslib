@@ -40,6 +40,24 @@ static bool HandleCAxisEvent(IHS_HIDManager *manager, const SDL_GamepadAxisEvent
 
 static bool HandleSensorEvent(IHS_HIDManager *manager, const SDL_GamepadSensorEvent *event);
 
+/* Submit-time report buffer: the host requests a specific report length via
+ * DeviceStartInputReports (73 bytes for the Switch client) while the SDL
+ * state struct is smaller; the tail is zero-padded so delta masks treat it
+ * as never-changing. */
+static size_t HIDSDLPadState(const IHS_HIDStateSDL *state, size_t reportLength,
+                             uint8_t *out, size_t outCap) {
+    size_t len = reportLength;
+    if (len < sizeof(IHS_HIDStateSDL)) {
+        len = sizeof(IHS_HIDStateSDL);
+    }
+    if (len > outCap) {
+        len = outCap;
+    }
+    memset(out, 0, len);
+    memcpy(out, state, len < sizeof(IHS_HIDStateSDL) ? len : sizeof(IHS_HIDStateSDL));
+    return len;
+}
+
 bool IHS_HIDFlushSDLGameControllers(IHS_Session *session) {
     /* Official-client semantics: input reports are masked deltas against the
      * previous flushed state, batched once per frame. full_report is never
@@ -64,9 +82,15 @@ bool IHS_HIDFlushSDLGameControllers(IHS_Session *session) {
             IHS_HIDDeviceUnlock(managed->device);
             continue;
         }
+        uint8_t prevState[IHS_HID_SDL_WIRE_REPORT_MAX];
+        uint8_t curState[IHS_HID_SDL_WIRE_REPORT_MAX];
+        size_t wireLen = HIDSDLPadState(&device->states.previous,
+                                        managed->reportHolder.reportLength,
+                                        prevState, sizeof(prevState));
+        HIDSDLPadState(&device->states.current, managed->reportHolder.reportLength,
+                       curState, sizeof(curState));
         IHS_HIDDeviceReportAddDelta((IHS_HIDDevice *) device,
-                                    (const uint8_t *) &device->states.previous,
-                                    (const uint8_t *) &device->states.current, 48);
+                                    prevState, curState, wireLen);
         device->lastSubmitted = device->states.current;
         device->lastSubmittedSeq++;
         device->states.previous = device->states.current;
@@ -100,8 +124,12 @@ bool IHS_HIDRefreshSDLGameControllers(IHS_Session *session) {
         IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) managed->device;
         /* Resync state rides a full-mask delta: the official client never sends
          * the full_report field (set_full_report has zero call sites). */
+        uint8_t curState[IHS_HID_SDL_WIRE_REPORT_MAX];
+        size_t wireLen = HIDSDLPadState(&device->states.current,
+                                        managed->reportHolder.reportLength,
+                                        curState, sizeof(curState));
         IHS_HIDDeviceReportAddForcedFullMaskDelta((IHS_HIDDevice *) device,
-                                                  (const uint8_t *) &device->states.current, 48);
+                                                  curState, wireLen);
         device->lastSubmitted = device->states.current;
         device->lastSubmittedSeq++;
         device->states.previous = device->states.current;
@@ -186,8 +214,12 @@ bool IHS_HIDResetSDLGameControllers(IHS_Session *session) {
             changed = true;
             if (managed->reportHolder.reportLength > 0) {
                 /* Neutral-state resync also rides a full-mask delta. */
+                uint8_t curState[IHS_HID_SDL_WIRE_REPORT_MAX];
+                size_t wireLen = HIDSDLPadState(&device->states.current,
+                                                managed->reportHolder.reportLength,
+                                                curState, sizeof(curState));
                 IHS_HIDDeviceReportAddForcedFullMaskDelta(managed->device,
-                                                          (const uint8_t *) &device->states.current, 48);
+                                                          curState, wireLen);
             }
             device->states.previous = device->states.current;
         }
