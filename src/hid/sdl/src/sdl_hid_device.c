@@ -99,9 +99,12 @@ static void DeviceOpened(IHS_HIDDevice *device) {
     IHS_HIDDeviceSDL *deviceSdl = (IHS_HIDDeviceSDL *) device;
     IHS_HIDReportSDLInit(&deviceSdl->states.previous);
     IHS_HIDReportSDLInit(&deviceSdl->states.current);
+    IHS_BufferInit(&deviceSdl->pendingWrites, 64, 1024);
 }
 
 static void DeviceFree(IHS_HIDDevice *device) {
+    IHS_HIDDeviceSDL *deviceSdl = (IHS_HIDDeviceSDL *) device;
+    IHS_BufferClear(&deviceSdl->pendingWrites, true);
     free(device);
 }
 

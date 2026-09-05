@@ -80,45 +80,92 @@ static void HandleSetPS5Rumble(IHS_HIDDeviceSDL *sdl, const ByteCommand *byte);
 
 static void HandleSetPlayerIndex(IHS_HIDDeviceSDL *sdl, const ByteCommand *byte);
 
+static size_t WriteCommandLength(uint8_t type) {
+    switch (type) {
+        case COMMAND_RUMBLE:
+        case COMMAND_RUMBLE_TRIGGERS:
+            return sizeof(RumbleCommand);
+        case COMMAND_SET_LED:
+            return sizeof(LEDCommand);
+        case COMMAND_SET_SENSOR_ENABLED:
+        case COMMAND_SET_REQUESTED_REPORT_VERSION:
+        case COMMAND_SET_PS5_RUMBLE:
+        case COMMAND_SET_PLAYER_INDEX:
+            return sizeof(ByteCommand);
+        default:
+            return 0;
+    }
+}
+
+/* Called on the session receive thread: queue ONLY. SDL gamepad calls here
+ * deadlock against SDL_PollEvent on the media thread; the commands are
+ * applied by IHS_HIDDeviceSDLApplyPendingWrites on the flush thread, which
+ * already calls SDL safely at 125 Hz. */
 int IHS_HIDDeviceSDLWrite(IHS_HIDDevice *device, const uint8_t *data, size_t dataLen) {
     IHS_HIDDeviceSDL *sdl = (IHS_HIDDeviceSDL *) device;
-    if (dataLen < sizeof(WriteCommand)) {
+    if (dataLen < sizeof(uint8_t)) {
         return -1;
     }
-    const WriteCommand *command = (const WriteCommand *) data;
-    switch (command->type) {
-        case COMMAND_RUMBLE: {
-            HandleRumble(sdl, &command->rumble);
-            break;
-        }
-        case COMMAND_SET_LED: {
-            HandleSetLED(sdl, &command->led);
-            break;
-        }
-        case COMMAND_RUMBLE_TRIGGERS: {
-            HandleRumbleTriggers(sdl, &command->rumble);
-            break;
-        }
-        case COMMAND_SET_SENSOR_ENABLED: {
-            HandleSetSensorEnabled(sdl, &command->byte);
-            break;
-        }
-        case COMMAND_SET_REQUESTED_REPORT_VERSION: {
-            IHS_HIDReportSDLSetRequestedReportVersion(&sdl->states.current, command->byte.value);
-            break;
-        }
-        case COMMAND_SET_PS5_RUMBLE: {
-            HandleSetPS5Rumble(sdl, &command->byte);
-            break;
-        }
-        case COMMAND_SET_PLAYER_INDEX: {
-            HandleSetPlayerIndex(sdl, &command->byte);
-            break;
-        }
-        default:
-            return -1;
+    size_t commandLen = WriteCommandLength(data[0]);
+    if (commandLen == 0 || dataLen < commandLen) {
+        return -1;
     }
+    IHS_HIDDeviceLock(device);
+    if (sdl->pendingWrites.size + commandLen > 512) {
+        IHS_HIDDeviceUnlock(device);
+        IHS_HIDDeviceLog(device, IHS_LogLevelWarn, "HID.SDL",
+                         "Write queue overflow, dropping command %u", data[0]);
+        return 0; /* accepted-and-dropped: rumble is best-effort */
+    }
+    IHS_BufferAppendMem(&sdl->pendingWrites, data, commandLen);
+    IHS_HIDDeviceUnlock(device);
     return 0;
+}
+
+/* Called with the device lock HELD (flush thread): apply queued commands. */
+void IHS_HIDDeviceSDLApplyPendingWrites(IHS_HIDDeviceSDL *sdl) {
+    while (sdl->pendingWrites.size >= sizeof(uint8_t)) {
+        const uint8_t *data = IHS_BufferPointer(&sdl->pendingWrites);
+        size_t commandLen = WriteCommandLength(data[0]);
+        if (commandLen == 0 || sdl->pendingWrites.size < commandLen) {
+            sdl->pendingWrites.size = 0; /* corrupt tail: drop everything */
+            return;
+        }
+        const WriteCommand *command = (const WriteCommand *) data;
+        switch (command->type) {
+            case COMMAND_RUMBLE: {
+                HandleRumble(sdl, &command->rumble);
+                break;
+            }
+            case COMMAND_SET_LED: {
+                HandleSetLED(sdl, &command->led);
+                break;
+            }
+            case COMMAND_RUMBLE_TRIGGERS: {
+                HandleRumbleTriggers(sdl, &command->rumble);
+                break;
+            }
+            case COMMAND_SET_SENSOR_ENABLED: {
+                HandleSetSensorEnabled(sdl, &command->byte);
+                break;
+            }
+            case COMMAND_SET_REQUESTED_REPORT_VERSION: {
+                IHS_HIDReportSDLSetRequestedReportVersion(&sdl->states.current, command->byte.value);
+                break;
+            }
+            case COMMAND_SET_PS5_RUMBLE: {
+                HandleSetPS5Rumble(sdl, &command->byte);
+                break;
+            }
+            case COMMAND_SET_PLAYER_INDEX: {
+                HandleSetPlayerIndex(sdl, &command->byte);
+                break;
+            }
+            default:
+                break;
+        }
+        IHS_BufferOffsetBy(&sdl->pendingWrites, (int) commandLen);
+    }
 }
 
 void HandleRumble(IHS_HIDDeviceSDL *sdl, const RumbleCommand *rumble) {

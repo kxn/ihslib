@@ -59,6 +59,9 @@ bool IHS_HIDFlushSDLGameControllers(IHS_Session *session) {
         }
         IHS_HIDDeviceLock(managed->device);
         IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) managed->device;
+        /* Apply host device-write commands (rumble etc.) here, on the flush
+         * thread, before the state compare — never on the receive thread. */
+        IHS_HIDDeviceSDLApplyPendingWrites(device);
         if (memcmp(&device->states.previous, &device->states.current,
                    sizeof(IHS_HIDStateSDL)) == 0) {
             IHS_HIDDeviceUnlock(managed->device);
