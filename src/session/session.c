@@ -330,11 +330,18 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
     IHS_SessionChannelId channelId = packet.header.channelId;
     IHS_SessionPacketType packetType = packet.header.type;
     if (packetType == IHS_SessionPacketTypeACK) {
-        IHS_RetransmissionAcknowledge(&session->retransmission, channelId,
-                                     packet.header.packetId, packet.header.fragmentId,
-                                     IHS_TimerNow());
+        /* Official ACK semantics: the value is the contiguous delivery point —
+         * it confirms every packet at/below it (libmain 0x7f94b8 advances its
+         * send window through min(ack+1-head, ...)). Exact-match acking turned
+         * each lost ACK packet into a permanently unacked reliable packet:
+         * 950k retransmissions / 10 min on hardware, choking the uplink
+         * during scene transitions (the ~20 s input stalls). */
+        IHS_RetransmissionAcknowledgeThrough(&session->retransmission, channelId,
+                                             (uint16_t) (packet.header.packetId + 1u),
+                                             IHS_TimerNow());
         if (channelId == IHS_SessionChannelIdControl &&
-            (int32_t) packet.header.packetId == session->stopPacketId) {
+            session->stopPacketId >= 0 &&
+            (int16_t) (packet.header.packetId - (uint16_t) session->stopPacketId) >= 0) {
             session->stopAcked = true; /* releases IHS_SessionDisconnect */
         }
     } else if (packetType == IHS_SessionPacketTypeNACK) {
