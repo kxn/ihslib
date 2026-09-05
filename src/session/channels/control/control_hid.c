@@ -322,12 +322,12 @@ static void HandleDeviceWrite(IHS_SessionChannel *channel, IHS_HIDManager *manag
     CHIDMessageToRemote__DeviceWrite *cmd = message->device_write;
     IHS_HIDManagedDevice *managed = IHS_HIDManagerFindDeviceByID(manager, cmd->device);
     if (managed == NULL) {
-        IHS_SessionLog(channel->session, IHS_LogLevelVerbose, "HID", "Message %u: Write(id=%u) => (no device)",
+        IHS_SessionLog(channel->session, IHS_LogLevelInfo, "HID", "Message %u: Write(id=%u) => (no device)",
                        message->request_id, cmd->device);
         return;
     }
     int ret = IHS_HIDDeviceWrite(managed->device, cmd->data.data, cmd->data.len);
-    IHS_SessionLog(channel->session, IHS_LogLevelVerbose, "HID", "Message %u: Write(id=%u) => %d", message->request_id,
+    IHS_SessionLog(channel->session, IHS_LogLevelInfo, "HID", "Message %u: Write(id=%u) => %d", message->request_id,
                    cmd->device, ret);
 }
 
@@ -336,7 +336,7 @@ static void HandleDeviceRead(IHS_SessionChannel *channel, IHS_HIDManager *manage
     IHS_HIDManagedDevice *managed = IHS_HIDManagerFindDeviceByID(manager, cmd->device);
     if (managed == NULL) {
         SendRequestCodeResponse(channel, message->request_id, -1);
-        IHS_SessionLog(channel->session, IHS_LogLevelVerbose, "HID", "Message %u: Read(id=%u) => (no device)",
+        IHS_SessionLog(channel->session, IHS_LogLevelInfo, "HID", "Message %u: Read(id=%u) => (no device)",
                        message->request_id, cmd->device);
         return;
     }
@@ -351,7 +351,7 @@ static void HandleDeviceRead(IHS_SessionChannel *channel, IHS_HIDManager *manage
         response.data.data = IHS_BufferPointer(&str);
         response.data.len = str.size;
     }
-    IHS_SessionLog(channel->session, IHS_LogLevelVerbose, "HID", "Message %u: Read(id=%u) => ret=%d, %u byte(s)",
+    IHS_SessionLog(channel->session, IHS_LogLevelInfo, "HID", "Message %u: Read(id=%u) => ret=%d, %u byte(s)",
                    message->request_id, cmd->device, response.result, response.data.len);
     SendRequestResponse(channel, &response);
 }
@@ -504,7 +504,7 @@ static void HandleDeviceStartInputReports(IHS_SessionChannel *channel, IHS_HIDMa
     IHS_HIDManagedDevice *managed = IHS_HIDManagerFindDeviceByID(manager, cmd->device);
 
     if (managed == NULL) {
-        IHS_SessionLog(channel->session, IHS_LogLevelVerbose, "HID",
+        IHS_SessionLog(channel->session, IHS_LogLevelInfo, "HID",
                        "Message %u: StartInputReports(id=%u) => (no device)",
                        message->request_id, cmd->device);
         return;
@@ -527,7 +527,7 @@ static void HandleDeviceRequestFullReport(IHS_SessionChannel *channel, IHS_HIDMa
     IHS_HIDManagedDevice *managed = IHS_HIDManagerFindDeviceByID(manager, cmd->device);
 
     if (managed == NULL) {
-        IHS_SessionLog(channel->session, IHS_LogLevelVerbose, "HID",
+        IHS_SessionLog(channel->session, IHS_LogLevelInfo, "HID",
                        "Message %u: RequestFullReport(id=%u) => (no device)",
                        message->request_id, cmd->device);
         return;
