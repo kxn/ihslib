@@ -28,9 +28,9 @@ int main(void) {
     /* Official input path: every submit goes out immediately, one message per
      * batch of device deltas; there is no in-flight window and no coalescing.
      * Reliable delivery is the transport's job (retransmit until ACK/NACK). */
-    assert(IHS_SessionChannelControlSubmitHIDReport(channel, first, sizeof(first)));
+    assert(IHS_SessionChannelControlSubmitHIDReport(channel, first, sizeof(first), true));
     assert(control->hidSent == 1);
-    assert(IHS_SessionChannelControlSubmitHIDReport(channel, second, sizeof(second)));
+    assert(IHS_SessionChannelControlSubmitHIDReport(channel, second, sizeof(second), true));
     assert(control->hidSent == 2);
     assert(control->hidSubmitted == 2);
     assert(control->hidCoalesced == 0);

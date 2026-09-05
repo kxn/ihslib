@@ -596,6 +596,19 @@ void IHS_SessionChannelControlOnMessageReceived(IHS_SessionChannel *channel, ESt
             ccontroller_personalization_update_msg__free_unpacked(message, NULL);
             break;
         }
+        case k_EStreamControlSetInputTemporarilyDisabled: {
+            CSetInputTemporarilyDisabledMsg *message = IHS_UNPACK_BUFFER(
+                cset_input_temporarily_disabled_msg__unpack, payload);
+            if (message != NULL) {
+                bool was = channel->session->state.inputTemporarilyDisabled;
+                channel->session->state.inputTemporarilyDisabled = message->disabled;
+                IHS_SessionLog(channel->session, IHS_LogLevelInfo, "Control",
+                               "Input temporarily disabled: %u -> %u", was,
+                               message->disabled);
+                cset_input_temporarily_disabled_msg__free_unpacked(message, NULL);
+            }
+            break;
+        }
         case k_EStreamControlStopRequest:
             /* Host quit the game: official clients end the session on this. */
             IHS_SessionHostStopped(channel->session);
@@ -665,7 +678,12 @@ static void OnSetClientConfig(IHS_SessionChannel *channel, const CSetStreamingCl
 }
 
 bool IHS_SessionInputEnabled(IHS_Session *session) {
-    return session->state.streamingInput;
+    /* Host-issued temporary disable (scene transitions etc.) suppresses ALL
+     * input reports, matching the official client's OnSetInputTemporarily
+     * Disabled handling. The delta chain stays intact: while disabled no
+     * deltas are submitted and `previous` does not advance, so the first
+     * delta after re-enable carries the full accumulated change. */
+    return session->state.streamingInput && !session->state.inputTemporarilyDisabled;
 }
 
 bool IHS_SessionStreaming(IHS_Session *session) {

@@ -72,6 +72,10 @@ typedef struct IHS_SessionState {
     bool streamingInput;
     bool streamingAudio;
     bool streamingVideo;
+    /** Host-issued SetInputTemporarilyDisabled: suppress input reports until
+     * re-enabled (official behavior — the client stops sending while the
+     * host/game is not consuming input). */
+    bool inputTemporarilyDisabled;
 } IHS_SessionState;
 
 struct IHS_FrameStatsAggregator;

@@ -41,6 +41,12 @@ static bool HandleCAxisEvent(IHS_HIDManager *manager, const SDL_GamepadAxisEvent
 static bool HandleSensorEvent(IHS_HIDManager *manager, const SDL_GamepadSensorEvent *event);
 
 bool IHS_HIDFlushSDLGameControllers(IHS_Session *session) {
+    /* Input temporarily disabled by the host: submit nothing. States keep
+     * evolving (SDL events keep flowing); on re-enable the next delta covers
+     * the whole gap against the host's intact delta chain. */
+    if (!IHS_SessionInputEnabled(session)) {
+        return false;
+ }
     /* Official-client semantics: input reports are masked deltas against the
      * previous flushed state, batched once per frame. full_report is never
      * sent on this path (set_full_report has zero call sites in the official
