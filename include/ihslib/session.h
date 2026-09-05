@@ -115,6 +115,10 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig, const IHS_S
  */
 bool IHS_SessionConnect(IHS_Session *session);
 
+/** Wake and stop the session worker thread. Safe to call before
+ * IHS_SessionThreadedJoin to guarantee the join completes. */
+void IHS_SessionInterrupt(IHS_Session *session);
+
 /**
  * Send disconnect request
  * @param session Session instance

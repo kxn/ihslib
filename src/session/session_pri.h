@@ -144,3 +144,5 @@ bool IHS_SessionInputEnabled(IHS_Session *session);
  * check this — it accepts an early packet, then abandons the session.
  */
 bool IHS_SessionStreaming(IHS_Session *session);
+
+void IHS_SessionHostStopped(IHS_Session *session);

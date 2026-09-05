@@ -596,6 +596,10 @@ void IHS_SessionChannelControlOnMessageReceived(IHS_SessionChannel *channel, ESt
             ccontroller_personalization_update_msg__free_unpacked(message, NULL);
             break;
         }
+        case k_EStreamControlStopRequest:
+            /* Host quit the game: official clients end the session on this. */
+            IHS_SessionHostStopped(channel->session);
+            break;
         case k_EStreamControlKeepAlive:
             /* Official consumes KeepAlive inline before dispatch
              * (OnStreamPacket 0x7ad0b4) — no log, no response. */

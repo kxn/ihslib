@@ -302,6 +302,21 @@ void IHS_SessionGetReliabilityStats(IHS_Session *session,
     }
 }
 
+void IHS_SessionHostStopped(IHS_Session *session) {
+    IHS_SessionLog(session, IHS_LogLevelWarn, "Session", "Host stopped the session");
+    /* Best-effort goodbye: bounded, never blocks on the dead peer. */
+    IHS_SessionDisconnect(session);
+    IHS_BaseLock(&session->base);
+    bool notify = session->callbacks.session != NULL &&
+                  session->callbacks.session->disconnected != NULL;
+    IHS_BaseUnlock(&session->base);
+    if (notify) {
+        session->callbacks.session->disconnected(session, session->callbackContexts.session);
+    }
+    /* Belt and braces: the worker must exit even if the timer path stalls. */
+    IHS_SessionInterrupt(session);
+}
+
 static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data) {
     (void) address;
     IHS_Session *session = (IHS_Session *) base;
@@ -326,6 +341,12 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
         IHS_RetransmissionNack(&session->retransmission, channelId,
                                packet.header.packetId, packet.header.fragmentId,
                                IHS_TimerNow());
+    } else if (packetType == IHS_SessionPacketTypeDisconnect) {
+        /* Host quit the game / tore the session down. Without this the client
+         * sat in a dead session forever: no video, dead inputs, no exit.
+         * (Hardware freeze 2026-09-04.) */
+        IHS_SessionHostStopped(session);
+        return;
     }
     IHS_SessionChannel *channel = IHS_SessionChannelFor(session, channelId);
     if (channel == NULL && session->negotiatedVideoCodec != 0 /* not None */ &&
