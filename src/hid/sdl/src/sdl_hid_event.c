@@ -59,9 +59,6 @@ bool IHS_HIDFlushSDLGameControllers(IHS_Session *session) {
         }
         IHS_HIDDeviceLock(managed->device);
         IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) managed->device;
-        /* Apply host device-write commands (rumble etc.) here, on the flush
-         * thread, before the state compare — never on the receive thread. */
-        IHS_HIDDeviceSDLApplyPendingWrites(device);
         if (memcmp(&device->states.previous, &device->states.current,
                    sizeof(IHS_HIDStateSDL)) == 0) {
             IHS_HIDDeviceUnlock(managed->device);
@@ -255,4 +252,24 @@ static bool HandleSensorEvent(IHS_HIDManager *manager, const SDL_GamepadSensorEv
     }
     IHS_HIDDeviceUnlock(managed->device);
     return changed;
+}
+
+void IHS_HIDSDLApplyPendingWrites(IHS_Session *session) {
+    /* Apply host device-write commands (rumble etc.) queued by the receive
+     * thread. MUST run on the thread that owns SDL/libnx-hid (the one calling
+     * SDL_PollEvent): the Switch SDL port reaches libnx hid from both, and
+     * libnx hid is not safe across threads — see the hardware freeze. */
+    IHS_HIDManager *manager = session->hidManager;
+    size_t count;
+    IHS_HIDManagedDevice **snapshot = IHS_HIDManagerSnapshotOpenDevices(manager, &count);
+    for (size_t i = 0; i < count; ++i) {
+        IHS_HIDManagedDevice *managed = snapshot[i];
+        if (!IHS_HIDDeviceIsSDL(managed->device)) {
+            continue;
+        }
+        IHS_HIDDeviceLock(managed->device);
+        IHS_HIDDeviceSDLApplyPendingWrites((IHS_HIDDeviceSDL *) managed->device);
+        IHS_HIDDeviceUnlock(managed->device);
+    }
+    free(snapshot);
 }

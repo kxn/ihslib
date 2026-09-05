@@ -111,3 +111,8 @@ bool IHS_HIDSDLGetLastSubmittedReport(IHS_Session *session, IHS_HIDSDLLastSubmit
  * @return true if any delta was queued and sent
  */
 bool IHS_HIDFlushSDLGameControllers(IHS_Session *session);
+
+/** Apply queued host device-write commands (rumble, LED, ...). Call from the
+ * thread that owns SDL (the SDL_PollEvent thread) — never from the session
+ * receive thread, and not needed on the flush thread. */
+void IHS_HIDSDLApplyPendingWrites(IHS_Session *session);
