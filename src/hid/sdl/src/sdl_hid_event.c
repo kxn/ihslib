@@ -57,7 +57,13 @@ static void HIDSDLBuildWireState(const IHS_HIDStateSDL *internal, uint8_t *wire)
     for (int b = 0; b < 12 && b < 16; b++) {
         wire[12 + b] = (uint8_t)((internal->buttons >> b) & 1);
     }
-    /* bytes 24-47: zeros (gyro/accel area, version selector = 0 for ENCODED) */
+    /* bytes 28-47: gyro/accel/touch passthrough — the Switch Pro Controller
+     * and Joy-Cons all have built-in 6-axis sensors, and SDL delivers
+     * SDL_CONTROLLERSENSORUPDATE events that populate these fields in the
+     * internal state. Pass them through so the host can use them for
+     * motion-controlled games. Byte 27 stays 0 (ENCODED mode selector). */
+    /* gyro(+28-33), accel(+34-39), touch(+40-43), padding(+44-47): pass through */
+    memcpy(wire + 28, (const uint8_t *) internal + 28, 20);
 }
 
 bool IHS_HIDFlushSDLGameControllers(IHS_Session *session) {
