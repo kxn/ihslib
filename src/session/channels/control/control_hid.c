@@ -586,7 +586,12 @@ static void InfoFromHID(CHIDDeviceInfo *info, const IHS_HIDDeviceInfo *hid) {
     }
     PROTOBUF_C_P_SET_VALUE(info, usage_page, 1);
     PROTOBUF_C_P_SET_VALUE(info, usage, 5/*For SDL_GameController*/);
-    PROTOBUF_C_P_SET_VALUE(info, is_generic_gamepad, true);
+    /* Announce as a real controller, not a generic gamepad. The host's
+     * Steam Input uses device-specific handling for real controllers vs
+     * a generic fallback path — the generic path is what caused input
+     * anomalies (scene-transition stalls, mapping changes). */
+    /* is_generic_gamepad: not set (default false) — treated as a real
+     * Nintendo Pro Controller via vendor_id/product_id. */
     PROTOBUF_C_P_SET_VALUE(info, ostype, IHS_SteamOSTypeLinux);
 
     // Expect 0x8043ff
