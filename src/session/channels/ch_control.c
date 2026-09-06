@@ -75,6 +75,35 @@ IHS_SessionChannel *IHS_SessionChannelControlCreate(IHS_Session *session) {
                                     NULL);
 }
 
+/* Capture of recently submitted HID input reports (the exact wire payload
+ * of each RemoteHID message), for post-mortem of input anomalies. */
+#define HID_REPORT_RING_LEN 128
+#define HID_REPORT_RING_CAP 96
+static struct {
+    uint64_t ms;
+    uint16_t len;
+    uint8_t data[HID_REPORT_RING_CAP];
+} hidReportRing[HID_REPORT_RING_LEN];
+static uint32_t hidReportRingHead;
+static uint32_t hidReportRingCount;
+
+void IHS_SessionChannelControlGetRecentHIDReports(uint64_t *out_ms, uint16_t *out_len,
+                                                  uint8_t *out_data, size_t *out_off) {
+    if (*out_off >= hidReportRingCount) {
+        *out_off = SIZE_MAX;
+        return;
+    }
+    uint32_t idx = (hidReportRingHead + hidReportRingCount - 1 - (uint32_t) *out_off)
+                   % HID_REPORT_RING_LEN; /* newest first */
+    uint32_t slot = (hidReportRingHead + idx) % HID_REPORT_RING_LEN;
+    *out_ms = hidReportRing[slot].ms;
+    *out_len = hidReportRing[slot].len;
+    memcpy(out_data, hidReportRing[slot].data,
+           hidReportRing[slot].len < HID_REPORT_RING_CAP ? hidReportRing[slot].len
+                                                          : HID_REPORT_RING_CAP);
+    *out_off = *out_off + 1;
+}
+
 static bool ControlSendLocked(IHS_SessionChannelControl *control, EStreamControlMessage type,
                               const ProtobufCMessage *message, int32_t packetId,
                               uint16_t *assignedPacketId);
@@ -172,6 +201,17 @@ bool IHS_SessionChannelControlSubmitHIDReport(IHS_SessionChannel *channel,
                                  (const ProtobufCMessage *) &wrapped, IHS_PACKET_ID_NEXT,
                                  NULL);
     control->hidSent++;
+    {
+        uint32_t slot = hidReportRingHead;
+        hidReportRing[slot].ms = IHS_TimerNow();
+        hidReportRing[slot].len = (uint16_t) (dataLen < HID_REPORT_RING_CAP ? dataLen
+                                                                            : HID_REPORT_RING_CAP);
+        memcpy(hidReportRing[slot].data, data, hidReportRing[slot].len);
+        hidReportRingHead = (hidReportRingHead + 1) % HID_REPORT_RING_LEN;
+        if (hidReportRingCount < HID_REPORT_RING_LEN) {
+            hidReportRingCount++;
+        }
+    }
     IHS_MutexUnlock(control->sendLock);
     if (!ret) {
         IHS_SessionDisconnect(channel->session);

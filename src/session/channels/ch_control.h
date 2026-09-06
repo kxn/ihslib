@@ -70,6 +70,10 @@ bool IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamControlMe
 
 /** Submit a complete CHID input-report snapshot. New snapshots replace the queued
  * snapshot while an older one awaits ACK; packet IDs are allocated only when sent. */
+/** Iterate recently submitted HID input reports, newest first. */
+void IHS_SessionChannelControlGetRecentHIDReports(uint64_t *out_ms, uint16_t *out_len,
+                                                  uint8_t *out_data, size_t *out_off);
+
 bool IHS_SessionChannelControlSubmitHIDReport(IHS_SessionChannel *channel,
                                               const uint8_t *data, size_t dataLen,
                                               bool activeInput);
