@@ -40,6 +40,26 @@ static bool HandleCAxisEvent(IHS_HIDManager *manager, const SDL_GamepadAxisEvent
 
 static bool HandleSensorEvent(IHS_HIDManager *manager, const SDL_GamepadSensorEvent *event);
 
+/* Convert internal state to Generic Gamepad wire format that the host's
+ * parser (BParseGamepadStateGenericGamepad) expects:
+ *   wire[0..11]  = 6 × s16 axes (little-endian)
+ *   wire[12..23] = 12 button state bytes (0x00 = released, nonzero = pressed)
+ *   wire[24..47] = zeros (gyro/accel area, version byte must be 0 for ENCODED)
+ *
+ * Our internal layout puts a u32 flags + u16 buttons bitfield at bytes 12-17,
+ * which the host misinterprets as individual button states — causing phantom
+ * presses and the ~20 s input hold at scene transitions. */
+static void HIDSDLBuildWireState(const IHS_HIDStateSDL *internal, uint8_t *wire) {
+    memset(wire, 0, 48);
+    /* axes: 6 × s16 at bytes 0-11, same offsets in both layouts */
+    memcpy(wire, internal->axes, 12);
+    /* buttons: u16 bitfield at internal+16 → 12 individual bytes at wire[12..23] */
+    for (int b = 0; b < 12 && b < 16; b++) {
+        wire[12 + b] = (uint8_t)((internal->buttons >> b) & 1);
+    }
+    /* bytes 24-47: zeros (gyro/accel area, version selector = 0 for ENCODED) */
+}
+
 bool IHS_HIDFlushSDLGameControllers(IHS_Session *session) {
     /* Input temporarily disabled by the host: submit nothing. States keep
      * evolving (SDL events keep flowing); on re-enable the next delta covers
@@ -70,9 +90,11 @@ bool IHS_HIDFlushSDLGameControllers(IHS_Session *session) {
             IHS_HIDDeviceUnlock(managed->device);
             continue;
         }
+        uint8_t prevWire[48], curWire[48];
+        HIDSDLBuildWireState(&device->states.previous, prevWire);
+        HIDSDLBuildWireState(&device->states.current, curWire);
         IHS_HIDDeviceReportAddDelta((IHS_HIDDevice *) device,
-                                    (const uint8_t *) &device->states.previous,
-                                    (const uint8_t *) &device->states.current, 48);
+                                    prevWire, curWire, 48);
         device->lastSubmitted = device->states.current;
         device->lastSubmittedSeq++;
         device->states.previous = device->states.current;
@@ -106,8 +128,10 @@ bool IHS_HIDRefreshSDLGameControllers(IHS_Session *session) {
         IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) managed->device;
         /* Resync state rides a full-mask delta: the official client never sends
          * the full_report field (set_full_report has zero call sites). */
+        uint8_t curWire[48];
+        HIDSDLBuildWireState(&device->states.current, curWire);
         IHS_HIDDeviceReportAddForcedFullMaskDelta((IHS_HIDDevice *) device,
-                                                  (const uint8_t *) &device->states.current, 48);
+                                                  curWire, 48);
         device->lastSubmitted = device->states.current;
         device->lastSubmittedSeq++;
         device->states.previous = device->states.current;
@@ -192,8 +216,10 @@ bool IHS_HIDResetSDLGameControllers(IHS_Session *session) {
             changed = true;
             if (managed->reportHolder.reportLength > 0) {
                 /* Neutral-state resync also rides a full-mask delta. */
+                uint8_t neutralWire[48];
+                HIDSDLBuildWireState(&device->states.current, neutralWire);
                 IHS_HIDDeviceReportAddForcedFullMaskDelta(managed->device,
-                                                          (const uint8_t *) &device->states.current, 48);
+                                                          neutralWire, 48);
             }
             device->states.previous = device->states.current;
         }
