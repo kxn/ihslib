@@ -25,6 +25,7 @@
 
 #include "ch_control.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -86,6 +87,68 @@ static struct {
 } hidReportRing[HID_REPORT_RING_LEN];
 static uint32_t hidReportRingHead;
 static uint32_t hidReportRingCount;
+
+/* SD persistence queue: submitted reports drained by the diag disk thread
+ * (1 Hz) into the on-SD log — capture survives arbitrarily long delays
+ * between the anomaly and its inspection. */
+#define HID_PENDING_LEN 2048
+static struct {
+    uint64_t ms;
+    uint16_t len;
+    uint8_t data[96];
+} hidPending[HID_PENDING_LEN];
+static uint32_t hidPendingHead, hidPendingTail, hidPendingCount;
+static IHS_Mutex *hidPendingLock;
+
+static void HIDPendingPush(uint64_t ms, const uint8_t *data, uint16_t len) {
+    if (hidPendingLock == NULL) {
+        hidPendingLock = IHS_MutexCreate();
+    }
+    IHS_MutexLock(hidPendingLock);
+    if (hidPendingCount < HID_PENDING_LEN) {
+        hidPending[hidPendingHead].ms = ms;
+        hidPending[hidPendingHead].len = len;
+        memcpy(hidPending[hidPendingHead].data, data,
+               len < sizeof(hidPending[0].data) ? len : sizeof(hidPending[0].data));
+        hidPendingHead = (hidPendingHead + 1) % HID_PENDING_LEN;
+        hidPendingCount++;
+    } /* full: drop newest (overflow of a saturated link) */
+    IHS_MutexUnlock(hidPendingLock);
+}
+
+size_t IHS_SessionChannelControlDrainPendingHIDReports(char *out, size_t cap) {
+    size_t written = 0;
+    for (;;) {
+        if (hidPendingLock == NULL) {
+            hidPendingLock = IHS_MutexCreate();
+        }
+        IHS_MutexLock(hidPendingLock);
+        if (hidPendingCount == 0) {
+            IHS_MutexUnlock(hidPendingLock);
+            break;
+        }
+        uint64_t ms = hidPending[hidPendingTail].ms;
+        uint16_t len = hidPending[hidPendingTail].len;
+        uint8_t data[96];
+        memcpy(data, hidPending[hidPendingTail].data,
+               len < sizeof(data) ? len : sizeof(data));
+        hidPendingTail = (hidPendingTail + 1) % HID_PENDING_LEN;
+        hidPendingCount--;
+        IHS_MutexUnlock(hidPendingLock);
+        if (written + 96 + 48 > cap) {
+            /* no room for this line: push back is impossible (single consumer),
+             * drop the rest of this tick — remainder drains next second */
+            break;
+        }
+        written += snprintf(out + written, cap - written, "hidrep ms=%llu len=%u ",
+                            (unsigned long long) ms, len);
+        for (uint16_t i = 0; i < len; i++) {
+            written += snprintf(out + written, cap - written, "%02x", data[i]);
+        }
+        written += snprintf(out + written, cap - written, "\n");
+    }
+    return written;
+}
 
 void IHS_SessionChannelControlGetRecentHIDReports(uint64_t *out_ms, uint16_t *out_len,
                                                   uint8_t *out_data, size_t *out_off) {
@@ -211,6 +274,8 @@ bool IHS_SessionChannelControlSubmitHIDReport(IHS_SessionChannel *channel,
         if (hidReportRingCount < HID_REPORT_RING_LEN) {
             hidReportRingCount++;
         }
+        HIDPendingPush(hidReportRing[slot].ms, hidReportRing[slot].data,
+                       hidReportRing[slot].len);
     }
     IHS_MutexUnlock(control->sendLock);
     if (!ret) {

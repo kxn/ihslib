@@ -71,6 +71,10 @@ bool IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamControlMe
 /** Submit a complete CHID input-report snapshot. New snapshots replace the queued
  * snapshot while an older one awaits ACK; packet IDs are allocated only when sent. */
 /** Iterate recently submitted HID input reports, newest first. */
+/** Drain SD-persisted HID report records (formatted lines) for the diag
+ * writer; called from the diag disk thread only. */
+size_t IHS_SessionChannelControlDrainPendingHIDReports(char *out, size_t cap);
+
 void IHS_SessionChannelControlGetRecentHIDReports(uint64_t *out_ms, uint16_t *out_len,
                                                   uint8_t *out_data, size_t *out_off);
 
