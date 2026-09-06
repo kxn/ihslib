@@ -62,8 +62,9 @@ static void HIDSDLBuildWireState(const IHS_HIDStateSDL *internal, uint8_t *wire)
      * SDL_CONTROLLERSENSORUPDATE events that populate these fields in the
      * internal state. Pass them through so the host can use them for
      * motion-controlled games. Byte 27 stays 0 (ENCODED mode selector). */
-    /* gyro(+28-33), accel(+34-39), touch(+40-43), padding(+44-47): pass through */
-    memcpy(wire + 28, (const uint8_t *) internal + 28, 20);
+    /* bytes 28-47 remain zero: ENCODED mode defines meaningful data only
+     * in bytes 0-26 (axes + buttons). Gyro/accel are NOT part of the
+     * Generic Gamepad ENCODED wire format. */
 }
 
 bool IHS_HIDFlushSDLGameControllers(IHS_Session *session) {
