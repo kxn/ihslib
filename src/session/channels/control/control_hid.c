@@ -586,10 +586,15 @@ static void InfoFromHID(CHIDDeviceInfo *info, const IHS_HIDDeviceInfo *hid) {
     }
     PROTOBUF_C_P_SET_VALUE(info, usage_page, 1);
     PROTOBUF_C_P_SET_VALUE(info, usage, 5/*For SDL_GameController*/);
-    /* Not setting is_generic_gamepad — the host should treat us as a
-     * real Nintendo Pro Controller (vendor 0x057E, product 0x2009),
-     * not as a generic gamepad. This selects Steam Input's native
-     * Nintendo controller profile on the host. */
+    /* Official client sets is_generic_gamepad on every SDL gamepad except
+     * XBOX360-type ones (libmain CHIDDeviceListSDL::EnumerateDevices
+     * 0x754bbc: SDL_GetGamepadType != XBOX360 -> flag=1, usage=5). The flag
+     * also selects the ReportGenerator wire mode (constructor 0x7cf2bc):
+     * without it a Nintendo VID/PID has no wire format at all — the official
+     * code path would hit its "unknown controller type" assert, and the host
+     * ignored our reports entirely in the 2026-09-07 test. With the flag the
+     * reports ride the Generic path (Pack RAW V2, see sdl_hid_common.h). */
+    PROTOBUF_C_P_SET_VALUE(info, is_generic_gamepad, true);
     PROTOBUF_C_P_SET_VALUE(info, ostype, IHS_SteamOSTypeLinux);
 
     // Expect 0x8043ff

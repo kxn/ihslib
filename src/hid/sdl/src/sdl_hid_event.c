@@ -40,31 +40,34 @@ static bool HandleCAxisEvent(IHS_HIDManager *manager, const SDL_GamepadAxisEvent
 
 static bool HandleSensorEvent(IHS_HIDManager *manager, const SDL_GamepadSensorEvent *event);
 
-/* Convert internal state to Generic Gamepad wire format that the host's
- * parser (BParseGamepadStateGenericGamepad) expects:
- *   wire[0..11]  = 6 × s16 axes (little-endian)
- *   wire[12..23] = 12 button state bytes (0x00 = released, nonzero = pressed)
- *   wire[24..47] = zeros (gyro/accel area, version byte must be 0 for ENCODED)
+/* Convert internal state to the Generic Gamepad wire format. The host parser
+ * (libmain BParseGamepadStateGenericGamepad @0x7d089c) is dual-mode, selected
+ * by byte 27: 0 = ENCODED (28-byte axes+button-bytes), nonzero = RAW (the
+ * HIDDeviceSDLGamepadStateV2_t struct, memcpy'd up to 72 bytes). The official
+ * client always sends RAW with version 3: its local report is ENCODED, the
+ * parse step sets state byte 27 to 3 (0x7d0a50), and Pack's RAW path then
+ * memcpy's the whole struct (0x7cfd8c).
  *
- * Our internal layout puts a u32 flags + u16 buttons bitfield at bytes 12-17,
- * which the host misinterprets as individual button states — causing phantom
- * presses and the ~20 s input hold at scene transitions. */
-static void HIDSDLBuildWireState(const IHS_HIDStateSDL *internal, uint8_t *wire) {
-    memset(wire, 0, 48);
-    /* axes: 6 × s16 at bytes 0-11, same offsets in both layouts */
-    memcpy(wire, internal->axes, 12);
-    /* buttons: u16 bitfield at internal+16 → 12 individual bytes at wire[12..23] */
-    for (int b = 0; b < 12 && b < 16; b++) {
-        wire[12 + b] = (uint8_t)((internal->buttons >> b) & 1);
-    }
-    /* bytes 28-47: gyro/accel/touch passthrough — the Switch Pro Controller
-     * and Joy-Cons all have built-in 6-axis sensors, and SDL delivers
-     * SDL_CONTROLLERSENSORUPDATE events that populate these fields in the
-     * internal state. Pass them through so the host can use them for
-     * motion-controlled games. Byte 27 stays 0 (ENCODED mode selector). */
-    /* bytes 28-47 remain zero: ENCODED mode defines meaningful data only
-     * in bytes 0-26 (axes + buttons). Gyro/accel are NOT part of the
-     * Generic Gamepad ENCODED wire format. */
+ * RAW layout as shipped by the official client:
+ *   wire[0..11]  = 6 × s16 axes (LX, LY, RX, RY, LT, RT)
+ *   wire[12..15] = flags u32 (0; only the version<=2 compat fixup touches it)
+ *   wire[16..19] = buttons u32 bitfield at EGamepadButton positions
+ *   wire[20..26] = zero
+ *   wire[27]     = version byte, 3 (RAW selector; skips the <=2 flags fixup)
+ *   wire[28..71] = IMU/touch area, zeros (V2 tail layout unconfirmed)
+ *
+ * Button bit positions are the EGamepadButton enum, decoded from the enum
+ * name table at libmain 0x3dabc4 (alphabetical names, value column):
+ * A=3, B=24, X=15, Y=1, Start=10, Select=11, Steam=16, L3=18, R3=6,
+ * LB=8, RB=9, DPad Up=19 Down=2 Left=26 Right=25.
+ * The button table and packer live in sdl_hid_common.h so the
+ * StartInputReports/RequestFullReport path shares one implementation. */
+
+#define HIDSDL_WIRE_STATE_SIZE 72
+
+/* Thin wrapper over the shared RAW V2 packer (sdl_hid_common.h). */
+static void HIDSDLBuildWireState(const IHS_HIDStateSDL *internal, uint8_t *wire, size_t len) {
+    IHS_HIDReportSDLPackWire(wire, len, internal);
 }
 
 bool IHS_HIDFlushSDLGameControllers(IHS_Session *session) {
@@ -97,11 +100,12 @@ bool IHS_HIDFlushSDLGameControllers(IHS_Session *session) {
             IHS_HIDDeviceUnlock(managed->device);
             continue;
         }
-        uint8_t prevWire[48], curWire[48];
-        HIDSDLBuildWireState(&device->states.previous, prevWire);
-        HIDSDLBuildWireState(&device->states.current, curWire);
+        size_t wireLen = IHS_HIDDeviceSDLWireReportLength(managed);
+        uint8_t prevWire[HIDSDL_WIRE_STATE_SIZE], curWire[HIDSDL_WIRE_STATE_SIZE];
+        HIDSDLBuildWireState(&device->states.previous, prevWire, wireLen);
+        HIDSDLBuildWireState(&device->states.current, curWire, wireLen);
         IHS_HIDDeviceReportAddDelta((IHS_HIDDevice *) device,
-                                    prevWire, curWire, 48);
+                                    prevWire, curWire, wireLen);
         device->lastSubmitted = device->states.current;
         device->lastSubmittedSeq++;
         device->states.previous = device->states.current;
@@ -135,10 +139,11 @@ bool IHS_HIDRefreshSDLGameControllers(IHS_Session *session) {
         IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) managed->device;
         /* Resync state rides a full-mask delta: the official client never sends
          * the full_report field (set_full_report has zero call sites). */
-        uint8_t curWire[48];
-        HIDSDLBuildWireState(&device->states.current, curWire);
+        size_t wireLen = IHS_HIDDeviceSDLWireReportLength(managed);
+        uint8_t curWire[HIDSDL_WIRE_STATE_SIZE];
+        HIDSDLBuildWireState(&device->states.current, curWire, wireLen);
         IHS_HIDDeviceReportAddForcedFullMaskDelta((IHS_HIDDevice *) device,
-                                                  curWire, 48);
+                                                  curWire, wireLen);
         device->lastSubmitted = device->states.current;
         device->lastSubmittedSeq++;
         device->states.previous = device->states.current;
@@ -223,10 +228,11 @@ bool IHS_HIDResetSDLGameControllers(IHS_Session *session) {
             changed = true;
             if (managed->reportHolder.reportLength > 0) {
                 /* Neutral-state resync also rides a full-mask delta. */
-                uint8_t neutralWire[48];
-                HIDSDLBuildWireState(&device->states.current, neutralWire);
+                size_t wireLen = IHS_HIDDeviceSDLWireReportLength(managed);
+                uint8_t neutralWire[HIDSDL_WIRE_STATE_SIZE];
+                HIDSDLBuildWireState(&device->states.current, neutralWire, wireLen);
                 IHS_HIDDeviceReportAddForcedFullMaskDelta(managed->device,
-                                                          neutralWire, 48);
+                                                          neutralWire, wireLen);
             }
             device->states.previous = device->states.current;
         }
