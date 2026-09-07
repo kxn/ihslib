@@ -31,6 +31,7 @@
 
 #include "ihslib/session.h"
 #include "ihs_thread.h"
+#include "protobuf/remoteplay.pb-c.h"
 
 /**
  * Per-frame timestamp + result record. Mirrors Steam's CFastFrameStats:
@@ -38,7 +39,7 @@
  * carries up to 19 event timestamps (one per EStreamFrameEvent), the size of
  * the frame data, and the final IHS_VideoFrameResult.
  *
- * Timestamps are in IHS_SessionPacketTimestamp units (milliseconds).
+ * Timestamps are in IHS_SessionPacketTimestamp units (16.16 fixed-point seconds).
  *
  * `eventMask` bit i is set when `events[i]` has been recorded — distinguishes
  * "not yet observed" from "recorded as zero" (frameId 0 / frame 0 / etc).
@@ -88,10 +89,7 @@ typedef struct IHS_FrameStatsAggregator {
     uint16_t lastDisplayedFrameId;
     uint32_t lastFrameTimestamp;    /* event 18 of the previous *completed* frame */
     bool fullReporting;             /* mirrors CStreamClient::sendFullFrameStats */
-    /** Stream-time origin: IHS_SessionPacketTimestamp() captured when the
-     * session reached Connected. Wire timestamps are relative to this,
-     * matching CFastFrameStats::Save(stats, full, connTimeBase). */
-    uint32_t timeBase;
+
 } IHS_FrameStatsAggregator;
 
 IHS_FrameStatsAggregator *IHS_FrameStatsAggregatorCreate(void);
@@ -100,7 +98,8 @@ void IHS_FrameStatsAggregatorDestroy(IHS_FrameStatsAggregator *agg);
 
 void IHS_FrameStatsAggregatorSetFullReporting(IHS_FrameStatsAggregator *agg, bool enabled);
 
-void IHS_FrameStatsAggregatorSetTimeBase(IHS_FrameStatsAggregator *agg, uint32_t timeBase);
+size_t IHS_FrameStatsEncodeEvents(const IHS_FrameStatsSlot *slot, int32_t clockOffset,
+                                   CFrameEvent *events, CFrameEvent **pointers);
 
 /**
  * Drain like IHS_FrameStatsAggregatorDrain, additionally copying each folded
@@ -112,7 +111,7 @@ size_t IHS_FrameStatsAggregatorDrainSlots(IHS_FrameStatsAggregator *agg,
 
 /**
  * Record one of the four app-driven events (DecodeBegin/DecodeEnd/UploadBegin/UploadEnd).
- * `timestamp` is in milliseconds; `0` means "use IHS_SessionTimestampNow".
+ * `timestamp` is in 16.16 fixed-point seconds; `0` means "use IHS_SessionTimestampNow".
  *
  * Ring-slot policy: if the slot's frameId doesn't match, the slot is reset
  * and the new frameId takes ownership (i.e. late events for a wrapped-out

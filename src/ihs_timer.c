@@ -44,6 +44,7 @@ struct IHS_TimerTask {
     void *context;
     uint64_t nextExecution;
     int runCount;
+    IHS_TimerTask **owner;
 };
 
 static struct {
@@ -135,6 +136,41 @@ IHS_TimerTask *IHS_TimerTaskStart(IHS_Timer *timer, IHS_TimerRunFunction *run, I
     return task;
 }
 
+bool IHS_TimerTaskStartOwned(IHS_Timer *timer, IHS_TimerTask **owner,
+    IHS_TimerRunFunction *run, IHS_TimerEndFunction *end, uint64_t timeout, void *context) {
+    IHS_MutexLock(timer->mutex);
+    if (*owner || !timer->tasks) { IHS_MutexUnlock(timer->mutex); return false; }
+    IHS_TimerTask *task = IHS_TimerTaskStart(timer, run, end, timeout, context);
+    if (task) { task->owner = owner; *owner = task; }
+    IHS_MutexUnlock(timer->mutex);
+    return task != NULL;
+}
+
+void IHS_TimerTaskStopOwned(IHS_Timer *timer, IHS_TimerTask **owner) {
+    IHS_MutexLock(timer->mutex);
+    IHS_TimerTask *task = *owner;
+    IHS_TimerEndFunction *end = NULL;
+    void *context = NULL;
+    if (task) {
+        IHS_TimerTask *removed = (void *) IHS_QueuePollBy(timer->tasks, ItemIdentical, task);
+        assert(removed == task);
+        *owner = NULL;
+        end = task->end; context = task->context;
+        IHS_QueueItemFree((void *) task);
+    }
+    IHS_MutexUnlock(timer->mutex);
+    if (end) end(context);
+}
+
+bool IHS_TimerTaskVisitOwned(IHS_Timer *timer, IHS_TimerTask **owner,
+    void (*visit)(IHS_TimerTask *task, void *context), void *context) {
+    IHS_MutexLock(timer->mutex);
+    bool present = *owner != NULL;
+    if (present) visit(*owner, context);
+    IHS_MutexUnlock(timer->mutex);
+    return present;
+}
+
 void IHS_TimerTaskStop(IHS_TimerTask *task) {
     assert(task != NULL);
     IHS_Timer *timer = task->timer;
@@ -153,12 +189,14 @@ void IHS_TimerTaskStopImmediate(IHS_TimerTask *task) {
     // succeed — but the timer worker thread acquires state.lock then timer->mutex,
     // so a callback that touches state.lock (e.g. IHS_TimerDestroy from a user
     // disconnect handler) would create an AB-BA deadlock against the worker. The
-    // refactor makes the contract explicit: end callbacks always run unlocked.
+    // Immediate-stop callbacks run unlocked; natural completion still runs
+    // under the timer worker's locks.
     IHS_MutexLock(timer->mutex);
     IHS_TimerTask *removed = (IHS_TimerTask *) IHS_QueuePollBy(timer->tasks, ItemIdentical, task);
     IHS_TimerEndFunction *end = NULL;
     void *context = NULL;
     if (removed != NULL) {
+        if (removed->owner) *removed->owner = NULL;
         end = removed->end;
         context = removed->context;
         IHS_QueueItemFree((IHS_QueueItem *) removed);
@@ -250,6 +288,7 @@ static bool TaskExecute(IHS_TimerTask *task, IHS_Timer *timer) {
 
 static void TaskDestroy(IHS_TimerTask *task, IHS_Timer *timer) {
     (void) timer;
+    if (task->owner) *task->owner = NULL;
     if (task->end) {
         task->end(task->context);
     }

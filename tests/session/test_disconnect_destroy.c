@@ -22,9 +22,8 @@
 // writing through `discoveryChannel->disconnectTimerTask` and calling
 // OnDisconnect on the freed channel + session.
 //
-// The fix calls IHS_TimerTaskStopImmediate from OnDiscoveryDeinit so the timer
-// task is removed (and its end callback fired) synchronously while the channel
-// is still valid.
+// An owned timer makes duplicate requests idempotent; OnDiscoveryDeinit clears
+// that owner and runs its end callback while the channel is still valid.
 //
 // This test exercises both the immediate destroy path (no time for the timer to
 // fire) and a destroy-after-brief-sleep path (timer is mid-execution). Run under
@@ -44,8 +43,10 @@ static void test_destroy_immediately_after_disconnect(void) {
     IHS_Session *session = IHS_TestSessionCreate();
     IHS_SessionChannel *discovery = IHS_SessionChannelFor(session, IHS_SessionChannelIdDiscovery);
     IHS_SessionChannelDiscoveryDisconnect(discovery);
+    /* Duplicate stop requests must share one timer, not overwrite its owner. */
+    IHS_SessionChannelDiscoveryDisconnect(discovery);
     // No sleep: race the destroy against the timer thread's first poll. The fix
-    // (StopImmediate in OnDiscoveryDeinit) removes the task before Destroy frees
+    // (StopOwned in OnDiscoveryDeinit) removes the task before Destroy frees
     // the channel.
     IHS_SessionDestroy(session);
 }
@@ -56,7 +57,7 @@ static void test_destroy_after_timer_starts_firing(void) {
     IHS_SessionChannelDiscoveryDisconnect(discovery);
     // Sleep long enough for the timer thread to enter TaskExecute. The timer thread
     // polls every ~1 ms; 20 ms guarantees at least one fire of DisconnectTimerRun
-    // (which would otherwise reschedule every 100 ms). StopImmediate must still
+    // (which would otherwise reschedule every 100 ms). StopOwned must still
     // remove the task cleanly under contention with the worker thread.
     usleep(20 * 1000);
     IHS_SessionDestroy(session);

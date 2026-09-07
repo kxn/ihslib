@@ -52,6 +52,38 @@ typedef struct {
 static uint64_t reentrant_inner_run(int runCount, void *context);
 static void reentrant_end(void *context);
 
+typedef struct {
+    IHS_TimerTask *owner;
+    atomic_int ended;
+} owned_ctx_t;
+static uint64_t owned_run(int count, void *context) {
+    (void)count; (void)context;
+    return 0;
+}
+static void owned_end(void *context) {
+    owned_ctx_t *ctx = context;
+    assert(ctx->owner == NULL);
+    ctx->ended++;
+}
+static void owned_visit(IHS_TimerTask *task, void *context) {
+    assert(IHS_TimerTaskGetContext(task) == context);
+    IHS_TimerTaskStop(task);
+}
+static void owned_tasks(IHS_Timer *timer) {
+    owned_ctx_t ctx = {0};
+    assert(IHS_TimerTaskStartOwned(timer, &ctx.owner, owned_run, owned_end, 100000, &ctx));
+    assert(!IHS_TimerTaskStartOwned(timer, &ctx.owner, owned_run, owned_end, 100000, &ctx));
+    assert(IHS_TimerTaskVisitOwned(timer, &ctx.owner, owned_visit, &ctx));
+    IHS_TimerTaskStopOwned(timer, &ctx.owner);
+    assert(ctx.ended == 1 && ctx.owner == NULL);
+    assert(!IHS_TimerTaskVisitOwned(timer, &ctx.owner, owned_visit, &ctx));
+    for (int i = 0; i < 100; i++) {
+        assert(IHS_TimerTaskStartOwned(timer, &ctx.owner, owned_run, owned_end, 0, &ctx));
+        IHS_TimerTaskStopOwned(timer, &ctx.owner);
+        assert(ctx.ended == i+2 && ctx.owner == NULL);
+    }
+}
+
 int main(int argc, char *argv[]) {
     (void) argc;
     (void) argv;
@@ -59,6 +91,7 @@ int main(int argc, char *argv[]) {
     IHS_TimerInit();
     IHS_Timer *timer1 = IHS_TimerCreate();
     IHS_Timer *timer2 = IHS_TimerCreate();
+    owned_tasks(timer1);
 
     task_ctx_t timer1_ctx1 = {.timer = 1, .id = 2, .counter = 0};
     IHS_TimerTask *timer1_task1 = IHS_TimerTaskStart(timer1, task_run, task_end, 0, &timer1_ctx1);

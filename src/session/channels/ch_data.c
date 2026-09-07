@@ -77,7 +77,7 @@ void IHS_SessionChannelDataReceived(IHS_SessionChannel *channel, IHS_SessionPack
     IHS_SessionChannelData *dataCh = (IHS_SessionChannelData *) channel;
     assert(dataCh->window != NULL);
     IHS_SessionPacketType type = packet->header.type;
-    assert(type == IHS_SessionPacketTypeUnreliable || type == IHS_SessionPacketTypeUnreliableFrag);
+    if (type != IHS_SessionPacketTypeUnreliable && type != IHS_SessionPacketTypeUnreliableFrag) return;
     IHS_MutexLock(dataCh->windowLock);
     if (!IHS_SessionPacketsWindowAdd(dataCh->window, packet)) {
         IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Data", "%s channel items overflow! Available: %u",
@@ -109,6 +109,7 @@ void IHS_SessionChannelDataStopped(IHS_SessionChannel *channel) {
 }
 
 size_t IHS_SessionChannelDataFrameHeaderParse(IHS_SessionDataFrameHeader *header, const IHS_Buffer *data) {
+    if (data->size < IHS_SESSION_DATA_FRAME_HEADER_SIZE) return 0;
     size_t offset = 0;
     offset += IHS_ReadUInt16LE(IHS_BufferPointerAt(data, offset), &header->id);
     offset += IHS_ReadUInt32LE(IHS_BufferPointerAt(data, offset), &header->timestamp);
@@ -126,6 +127,7 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
     if (!cls->start((IHS_SessionChannel *) channel)) {
         IHS_SessionLog(channel->base.session, IHS_LogLevelError, "Data", "Failed to start %s channel", channelName);
         IHS_SessionDisconnect(channel->base.session);
+        IHS_BufferClear(&frame.body, true);
         return;
     }
     IHS_SessionLog(channel->base.session, IHS_LogLevelInfo, "Data", "%s channel started", channelName);
@@ -144,6 +146,8 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
             if ((hasFrame = IHS_SessionPacketsWindowPoll(channel->window, &frame))) {
                 break;
             }
+            /* Stop may have signalled before this worker acquired windowLock. */
+            if (channel->interrupted) break;
             IHS_CondWait(channel->windowCond, channel->windowLock);
             if (channel->interrupted) {
                 break;
@@ -175,6 +179,7 @@ static void DataThreadInterrupt(IHS_SessionChannelData *channel) {
 
 static void ReceivedFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
     assert(frame->header.type == IHS_SessionPacketTypeUnreliable);
+    if (frame->body.size < 1) return;
     EStreamDataMessage type = *IHS_BufferPointer(&frame->body);
     IHS_BufferOffsetBy(&frame->body, 1);
     if (type != k_EStreamDataPacket) {
@@ -186,9 +191,11 @@ static void ReceivedFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *fra
         hasHeader = true;
         size_t offset = IHS_SessionChannelDataFrameHeaderParse(&header, &frame->body);
         IHS_BufferOffsetBy(&frame->body, (int) offset);
+        header.sendTimestamp = frame->header.sendTimestamp;
+        header.receiveTimestamp = frame->header.receiveTimestamp;
     }
     const IHS_SessionChannelDataClass *cls = (const IHS_SessionChannelDataClass *) channel->base.cls;
-    cls->dataFrame((IHS_SessionChannel *) channel, hasHeader ? &header : NULL, &frame->body);
+    if (hasHeader) cls->dataFrame((IHS_SessionChannel *) channel, &header, &frame->body);
 }
 
 static const char *DataChannelName(IHS_SessionChannelType type) {

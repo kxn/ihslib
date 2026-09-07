@@ -22,3 +22,9 @@ ihs_add_test(control_hid_admission control_hid_admission.c)
 target_link_libraries(ihstest_control_hid_admission PRIVATE ihs-test-session)
 
 add_subdirectory(video)
+
+ihs_add_test(protocol_evidence test_protocol_evidence.c)
+target_link_libraries(ihstest_protocol_evidence PRIVATE ihs-test-session)
+
+ihs_add_test(hid_send_order test_hid_send_order.c)
+target_link_libraries(ihstest_hid_send_order PRIVATE ihs-test-session)

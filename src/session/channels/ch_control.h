@@ -46,21 +46,25 @@ typedef struct IHS_SessionChannelControl {
      * messages — the receive thread answering HID requests, the timer thread's
      * keepalive, and the application's per-frame HID report. */
     IHS_Mutex *sendLock;
+    IHS_Mutex *receiveLock;
+    IHS_TimerTask *feedbackTimer;
+    uint32_t peerTimestamp, peerReceiveTime;
+    bool receivedReliable;
     uint64_t sendEncryptSequence;
     uint64_t recvEncryptSequence;
     uint64_t hidSubmitted;
     uint64_t hidCoalesced;
     uint64_t hidSent;
-    uint64_t hidAcknowledged;
-    uint64_t hidSuperseded;
     IHS_SessionPacketsWindow *framePacketWindow;
     /** Set once the frame window overflowed, so we disconnect only once. */
     bool overflowed;
     IHS_TimerTask *keepAliveTimer;
     /** Gap-NACK cadence: official hole-age threshold ~1ms with 5ms update
      * ticks ([f47000+2444], 0x7fe284); see docs/STEAMLINK_PROTOCOL_RE.md §9.1.
-     * unknown; see docs/STEAMLINK_PROTOCOL_RE.md §9.1. */
+     * See protocol RE §14 for receive-watermark and echo evidence. */
     uint64_t lastNackSentMs;
+    uint32_t lastNackTimestamp;
+    bool haveNackTimestamp;
 } IHS_SessionChannelControl;
 
 IHS_SessionChannel *IHS_SessionChannelControlCreate(IHS_Session *session);
@@ -68,9 +72,6 @@ IHS_SessionChannel *IHS_SessionChannelControlCreate(IHS_Session *session);
 bool IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamControlMessage type,
                                    const ProtobufCMessage *message, int32_t packetId);
 
-/** Submit a complete CHID input-report snapshot. New snapshots replace the queued
- * snapshot while an older one awaits ACK; packet IDs are allocated only when sent. */
-/** Iterate recently submitted HID input reports, newest first. */
 /** Drain SD-persisted HID report records (formatted lines) for the diag
  * writer; called from the diag disk thread only. */
 size_t IHS_SessionChannelControlDrainPendingHIDReports(char *out, size_t cap);
@@ -78,12 +79,12 @@ size_t IHS_SessionChannelControlDrainPendingHIDReports(char *out, size_t cap);
 void IHS_SessionChannelControlGetRecentHIDReports(uint64_t *out_ms, uint16_t *out_len,
                                                   uint8_t *out_data, size_t *out_off);
 
+/** Submit one ordered CHID report batch without waiting for earlier ACKs. */
 bool IHS_SessionChannelControlSubmitHIDReport(IHS_SessionChannel *channel,
                                               const uint8_t *data, size_t dataLen,
                                               bool activeInput);
 
-/** Commit a queued snapshot even if another HID snapshot is still in flight. Used
- * only to order the final neutral controller state before StopRequest. */
+/** Compatibility no-op: submissions are enqueued immediately. */
 bool IHS_SessionChannelControlFlushPendingHID(IHS_SessionChannel *channel);
 
 void IHS_SessionChannelControlHandshake(IHS_SessionChannel *channel, bool networkTest);
@@ -130,3 +131,9 @@ bool IHS_SessionChannelControlSendHIDMsg(IHS_SessionChannel *channel, const CHID
  */
 void IHS_SessionChannelControlOnMessageReceived(IHS_SessionChannel *channel, EStreamControlMessage type,
                                                 IHS_Buffer *payload, const IHS_SessionPacketHeader *header);
+
+/* IHS_Init/Quit own the diagnostic mutex; all consumers must stop before Quit. */
+void IHS_ControlDiagnosticsInit(void);
+void IHS_ControlDiagnosticsQuit(void);
+
+void IHS_SessionChannelControlUpdateFeedback(IHS_SessionChannelControl *control);

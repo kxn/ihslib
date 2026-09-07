@@ -51,7 +51,7 @@ typedef struct IHS_SessionConfig {
 } IHS_SessionConfig;
 
 /** Monotonic counters and current occupancy for the reliable transport and the
- * HID snapshot admission state machine. Safe to sample from a diagnostics thread. */
+ * HID transport packets (confirmation does not imply host input application). Safe to sample from a diagnostics thread. */
 typedef struct IHS_SessionReliabilityStats {
     uint64_t reliableTracked;
     uint64_t reliableAcknowledged;
@@ -69,11 +69,11 @@ typedef struct IHS_SessionReliabilityStats {
     uint64_t reliableMaxAckLatencyMs;
     uint64_t hidSubmitted;
     uint64_t hidCoalesced;
-    uint64_t hidSent;
-    uint64_t hidAcknowledged;
+    uint64_t hidSent; /* successfully queued RemoteHID messages */
+    uint64_t hidAcknowledged; /* confirmed HID transport packets, including fragments */
     uint64_t hidSuperseded;
-    uint32_t hidPending;
-    uint32_t hidInFlight;
+    uint32_t hidPending; /* queued HID packets before their first send attempt */
+    uint32_t hidInFlight; /* attempted HID packets still awaiting confirmation */
     int32_t hidOldestInFlightPacketId;
 } IHS_SessionReliabilityStats;
 

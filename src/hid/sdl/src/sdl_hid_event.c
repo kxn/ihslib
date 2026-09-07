@@ -43,18 +43,18 @@ static bool HandleSensorEvent(IHS_HIDManager *manager, const SDL_GamepadSensorEv
 /* Convert internal state to the Generic Gamepad wire format. The host parser
  * (libmain BParseGamepadStateGenericGamepad @0x7d089c) is dual-mode, selected
  * by byte 27: 0 = ENCODED (28-byte axes+button-bytes), nonzero = RAW (the
- * HIDDeviceSDLGamepadStateV2_t struct, memcpy'd up to 72 bytes). The official
- * client always sends RAW with version 3: its local report is ENCODED, the
+ * HIDDeviceSDLGamepadStateV2_t struct, memcpy'd up to 72 bytes). In the traced generic-gamepad
+ * branch the client sends RAW with version 3: its local report is ENCODED, the
  * parse step sets state byte 27 to 3 (0x7d0a50), and Pack's RAW path then
  * memcpy's the whole struct (0x7cfd8c).
  *
- * RAW layout as shipped by the official client:
+ * RAW layout used by this generic SDL provider (IMU/touch are not implemented):
  *   wire[0..11]  = 6 × s16 axes (LX, LY, RX, RY, LT, RT)
  *   wire[12..15] = flags u32 (0; only the version<=2 compat fixup touches it)
- *   wire[16..19] = buttons u32 bitfield at EGamepadButton positions
+ *   wire[16..19] = buttons u32 bitfield at SDL button positions
  *   wire[20..26] = zero
  *   wire[27]     = version byte, 3 (RAW selector; skips the <=2 flags fixup)
- *   wire[28..71] = IMU/touch area, zeros (V2 tail layout unconfirmed)
+ *   wire[28..71] = IMU/touch area, zeroed by this provider
  *
  * Button bit positions are SDL_GamepadButton values directly (official
  * OnButtonEvent 0x754034 writes `1 << ev->button` into the +16 bitfield) —
@@ -77,10 +77,7 @@ bool IHS_HIDFlushSDLGameControllers(IHS_Session *session) {
     if (!IHS_SessionInputEnabled(session)) {
         return false;
  }
-    /* Official-client semantics: input reports are masked deltas against the
-     * previous flushed state, batched once per frame. full_report is never
-     * sent on this path (set_full_report has zero call sites in the official
-     * client); periodic full state is the heartbeat's job. */
+    /* SendBuffer chooses delta or full according to encoded size. */
     IHS_HIDManager *manager = session->hidManager;
     bool queued = false;
     size_t count;
@@ -90,10 +87,11 @@ bool IHS_HIDFlushSDLGameControllers(IHS_Session *session) {
         if (!IHS_HIDDeviceIsSDL(managed->device)) {
             continue;
         }
-        if (managed->reportHolder.reportLength == 0) {
+        IHS_HIDDeviceLock(managed->device);
+        if (managed->closed || managed->reportHolder.reportLength == 0) {
+            IHS_HIDDeviceUnlock(managed->device);
             continue;
         }
-        IHS_HIDDeviceLock(managed->device);
         IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) managed->device;
         if (memcmp(&device->states.previous, &device->states.current,
                    sizeof(IHS_HIDStateSDL)) == 0) {
@@ -106,6 +104,8 @@ bool IHS_HIDFlushSDLGameControllers(IHS_Session *session) {
         HIDSDLBuildWireState(&device->states.current, curWire, wireLen);
         IHS_HIDDeviceReportAddDelta((IHS_HIDDevice *) device,
                                     prevWire, curWire, wireLen);
+        managed->reportActivityKnown = true;
+        managed->reportActiveInput |= IHS_HIDSDLActiveInput(&device->states.current);
         device->lastSubmitted = device->states.current;
         device->lastSubmittedSeq++;
         device->states.previous = device->states.current;
@@ -120,6 +120,7 @@ bool IHS_HIDFlushSDLGameControllers(IHS_Session *session) {
 }
 
 bool IHS_HIDRefreshSDLGameControllers(IHS_Session *session) {
+    if (!IHS_SessionInputEnabled(session)) return false;
     IHS_HIDManager *manager = session->hidManager;
     bool queued = false;
     size_t count;
@@ -132,18 +133,20 @@ bool IHS_HIDRefreshSDLGameControllers(IHS_Session *session) {
         /* Only devices whose host started input reports carry a wire report length.
          * AddFullForced asserts reportLength >= len, and reporting state the host never
          * subscribed to is wrong regardless. */
-        if (managed->reportHolder.reportLength == 0) {
+        IHS_HIDDeviceLock(managed->device);
+        if (managed->closed || managed->reportHolder.reportLength == 0) {
+            IHS_HIDDeviceUnlock(managed->device);
             continue;
         }
-        IHS_HIDDeviceLock(managed->device);
         IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) managed->device;
-        /* Resync state rides a full-mask delta: the official client never sends
-         * the full_report field (set_full_report has zero call sites). */
+        /* Explicit refresh uses full_report; SendBuffer 0x7d03b8 supports it. */
         size_t wireLen = IHS_HIDDeviceSDLWireReportLength(managed);
         uint8_t curWire[HIDSDL_WIRE_STATE_SIZE];
         HIDSDLBuildWireState(&device->states.current, curWire, wireLen);
-        IHS_HIDDeviceReportAddForcedFullMaskDelta((IHS_HIDDevice *) device,
+        IHS_HIDDeviceReportAddFullForced((IHS_HIDDevice *) device,
                                                   curWire, wireLen);
+        managed->reportActivityKnown = true;
+        managed->reportActiveInput |= IHS_HIDSDLActiveInput(&device->states.current);
         device->lastSubmitted = device->states.current;
         device->lastSubmittedSeq++;
         device->states.previous = device->states.current;
@@ -172,6 +175,7 @@ bool IHS_HIDSDLGetLastSubmittedReport(IHS_Session *session, IHS_HIDSDLLastSubmit
         }
         IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) managed->device;
         IHS_HIDDeviceLock(managed->device);
+        if (managed->closed) { IHS_HIDDeviceUnlock(managed->device); continue; }
         if (device->lastSubmittedSeq > 0) {
             memcpy(out->axes, device->lastSubmitted.axes, sizeof(out->axes));
             out->buttons = device->lastSubmitted.buttons;
@@ -224,14 +228,15 @@ bool IHS_HIDResetSDLGameControllers(IHS_Session *session) {
         }
         IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) managed->device;
         IHS_HIDDeviceLock(managed->device);
+        if (managed->closed) { IHS_HIDDeviceUnlock(managed->device); continue; }
         if (IHS_HIDReportSDLClear(&device->states.current)) {
             changed = true;
             if (managed->reportHolder.reportLength > 0) {
-                /* Neutral-state resync also rides a full-mask delta. */
+                /* Explicit neutral state, ordered with the preceding input reports. */
                 size_t wireLen = IHS_HIDDeviceSDLWireReportLength(managed);
                 uint8_t neutralWire[HIDSDL_WIRE_STATE_SIZE];
                 HIDSDLBuildWireState(&device->states.current, neutralWire, wireLen);
-                IHS_HIDDeviceReportAddForcedFullMaskDelta(managed->device,
+                IHS_HIDDeviceReportAddFullForced(managed->device,
                                                           neutralWire, wireLen);
             }
             device->states.previous = device->states.current;
@@ -262,6 +267,7 @@ static bool HandleCButtonEvent(IHS_HIDManager *manager, const SDL_GamepadButtonE
     IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) managed->device;
     assert(device != NULL);
     IHS_HIDDeviceLock(managed->device);
+    if (managed->closed) { IHS_HIDDeviceUnlock(managed->device); return false; }
     bool changed = IHS_HIDReportSDLSetButton(&device->states.current, event->button,
                                              event->down);
     IHS_HIDDeviceUnlock(managed->device);
@@ -276,6 +282,7 @@ static bool HandleCAxisEvent(IHS_HIDManager *manager, const SDL_GamepadAxisEvent
     IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) managed->device;
     assert(device != NULL);
     IHS_HIDDeviceLock(managed->device);
+    if (managed->closed) { IHS_HIDDeviceUnlock(managed->device); return false; }
     bool changed = IHS_HIDReportSDLSetAxis(&device->states.current, event->axis, event->value);
     IHS_HIDDeviceUnlock(managed->device);
     return changed;
@@ -289,6 +296,7 @@ static bool HandleSensorEvent(IHS_HIDManager *manager, const SDL_GamepadSensorEv
     IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) managed->device;
     assert(device != NULL);
     IHS_HIDDeviceLock(managed->device);
+    if (managed->closed) { IHS_HIDDeviceUnlock(managed->device); return false; }
     bool changed = false;
     if (event->sensor == SDL_SENSOR_ACCEL) {
         changed = IHS_HIDReportSDLSetAccel(&device->states.current, event->data);
@@ -313,6 +321,7 @@ void IHS_HIDSDLApplyPendingWrites(IHS_Session *session) {
             continue;
         }
         IHS_HIDDeviceLock(managed->device);
+        if (managed->closed) { IHS_HIDDeviceUnlock(managed->device); continue; }
         IHS_HIDDeviceSDLApplyPendingWrites((IHS_HIDDeviceSDL *) managed->device);
         IHS_HIDDeviceUnlock(managed->device);
     }

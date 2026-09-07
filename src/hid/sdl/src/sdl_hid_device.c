@@ -162,6 +162,8 @@ static int DeviceStartInputReports(IHS_HIDDevice *device, size_t length) {
     size_t reportLen = IHS_HIDDeviceSDLWireReportLength(device->managed);
     IHS_HIDReportSDLPackWire(current, reportLen, &sdl->states.current);
     IHS_HIDDeviceReportAddFullForced(device, current, reportLen);
+    device->managed->reportActivityKnown = true;
+    device->managed->reportActiveInput |= IHS_HIDSDLActiveInput(&sdl->states.current);
     sdl->states.previous = sdl->states.current;
     IHS_HIDDeviceUnlock(device);
     return 0;
@@ -174,6 +176,8 @@ static int DeviceRequestFullReport(IHS_HIDDevice *device) {
     size_t reportLen = IHS_HIDDeviceSDLWireReportLength(device->managed);
     IHS_HIDReportSDLPackWire(current, reportLen, &sdl->states.current);
     IHS_HIDDeviceReportAddFullForced(device, current, reportLen);
+    device->managed->reportActivityKnown = true;
+    device->managed->reportActiveInput |= IHS_HIDSDLActiveInput(&sdl->states.current);
     sdl->states.previous = sdl->states.current;
     IHS_HIDDeviceUnlock(device);
     return 0;

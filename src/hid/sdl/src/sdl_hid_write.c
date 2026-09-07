@@ -99,8 +99,7 @@ static size_t WriteCommandLength(uint8_t type) {
 
 /* Called on the session receive thread: queue ONLY. SDL gamepad calls here
  * deadlock against SDL_PollEvent on the media thread; the commands are
- * applied by IHS_HIDDeviceSDLApplyPendingWrites on the flush thread, which
- * already calls SDL safely at 125 Hz. */
+ * applied by IHS_HIDDeviceSDLApplyPendingWrites on the media thread, alongside SDL event processing. */
 int IHS_HIDDeviceSDLWrite(IHS_HIDDevice *device, const uint8_t *data, size_t dataLen) {
     IHS_HIDDeviceSDL *sdl = (IHS_HIDDeviceSDL *) device;
     if (dataLen < sizeof(uint8_t)) {
@@ -115,20 +114,20 @@ int IHS_HIDDeviceSDLWrite(IHS_HIDDevice *device, const uint8_t *data, size_t dat
         IHS_HIDDeviceUnlock(device);
         IHS_HIDDeviceLog(device, IHS_LogLevelWarn, "HID.SDL",
                          "Write queue overflow, dropping command %u", data[0]);
-        return 0; /* accepted-and-dropped: rumble is best-effort */
+        return -1; /* No command was accepted, including configuration writes. */
     }
     IHS_BufferAppendMem(&sdl->pendingWrites, data, commandLen);
     IHS_HIDDeviceUnlock(device);
     return 0;
 }
 
-/* Called with the device lock HELD (flush thread): apply queued commands. */
+/* Called with the device lock HELD (media thread): apply queued commands. */
 void IHS_HIDDeviceSDLApplyPendingWrites(IHS_HIDDeviceSDL *sdl) {
     while (sdl->pendingWrites.size >= sizeof(uint8_t)) {
         const uint8_t *data = IHS_BufferPointer(&sdl->pendingWrites);
         size_t commandLen = WriteCommandLength(data[0]);
         if (commandLen == 0 || sdl->pendingWrites.size < commandLen) {
-            sdl->pendingWrites.size = 0; /* corrupt tail: drop everything */
+            IHS_BufferClear(&sdl->pendingWrites, false); /* corrupt tail */
             return;
         }
         const WriteCommand *command = (const WriteCommand *) data;
@@ -166,6 +165,7 @@ void IHS_HIDDeviceSDLApplyPendingWrites(IHS_HIDDeviceSDL *sdl) {
         }
         IHS_BufferOffsetBy(&sdl->pendingWrites, (int) commandLen);
     }
+    IHS_BufferClear(&sdl->pendingWrites, false);
 }
 
 void HandleRumble(IHS_HIDDeviceSDL *sdl, const RumbleCommand *rumble) {

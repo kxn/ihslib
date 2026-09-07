@@ -48,6 +48,13 @@ int main() {
     IHS_HIDReportHolderAddFull(&holder, idle, REPORT_LEN);
     assert(IHS_HIDReportHolderGetMessage(&holder) == NULL);
 
+    /* Full reports must preserve a press/release in the same batch too. */
+    IHS_HIDReportHolderAddFull(&holder, pressed, REPORT_LEN);
+    IHS_HIDReportHolderAddFull(&holder, idle, REPORT_LEN);
+    msg = IHS_HIDReportHolderGetMessage(&holder);
+    assert(msg && msg->n_reports == 2);
+    assert(memcmp(msg->reports[1]->full_report.data, idle, REPORT_LEN) == 0);
+
     IHS_HIDReportHolderDeinit(&holder);
     puts("hid report chain OK");
     return 0;

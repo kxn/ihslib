@@ -33,16 +33,14 @@ typedef struct IHS_RetransmissionStats {
     int32_t oldestFragmentId;
     uint32_t oldestRetryCount;
     uint64_t maxAckLatencyMs;
+    uint64_t hidAcknowledged; /* HID transport packets, not host-applied reports */
+    uint32_t hidPending, hidInFlight;
+    int32_t hidOldestInFlightPacketId;
 } IHS_RetransmissionStats;
 
-/**
- * One session-owned reliability state machine. A packet is tracked before its
- * first send is queued and remains here until the peer acknowledges the exact
- * (channel, packet, fragment) identity, its owner retires a superseded packet
- * after bounded gap filling, the give-up window (3 s) closes on an unacked
- * packet — the peer's decrypt-sequence resync makes later retransmissions
- * stale replays — or the session is destroyed.
- */
+/** Reliable packets remain tracked until peer confirmation or session teardown.
+ * ACK is cumulative; extended NACK includes cumulative and selective receipt.
+ * New reports cannot supersede unacknowledged ciphertext. */
 typedef struct IHS_SessionRetransmission {
     IHS_Session *session;
     IHS_Mutex *lock;
@@ -66,8 +64,7 @@ bool IHS_RetransmissionAcknowledge(IHS_SessionRetransmission *retransmission,
                                    IHS_SessionChannelId channelId, uint16_t packetId,
                                    int16_t fragmentId, uint64_t nowMs);
 
-/** Mark an exact packet as superseded by a newer full-state message. It remains
- * eligible for a small, bounded number of retries before being retired. */
+/** Compatibility lookup only: superseding cannot retire reliable ciphertext. */
 bool IHS_RetransmissionSupersede(IHS_SessionRetransmission *retransmission,
                                  IHS_SessionChannelId channelId, uint16_t packetId,
                                  int16_t fragmentId);
@@ -76,11 +73,10 @@ bool IHS_RetransmissionNack(IHS_SessionRetransmission *retransmission,
                             IHS_SessionChannelId channelId, uint16_t packetId,
                             int16_t fragmentId, uint64_t nowMs);
 
-/* Release every tracked pending packet on the channel whose packetId is
- * strictly below packetId (fragment-agnostic). Mirrors the official NACK
- * semantics where the contiguous-delivery field confirms all lower ids. */
+/* AcknowledgeThrough uses an exclusive boundary; pass confirmed+1.
+ * Acknowledge/Nack accept INT16_MIN to match an ID regardless of fragment. */
 /* Force retransmit (set due immediately) of every tracked pending packet on
- * the channel at/below packetId. Used for the simple (header-only) NACK. */
+ * the channel strictly below packetId. Used for the simple (header-only) NACK. */
 size_t IHS_RetransmissionNackAllThrough(IHS_SessionRetransmission *retransmission,
                                         IHS_SessionChannelId channelId, uint16_t packetId,
                                         uint64_t nowMs);
@@ -98,3 +94,6 @@ size_t IHS_RetransmissionProcessAt(IHS_SessionRetransmission *retransmission, ui
 
 void IHS_RetransmissionGetStats(IHS_SessionRetransmission *retransmission,
                                 IHS_RetransmissionStats *stats, uint64_t nowMs);
+
+size_t IHS_RetransmissionNackBefore(IHS_SessionRetransmission *r, IHS_SessionChannelId channel,
+                                    uint16_t id, bool below, uint32_t cutoff, uint64_t nowMs);

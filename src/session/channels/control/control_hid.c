@@ -219,6 +219,7 @@ bool IHS_SessionHIDSendReport(IHS_Session *session) {
     // The polling task still calls device->poll() so device state stays current; only
     // the wire send is suppressed (matches Steam's BStreamingInput gating behavior).
     if (!IHS_SessionInputEnabled(session)) return false;
+    IHS_MutexLock(session->hidManager->reportSendLock);
     CHIDMessageFromRemote outMessage = CHIDMESSAGE_FROM_REMOTE__INIT;
     outMessage.command_case = CHIDMESSAGE_FROM_REMOTE__COMMAND_REPORTS;
     CHIDMessageFromRemote__DeviceInputReports reports = CHIDMESSAGE_FROM_REMOTE__DEVICE_INPUT_REPORTS__INIT;
@@ -226,9 +227,7 @@ bool IHS_SessionHIDSendReport(IHS_Session *session) {
 
     // Snapshot the open device list once under devicesLock. The snapshot pointers stay
     // valid for the rest of this function: closed slots are kept alive in the manager,
-    // and even devices that flip to closed mid-send still have a live struct (the inner
-    // IHS_HIDDevice may be gone, but we only touch managed->lock and managed->reportHolder
-    // below, both of which are owned by the outer struct).
+    // including their inner device allocation. Check closed again after locking.
     size_t deviceCount;
     IHS_HIDManagedDevice **deviceSnapshot = IHS_HIDManagerSnapshotOpenDevices(session->hidManager, &deviceCount);
 
@@ -237,12 +236,15 @@ bool IHS_SessionHIDSendReport(IHS_Session *session) {
         IHS_MutexLock(deviceSnapshot[i]->lock);
     }
 
+    bool hasActiveInput = false;
     IHS_ArrayListClear(&session->hidManager->inputReports);
     for (size_t i = 0; i < deviceCount; ++i) {
+        if (deviceSnapshot[i]->closed) continue;
         IHS_HIDDeviceReportMessage *report = IHS_HIDReportHolderGetMessage(&deviceSnapshot[i]->reportHolder);
         if (report == NULL) {
             continue;
         }
+        hasActiveInput |= !deviceSnapshot[i]->reportActivityKnown || deviceSnapshot[i]->reportActiveInput;
         IHS_ArrayListAppend(&session->hidManager->inputReports, &report);
     }
 
@@ -252,8 +254,7 @@ bool IHS_SessionHIDSendReport(IHS_Session *session) {
     // before doing the expensive encrypt + send work.
     uint8_t *packed = NULL;
     size_t packedLen = 0;
-    bool hasActiveInput = session->hidManager->inputReports.size > 0;
-    if (hasActiveInput) {
+    if (session->hidManager->inputReports.size > 0) {
         reports.n_device_reports = session->hidManager->inputReports.size;
         reports.device_reports = (IHS_HIDDeviceReportMessage **) session->hidManager->inputReports.data;
         packedLen = chidmessage_from_remote__get_packed_size(&outMessage);
@@ -268,20 +269,22 @@ bool IHS_SessionHIDSendReport(IHS_Session *session) {
 
     // Reset holders and unlock — the packed snapshot is self-contained from here on.
     for (size_t i = 0; i < deviceCount; ++i) {
-        IHS_HIDReportHolderResetMessage(&deviceSnapshot[i]->reportHolder);
+        if (packed != NULL) {
+            IHS_HIDReportHolderResetMessage(&deviceSnapshot[i]->reportHolder);
+            deviceSnapshot[i]->reportActiveInput = false;
+        }
         IHS_MutexUnlock(deviceSnapshot[i]->lock);
     }
     free(deviceSnapshot);
 
     bool ret = false;
     if (packed != NULL) {
-        /* The control channel owns admission: while one complete snapshot awaits
-         * ACK this replaces the queued snapshot instead of allocating another
-         * reliable packet ID. */
+        /* Keep reportSendLock until encryption and queue admission complete. */
         IHS_SessionChannel *channel = IHS_SessionChannelForType(session, IHS_SessionChannelTypeControl);
         ret = IHS_SessionChannelControlSubmitHIDReport(channel, packed, packedLen, hasActiveInput);
         free(packed);
     }
+    IHS_MutexUnlock(session->hidManager->reportSendLock);
     return ret;
 }
 
@@ -510,7 +513,6 @@ static void HandleDeviceStartInputReports(IHS_SessionChannel *channel, IHS_HIDMa
         return;
     }
 
-    IHS_HIDReportHolderSetReportLength(&managed->reportHolder, cmd->length);
     if (IHS_HIDDeviceStartInputReports(managed->device, cmd->length) == 0) {
         IHS_SessionLog(channel->session, IHS_LogLevelDebug, "HID",
                        "Message %u: StartInputReports(id=%u, length=%u)",
@@ -590,10 +592,9 @@ static void InfoFromHID(CHIDDeviceInfo *info, const IHS_HIDDeviceInfo *hid) {
      * XBOX360-type ones (libmain CHIDDeviceListSDL::EnumerateDevices
      * 0x754bbc: SDL_GetGamepadType != XBOX360 -> flag=1, usage=5). The flag
      * also selects the ReportGenerator wire mode (constructor 0x7cf2bc):
-     * without it a Nintendo VID/PID has no wire format at all — the official
-     * code path would hit its "unknown controller type" assert, and the host
-     * ignored our reports entirely in the 2026-09-07 test. With the flag the
-     * reports ride the Generic path (Pack RAW V2, see sdl_hid_common.h). */
+     * this provider always emits Generic RAW V2 (version byte 3), so it must
+     * advertise that format. This client-side branch is not evidence of how
+     * the host handled a particular historical failed input session. */
     PROTOBUF_C_P_SET_VALUE(info, is_generic_gamepad, true);
     PROTOBUF_C_P_SET_VALUE(info, ostype, IHS_SteamOSTypeLinux);
 

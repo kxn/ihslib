@@ -45,44 +45,47 @@ static void AuthorizationConfigureTicket(IHS_Client *client, IHS_AuthorizationSt
                                          CMsgRemoteDeviceAuthorizationRequest__CKeyEscrowTicket *ticket);
 
 bool IHS_ClientAuthorizationRequest(IHS_Client *client, const IHS_HostInfo *host, const char *pin) {
-    if (client->taskHandles.authorization) {
-        return false;
-    }
     IHS_AuthorizationState *state = malloc(sizeof(IHS_AuthorizationState));
+    if (!state) return false;
     state->client = client;
     state->host = *host;
     strncpy(state->deviceName, client->base.deviceName, sizeof(state->deviceName) - 1);
     state->deviceName[sizeof(state->deviceName) - 1] = '\0';
     strncpy(state->pin, pin, sizeof(state->pin) - 1);
     state->pin[sizeof(state->pin) - 1] = '\0';
-    IHS_BaseLock(&client->base);
-    client->taskHandles.authorization = IHS_TimerTaskStart(client->timers, AuthorizationRequestTimer,
-                                                           AuthorizationRequestCleanup, 0, state);
-    IHS_BaseUnlock(&client->base);
+    if (!IHS_TimerTaskStartOwned(client->timers, &client->taskHandles.authorization,
+            AuthorizationRequestTimer, AuthorizationRequestCleanup, 0, state)) {
+        free(state);
+        return false;
+    }
     return true;
+}
+
+static void AuthorizationCancelVisit(IHS_TimerTask *task, void *context) {
+    IHS_Client *client = context;
+    IHS_AuthorizationState *state = IHS_TimerTaskGetContext(task);
+    CMsgRemoteDeviceAuthorizationCancelRequest request = CMSG_REMOTE_DEVICE_AUTHORIZATION_CANCEL_REQUEST__INIT;
+    IHS_SocketAddress address = state->host.address;
+    IHS_TimerTaskStop(task);
+    IHS_ClientSend(client, address, k_ERemoteDeviceAuthorizationCancelRequest, (ProtobufCMessage *) &request);
 }
 
 bool IHS_ClientAuthorizationCancel(IHS_Client *client) {
-    if (!client->taskHandles.authorization) {
-        return false;
-    }
-    IHS_TimerTask *task = client->taskHandles.authorization;
-    IHS_AuthorizationState *state = IHS_TimerTaskGetContext(task);
-
-    CMsgRemoteDeviceAuthorizationCancelRequest request = CMSG_REMOTE_DEVICE_AUTHORIZATION_CANCEL_REQUEST__INIT;
-    IHS_SocketAddress address = state->host.address;
-
-    IHS_TimerTaskStop(task);
-
-    IHS_ClientSend(client, address, k_ERemoteDeviceAuthorizationCancelRequest, (ProtobufCMessage *) &request);
-    return true;
+    return IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.authorization,
+                                    AuthorizationCancelVisit, client);
 }
 
-void IHS_ClientAuthorizationCallback(IHS_Client *client, const IHS_SocketAddress *address,
-                                     CMsgRemoteClientBroadcastHeader *header, ProtobufCMessage *message) {
-    IHS_UNUSED(address);
-    IHS_TimerTask *task = client->taskHandles.authorization;
-    if (!task) return;
+typedef struct {
+    IHS_Client *client;
+    CMsgRemoteClientBroadcastHeader *header;
+    ProtobufCMessage *message;
+} AuthorizationResponseContext;
+
+static void AuthorizationResponseVisit(IHS_TimerTask *task, void *context) {
+    AuthorizationResponseContext *response = context;
+    IHS_Client *client = response->client;
+    CMsgRemoteClientBroadcastHeader *header = response->header;
+    ProtobufCMessage *message = response->message;
     if (header->msg_type == k_ERemoteDeviceAuthorizationConfirmed) {
         CMsgRemoteDeviceAuthorizationConfirmed *confirmed =
                 (CMsgRemoteDeviceAuthorizationConfirmed *) message;
@@ -153,6 +156,14 @@ bool IHS_ClientAuthorizationPubKey(IHS_Client *client, IHS_SteamUniverse univers
     return true;
 }
 
+void IHS_ClientAuthorizationCallback(IHS_Client *client, const IHS_SocketAddress *address,
+                                     CMsgRemoteClientBroadcastHeader *header, ProtobufCMessage *message) {
+    IHS_UNUSED(address);
+    AuthorizationResponseContext context = {client, header, message};
+    IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.authorization,
+                            AuthorizationResponseVisit, &context);
+}
+
 static uint64_t AuthorizationRequestTimer(int runCount, void *data) {
     (void) runCount;
     IHS_AuthorizationState *state = data;
@@ -205,10 +216,5 @@ static void AuthorizationConfigureTicket(IHS_Client *client, IHS_AuthorizationSt
 }
 
 static void AuthorizationRequestCleanup(void *data) {
-    IHS_AuthorizationState *state = data;
-    IHS_Client *client = state->client;
-    IHS_BaseLock(&client->base);
-    client->taskHandles.authorization = NULL;
-    IHS_BaseUnlock(&client->base);
     free(data);
 }

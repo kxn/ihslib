@@ -72,8 +72,8 @@ bool IHS_HIDHandleSDLEvent(IHS_Session *session, const SDL_Event *event);
 
 /**
  * Force-send the current SDL controller state for all open SDL game controllers
- * whose host has started input reports. Intended for low-rate idle refreshes; do
- * not call per frame.
+ * whose host has started input reports. Use for an explicit refresh; unchanged
+ * state does not require a periodic input heartbeat.
  * @param session
  * @return true if a report was queued and sent
  */
@@ -87,8 +87,8 @@ bool IHS_HIDRefreshSDLGameControllers(IHS_Session *session);
 bool IHS_HIDResetSDLGameControllers(IHS_Session *session);
 
 /**
- * Wire truth of the most recently submitted full-state HID report: the exact
- * values packed onto the wire, not the live SDL device state. Diagnostics use
+ * Locally queued state of the most recent HID report: the reconstructed
+ * values passed to the report holder, not a transport or host-application ACK. Diagnostics use
  * this to distinguish "we sent a centered snapshot" from "the state we sent
  * was stale".
  */
@@ -106,7 +106,7 @@ bool IHS_HIDSDLGetLastSubmittedReport(IHS_Session *session, IHS_HIDSDLLastSubmit
  * Flush pending input deltas for all open SDL game controllers whose host has
  * started input reports: one masked-delta report per device carrying every
  * state change since the previous flush. This is the per-frame send path;
- * IHS_HIDRefreshSDLGameControllers remains the forced-full heartbeat.
+ * IHS_HIDRefreshSDLGameControllers is the explicit full-report refresh.
  * @param session
  * @return true if any delta was queued and sent
  */

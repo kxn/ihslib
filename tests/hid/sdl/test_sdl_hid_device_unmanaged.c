@@ -114,8 +114,29 @@ int main(int argc, char *argv[]) {
 
     const static uint8_t setPlayerIndexTo7[21] = {0xb, 0x7,};
     IHS_HIDDeviceWrite(device, setPlayerIndexTo7, 21);
+    IHS_HIDDeviceLock(device);
+    IHS_HIDDeviceSDLApplyPendingWrites((IHS_HIDDeviceSDL *) device);
+    IHS_HIDDeviceUnlock(device);
     IHS_HIDDeviceSDL *sdlDevice = (IHS_HIDDeviceSDL *) device;
     assert(sdlDevice->playerIndex == 7);
+    for (unsigned i = 0; i < 4096; i++) {
+        assert(IHS_HIDDeviceWrite(device, setPlayerIndexTo7, 21) == 0);
+        IHS_HIDDeviceLock(device);
+        IHS_HIDDeviceSDLApplyPendingWrites(sdlDevice);
+        assert(sdlDevice->pendingWrites.size == 0 && sdlDevice->pendingWrites.offset == 0);
+        IHS_HIDDeviceUnlock(device);
+    }
+    for (size_t cap = 0; cap < 13; cap++) {
+        uint8_t guarded[32]; memset(guarded, 0xa5, sizeof(guarded));
+        IHS_HIDReportSDLPackWire(guarded, cap, &sdlDevice->states.current);
+        for (size_t j = cap; j < sizeof(guarded); j++) assert(guarded[j] == 0xa5);
+    }
+    IHS_HIDStateSDL activity = {0};
+    assert(!IHS_HIDSDLActiveInput(&activity));
+    activity.buttons = 1; assert(IHS_HIDSDLActiveInput(&activity));
+    activity.buttons = 0; activity.axes[0] = 16383; assert(!IHS_HIDSDLActiveInput(&activity));
+    activity.axes[0] = 16384; assert(IHS_HIDSDLActiveInput(&activity));
+
 
     const static uint8_t setLedRed[21] = {0x5, 0xff, 0x0, 0x0,};
     IHS_HIDDeviceWrite(device, setLedRed, 21);

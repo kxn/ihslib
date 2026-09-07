@@ -41,13 +41,14 @@ void IHS_SessionChannelControlOnAudio(IHS_SessionChannel *channel, EStreamContro
     switch (type) {
         case k_EStreamControlStartAudioData: {
             IHS_SessionChannel *audio = IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataAudio);
-            if (audio) break;
             CStartAudioDataMsg *message = cstart_audio_data_msg__unpack(NULL, payload->size,
                                                                             IHS_BufferPointer(payload));
             if (message == NULL) {
                 IHS_SessionLog(session, IHS_LogLevelWarn, "Audio", "Malformed CStartAudioDataMsg");
                 break;
             }
+            /* OnStartAudioData 0x7adddc..0x7addf8 stops the previous decoder. */
+            if (audio) IHS_SessionChannelRemove(session, audio->id);
             audio = IHS_SessionChannelDataAudioCreate(session, message);
             IHS_SessionChannelAdd(session, audio);
             cstart_audio_data_msg__free_unpacked(message, NULL);

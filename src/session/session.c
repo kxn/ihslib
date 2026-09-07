@@ -82,7 +82,9 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig, const IHS_S
     session->sendQueueMutex = IHS_MutexCreate();
     session->sendQueueCond = IHS_CondCreate();
     session->sendQueue = IHS_QueueCreate(sizeof(QueuedPacket));
+    session->pendingData = IHS_QueueCreate(sizeof(QueuedPacket));
     session->timers = IHS_TimerCreate();
+    IHS_StreamClockInit(&session->clock);
     IHS_RetransmissionInit(&session->retransmission, session);
     session->hidManager = IHS_HIDManagerCreate();
     session->frameStats = IHS_FrameStatsAggregatorCreate();
@@ -133,6 +135,7 @@ static uint64_t StopAckTimerRun(int runCount, void *context) {
 
 static void StopAckTimerEnd(void *context) {
     IHS_Session *session = context;
+    if (session->destroying) return;
     session->stopPacketId = -1;
     IHS_SessionChannelDiscoveryDisconnect(IHS_SessionChannelFor(session, IHS_SessionChannelIdDiscovery));
 }
@@ -142,29 +145,26 @@ void IHS_SessionDisconnect(IHS_Session *session) {
      * StopRequest it only sees a client that stopped answering, and leaves the
      * streaming session up until its own timeout: Steam stays in streaming mode,
      * the game keeps running, and the next connection lands mid-session. */
-    if (session->stopPacketId >= 0) {
-        return; /* already stopping; the error paths call this repeatedly */
-    }
     IHS_SessionChannel *control = IHS_SessionChannelFor(session, IHS_SessionChannelIdControl);
     if (control == NULL) {
         IHS_SessionChannelDiscoveryDisconnect(IHS_SessionChannelFor(session, IHS_SessionChannelIdDiscovery));
         return;
     }
-    /* A reset snapshot may be coalesced behind an older input packet. Commit it
-     * now so reliable channel order is old input -> neutral input -> StopRequest. */
-    if (!IHS_SessionChannelControlFlushPendingHID(control)) {
-        IHS_SessionLog(session, IHS_LogLevelWarn, "Session",
-                       "Failed to flush final HID snapshot before StopRequest");
-    }
+    IHS_Mutex *sendLock = ((IHS_SessionChannelControl *)control)->sendLock;
+    IHS_MutexLock(sendLock);
+    if (session->stopPacketId >= 0) { IHS_MutexUnlock(sendLock); return; }
+    /* Reserve the exact StopRequest ID under the same lock as control sends. */
     session->stopPacketId = control->nextPacketId;
     session->stopAcked = false;
     CStopRequest stop = CSTOP_REQUEST__INIT;
     IHS_SessionChannelControlSend(control, k_EStreamControlStopRequest, (const ProtobufCMessage *) &stop,
                                   IHS_PACKET_ID_NEXT);
+    IHS_MutexUnlock(sendLock);
     /* Closing the socket now would strand the StopRequest in the send queue, or
      * lose it to the one packet drop this link is entitled to. Disconnect once the
      * host has acknowledged it, or once we stop waiting. */
-    IHS_TimerTaskStart(session->timers, StopAckTimerRun, StopAckTimerEnd, 0, session);
+    IHS_TimerTaskStartOwned(session->timers, &session->stopAckTimer,
+        StopAckTimerRun, StopAckTimerEnd, 0, session);
 }
 
 void IHS_SessionThreadedJoin(IHS_Session *session) {
@@ -172,16 +172,32 @@ void IHS_SessionThreadedJoin(IHS_Session *session) {
 }
 
 void IHS_SessionDestroy(IHS_Session *session) {
-    for (int i = 0; i < session->numChannels; ++i) {
-        IHS_SessionChannelDestroy(session->channels[i]);
+    session->destroying = true;
+    IHS_TimerTaskStopOwned(session->timers, &session->stopAckTimer);
+    if (session->hidManager->pollTimer) {
+        IHS_TimerTaskStopImmediate(session->hidManager->pollTimer);
+        session->hidManager->pollTimer = NULL;
     }
+    IHS_SessionInterrupt(session);
+    if (session->base.worker) IHS_SessionThreadedJoin(session);
+    IHS_HIDManagerCloseAll(session->hidManager);
+    /* Data workers may still call control/stats on stop: destroy them first. */
+    for (int i = session->numChannels - 1; i >= 3; --i) {
+        IHS_SessionChannelDestroy(session->channels[i]);
+        session->channels[i] = NULL;
+    }
+    session->numChannels = 3;
+    /* Discovery shutdown closes HID devices using the still-live control channel. */
+    for (int i = 0; i < 3; i++) IHS_SessionChannelDestroy(session->channels[i]);
     IHS_HIDManagerDestroy(session->hidManager);
     IHS_FrameStatsAggregatorDestroy(session->frameStats);
     IHS_TimerDestroy(session->timers);
     IHS_RetransmissionDeinit(&session->retransmission);
+    IHS_StreamClockDeinit(&session->clock);
     IHS_CondDestroy(session->sendQueueCond);
     IHS_MutexDestroy(session->sendQueueMutex);
     IHS_QueueDestroy(session->sendQueue, QueuedPacketDestroy, NULL);
+    IHS_QueueDestroy(session->pendingData, QueuedPacketDestroy, NULL);
     IHS_SessionLog(session, IHS_LogLevelInfo, "Session", "Destroying session, bye!");
     IHS_BaseDestroy(&session->base);
     free(session);
@@ -203,6 +219,8 @@ void IHS_SessionInterrupt(IHS_Session *session) {
 
 bool IHS_SessionSendPacket(IHS_Session *session, IHS_SessionPacket *packet) {
     const IHS_SessionInfo *config = &session->info;
+    /* Transport clock is stamped at the actual send attempt, including retries. */
+    packet->header.sendTimestamp = IHS_SessionPacketTimestamp();
     // Write header and CRC to the buffer
     IHS_SessionPacketPopulateBuffer(packet);
     // Shallow copied buffer - offset & suffix changes will be temporary
@@ -293,11 +311,11 @@ void IHS_SessionGetReliabilityStats(IHS_Session *session,
         stats->hidSubmitted = control->hidSubmitted;
         stats->hidCoalesced = control->hidCoalesced;
         stats->hidSent = control->hidSent;
-        stats->hidAcknowledged = control->hidAcknowledged;
-        stats->hidSuperseded = control->hidSuperseded;
-        stats->hidPending = 0U;
-        stats->hidInFlight = 0U;
-        stats->hidOldestInFlightPacketId = -1;
+        stats->hidAcknowledged = reliable.hidAcknowledged;
+        stats->hidSuperseded = 0;
+        stats->hidPending = reliable.hidPending;
+        stats->hidInFlight = reliable.hidInFlight;
+        stats->hidOldestInFlightPacketId = reliable.hidOldestInFlightPacketId;
         IHS_MutexUnlock(control->sendLock);
     }
 }
@@ -318,7 +336,6 @@ void IHS_SessionHostStopped(IHS_Session *session) {
 }
 
 static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data) {
-    (void) address;
     IHS_Session *session = (IHS_Session *) base;
     IHS_SessionPacket packet;
     IHS_SessionPacketReturn ret = IHS_SessionPacketParse(&packet, data);
@@ -327,15 +344,40 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
         return;
     }
 
+    /* Socket HandleMessage 0x7ff660..0x7ff6f0 dispatches Unconnected discovery
+     * before connection-ID checks: MTU probes have zero IDs after Connected.
+     * HandlePacket 0x7faff0..0x7fb028 checks IDs only for connected traffic. */
+    if (IHS_IPAddressCompare(&address->ip, &session->info.address.ip) != 0 ||
+        address->port != session->info.address.port ||
+        (packet.header.type != IHS_SessionPacketTypeUnconnected &&
+         packet.header.dstConnectionId != session->state.connectionId) ||
+        (packet.header.type == IHS_SessionPacketTypeUnconnected &&
+         packet.header.channelId != IHS_SessionChannelIdDiscovery) ||
+        (packet.header.type != IHS_SessionPacketTypeUnconnected &&
+         session->state.connectionState >= IHS_SessionConnectionStateHandshaking &&
+         packet.header.type != IHS_SessionPacketTypeConnectACK &&
+         packet.header.srcConnectionId != session->state.hostConnectionId)) {
+        IHS_SessionPacketClear(&packet, true);
+        return;
+    }
+    packet.header.receiveTimestamp = IHS_SessionPacketTimestamp();
     IHS_SessionChannelId channelId = packet.header.channelId;
     IHS_SessionPacketType packetType = packet.header.type;
     if (packetType == IHS_SessionPacketTypeACK) {
+        if (packet.body.size < 4) { IHS_SessionPacketClear(&packet, true); return; }
+        const uint8_t *b = IHS_BufferPointer(&packet.body);
+        uint32_t echo = (uint32_t) b[0] | (uint32_t) b[1] << 8 |
+                        (uint32_t) b[2] << 16 | (uint32_t) b[3] << 24;
+        IHS_StreamClockFeedback(&session->clock, echo, packet.header.sendTimestamp,
+                                IHS_SessionPacketTimestamp());
+    }
+    if (packetType == IHS_SessionPacketTypeACK) {
         /* Official ACK semantics: the value is the contiguous delivery point —
          * it confirms every packet at/below it (libmain 0x7f94b8 advances its
-         * send window through min(ack+1-head, ...)). Exact-match acking turned
-         * each lost ACK packet into a permanently unacked reliable packet:
-         * 950k retransmissions / 10 min on hardware, choking the uplink
-         * during scene transitions (the ~20 s input stalls). */
+         * send window through min(ack+1-head, ...)). Exact-match ACK handling
+         * retains packets already covered by a later cumulative ACK, causing
+         * needless retries. A causal link to the historical 20 s input stalls
+         * cannot be established from this client-side branch alone. */
         IHS_RetransmissionAcknowledgeThrough(&session->retransmission, channelId,
                                              (uint16_t) (packet.header.packetId + 1u),
                                              IHS_TimerNow());
@@ -344,38 +386,30 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
             (int16_t) (packet.header.packetId - (uint16_t) session->stopPacketId) >= 0) {
             session->stopAcked = true; /* releases IHS_SessionDisconnect */
         }
-    } else if (packetType == IHS_SessionPacketTypeNACK) {
-        IHS_RetransmissionNack(&session->retransmission, channelId,
-                               packet.header.packetId, packet.header.fragmentId,
-                               IHS_TimerNow());
     } else if (packetType == IHS_SessionPacketTypeDisconnect) {
         /* Host quit the game / tore the session down. Without this the client
          * sat in a dead session forever: no video, dead inputs, no exit.
          * (Hardware freeze 2026-09-04.) */
         IHS_SessionHostStopped(session);
+        IHS_SessionPacketClear(&packet, true);
         return;
     }
     IHS_SessionChannel *channel = IHS_SessionChannelFor(session, channelId);
-    if (channel == NULL && session->negotiatedVideoCodec != 0 /* not None */ &&
-        packetType != IHS_SessionPacketTypeACK && packetType != IHS_SessionPacketTypeNACK &&
-        IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataVideo) == NULL) {
-        /* Some hosts (e.g. desktop streaming) start sending video on its data
-         * channel without ever emitting k_EStreamControlStartVideoData. Create
-         * the video channel on demand from the negotiated codec/capture size so
-         * the stream can actually be decoded. */
-        CStartVideoDataMsg msg = CSTART_VIDEO_DATA_MSG__INIT;
-        msg.channel = channelId;
-        msg.has_codec = true;
-        msg.codec = session->negotiatedVideoCodec;
-        msg.has_width = true;
-        msg.width = session->captureWidth ? session->captureWidth : 1920;
-        msg.has_height = true;
-        msg.height = session->captureHeight ? session->captureHeight : 1080;
-        channel = IHS_SessionChannelDataVideoCreate(session, &msg);
-        IHS_SessionChannelAdd(session, channel);
-        IHS_SessionLog(session, IHS_LogLevelInfo, "Session",
-                       "Created video channel %u on demand (codec=%d, %ux%u)",
-                       channelId, msg.codec, msg.width, msg.height);
+    if (channel == NULL && channelId >= IHS_SessionChannelIdDataStart &&
+        (packetType == IHS_SessionPacketTypeUnreliable || packetType == IHS_SessionPacketTypeUnreliableFrag)) {
+        /* OnDataPacket queues early data; StartVideoData supplies codec/channel
+         * identity before HandlePendingDataPackets (0x7ae1f4). Do not guess. */
+        if (session->pendingDataCount == 320) {
+            QueuedPacket *old = (void *) IHS_QueuePoll(session->pendingData);
+            IHS_SessionPacketClear(&old->packet, true);
+            IHS_QueueItemFree((void *) old);
+            session->pendingDataCount--;
+        }
+        QueuedPacket *queued = (void *) IHS_QueueItemObtain(session->pendingData);
+        queued->packet = packet;
+        memset(&packet.body, 0, sizeof(packet.body));
+        IHS_QueueAppend(session->pendingData, (void *) queued);
+        session->pendingDataCount++;
     }
     if (channel != NULL) {
         IHS_SessionChannelReceivedPacket(channel, &packet);
@@ -384,6 +418,19 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
                        channelId);
     }
     IHS_SessionPacketClear(&packet, true);
+}
+
+static bool PendingDataMatches(IHS_QueueItem *item, void *context) {
+    return ((QueuedPacket *)item)->packet.header.channelId == ((IHS_SessionChannel *)context)->id;
+}
+void IHS_SessionDrainPendingData(IHS_Session *session, IHS_SessionChannel *channel) {
+    QueuedPacket *queued;
+    while ((queued = (void *)IHS_QueuePollBy(session->pendingData, PendingDataMatches, channel))) {
+        session->pendingDataCount--;
+        IHS_SessionChannelReceivedPacket(channel, &queued->packet);
+        IHS_SessionPacketClear(&queued->packet, true);
+        IHS_QueueItemFree((void *) queued);
+    }
 }
 
 static void SessionInitialized(IHS_Base *base, void *context) {

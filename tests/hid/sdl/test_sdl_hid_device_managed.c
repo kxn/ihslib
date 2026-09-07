@@ -107,6 +107,9 @@ int main(int argc, char *argv[]) {
 
     const static uint8_t setPlayerIndexTo7[21] = {0xb, 0x7,};
     IHS_HIDDeviceWrite(device, setPlayerIndexTo7, 21);
+    IHS_HIDDeviceLock(device);
+    IHS_HIDDeviceSDLApplyPendingWrites((IHS_HIDDeviceSDL *) device);
+    IHS_HIDDeviceUnlock(device);
     assert(SDL_JoystickGetDevicePlayerIndex(0) == 7);
 
     const static uint8_t setLedRed[21] = {0x5, 0xff, 0x0, 0x0,};
@@ -138,6 +141,9 @@ int main(int argc, char *argv[]) {
     IHS_BufferClear(&buffer, true);
 
     IHS_HIDManagedDeviceClose(managed);
+    assert(IHS_HIDDeviceGetProductString(device, &buffer) == -1);
+    assert(IHS_HIDDeviceStartInputReports(device, 72) == -1);
+    IHS_HIDManagedDeviceClose(managed); /* idempotent; retained memory, closed handles */
 
     IHS_SessionDestroy(session);
 

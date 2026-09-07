@@ -33,18 +33,23 @@
 #include "endianness.h"
 #include "crypto.h"
 #include "ihs_buffer.h"
+#include "session/channels/ch_control.h"
 
 static void BaseWorker(IHS_Base *base);
 
 static bool initialized;
 
 void IHS_Init() {
+    if (initialized) return;
+    IHS_ControlDiagnosticsInit();
     initialized = true;
     IHS_TimerInit();
 }
 
 void IHS_Quit() {
+    if (!initialized) return;
     IHS_TimerQuit();
+    IHS_ControlDiagnosticsQuit();
     initialized = false;
 }
 

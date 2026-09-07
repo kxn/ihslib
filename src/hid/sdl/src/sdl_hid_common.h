@@ -100,7 +100,7 @@ static inline size_t IHS_HIDDeviceSDLWireReportLength(const IHS_HIDManagedDevice
 static inline void IHS_HIDReportSDLPackWire(uint8_t *dest, size_t len,
                                             const IHS_HIDStateSDL *state) {
     memset(dest, 0, len);
-    memcpy(dest, state->axes, sizeof(state->axes));
+    memcpy(dest, state->axes, len < sizeof(state->axes) ? len : sizeof(state->axes));
     if (len >= 18) {
         dest[16] = (uint8_t) (state->buttons & 0xff);
         dest[17] = (uint8_t) ((state->buttons >> 8) & 0xff);
@@ -108,6 +108,15 @@ static inline void IHS_HIDReportSDLPackWire(uint8_t *dest, size_t len,
     if (len >= 28) {
         dest[27] = 3;
     }
+}
+
+/* BFilterGamepadState 0x7bc5e8..0x7bc6a4, without local overlays. */
+static inline bool IHS_HIDSDLActiveInput(const IHS_HIDStateSDL *state) {
+    if (state->buttons) return true;
+    for (unsigned i = 0; i < 4; i++) {
+        if (state->axes[i] >= 16384 || state->axes[i] < -16384) return true;
+    }
+    return state->axes[4] > 0 || state->axes[5] > 0;
 }
 
 IHS_HIDDevice *IHS_HIDDeviceSDLCreate(IHS_HIDProvider *provider, SDL_Gamepad *controller, bool managed);

@@ -33,6 +33,7 @@
 #include "ihs_buffer_ext.h"
 
 size_t IHS_SessionPacketHeaderParse(IHS_SessionPacketHeader *header, const uint8_t *src) {
+    memset(header, 0, sizeof(*header));
     size_t offset = 0;
     header->hasCrc = (src[offset] & 0x80) == 0x80;
     header->type = src[offset] & 0x7f;
@@ -142,6 +143,6 @@ uint32_t IHS_SessionPacketTimestamp() {
     struct timespec tp;
     clock_gettime(CLOCK_MONOTONIC, &tp);
     uint64_t secs = (uint64_t) tp.tv_sec;
-    uint64_t frac = (uint64_t) ((tp.tv_nsec * 65536) / 1000000000ull);
+    uint64_t frac = ((uint64_t) tp.tv_nsec * 65536) / 1000000000ull;
     return (uint32_t) ((secs << 16) | (frac & 0xffffu));
 }

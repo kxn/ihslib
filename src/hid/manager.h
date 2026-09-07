@@ -26,6 +26,7 @@
 #pragma once
 
 #include "ihslib/hid.h"
+#include <stdatomic.h>
 #include "ihs_arraylist.h"
 #include "ihs_thread.h"
 #include "ihs_timer.h"
@@ -48,6 +49,8 @@ struct IHS_HIDManager {
     IHS_Mutex *devicesLock;
     IHS_ArrayList providers;
     IHS_ArrayList inputReports;
+    /* Serialize collect/reset/enqueue, preserving the delta chain across senders. */
+    IHS_Mutex *reportSendLock;
     uint32_t lastDeviceId;
     /**
      * 125 Hz poll task that drains every device whose class implements `poll`, then calls
@@ -62,13 +65,14 @@ struct IHS_HIDManagedDevice {
     IHS_HIDManager *manager;
     uint32_t id;
     IHS_HIDReportHolder reportHolder;
+    bool reportActivityKnown, reportActiveInput;
     IHS_Mutex *lock;
     /**
      * Set true by IHS_HIDManagerRemoveClosedDevice. Find* skip closed slots; the slot
      * (and this struct) live until IHS_HIDManagerDestroy reclaims them — that keeps every
      * IHS_HIDManagedDevice * stable for the lifetime of the manager.
      */
-    bool closed;
+    atomic_bool closed;
 };
 
 

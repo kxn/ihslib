@@ -154,18 +154,17 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
         }
     }
 
-    /* Remember the codec + a default capture size so the video channel can be
-     * created lazily if the host never sends k_EStreamControlStartVideoData. */
+    /* Retain the negotiated preference for diagnostics. StartVideoData supplies
+     * the actual decoder configuration; early media waits for that message. */
     session->negotiatedVideoCodec = videoCodec;
     session->captureWidth = 1920;
     session->captureHeight = 1080;
 
     CNegotiatedConfig config = CNEGOTIATED_CONFIG__INIT;
-    /* Official OnNegotiationInit echoes the host's reliable_data announcement
-     * back in SetConfig (libmain 0x7ad710: unconditional byte copy +
-     * has-bit), instead of hardcoding false. */
-    PROTOBUF_C_SET_VALUE(config, reliable_data,
-                         message->has_reliable_data && message->reliable_data);
+    /* Android echoes reliable_data because its media channels implement that
+     * mode. This client currently implements unreliable media only; do not
+     * negotiate a mode that ch_data cannot receive. Control remains reliable. */
+    PROTOBUF_C_SET_VALUE(config, reliable_data, false);
 
     config.has_selected_audio_codec = audioCodec != k_EStreamAudioCodecNone;
     config.selected_audio_codec = audioCodec;
@@ -178,8 +177,7 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
 
     /* enable_remote_hid/enable_touch_input mirror the host's announcements
      * (0x7ad9cc/0x7ad9e8). Gamepads reach the host over the HID channel;
-     * without the flag the host sees no controller at all, so default to
-     * enabled when the host did not announce support either way. */
+     * advertise these capabilities only when the host offers them. */
     if (message->has_supports_remote_hid && message->supports_remote_hid) {
         PROTOBUF_C_SET_VALUE(config, enable_remote_hid, 1);
     }
@@ -272,12 +270,6 @@ static void OnNegotiationSetConfig(IHS_SessionChannel *channel, const CNegotiati
 static void OnConnected(IHS_SessionChannel *channel) {
     IHS_Session *session = channel->session;
     session->state.connectionState = IHS_SessionConnectionStateConnected;
-    /* Stream-time origin for frame-stats wire timestamps (official
-     * conn+848 base, STEAMLINK_PROTOCOL_RE.md §9c). */
-    if (session->frameStats != NULL) {
-        IHS_FrameStatsAggregatorSetTimeBase(session->frameStats,
-                                            IHS_SessionPacketTimestamp());
-    }
     IHS_SessionChannelControlStartHeartbeat(channel);
     if (session->callbacks.session && session->callbacks.session->connected) {
         session->callbacks.session->connected(session, session->callbackContexts.session);

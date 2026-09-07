@@ -79,3 +79,7 @@ bool IHS_SessionPacketsWindowHasHole(const IHS_SessionPacketsWindow *window);
 
 size_t IHS_SessionPacketsWindowHoleBitmap(const IHS_SessionPacketsWindow *window,
                                           uint16_t startId, uint8_t *bitmap, size_t maxPackets);
+
+/* Reliable streams start at a known ID and never discard orphan fragments. */
+IHS_SessionPacketsWindow *IHS_SessionPacketsWindowCreateReliable(uint16_t capacity, uint16_t firstId);
+uint16_t IHS_SessionPacketsWindowContiguousId(const IHS_SessionPacketsWindow *window);

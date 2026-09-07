@@ -26,6 +26,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 
 typedef struct IHS_Timer IHS_Timer;
 typedef struct IHS_TimerTask IHS_TimerTask;
@@ -70,3 +71,12 @@ void *IHS_TimerTaskGetContext(IHS_TimerTask *task);
 int IHS_TimerTaskGetRunCount(const IHS_TimerTask *task);
 
 uint64_t IHS_TimerNow();
+/* Atomically publish one task per owner slot before it can run. The slot must
+ * outlive the task; completion clears it before invoking the end callback. */
+bool IHS_TimerTaskStartOwned(IHS_Timer *timer, IHS_TimerTask **owner,
+    IHS_TimerRunFunction *run, IHS_TimerEndFunction *end, uint64_t timeout, void *context);
+void IHS_TimerTaskStopOwned(IHS_Timer *timer, IHS_TimerTask **owner);
+/* The visitor holds the timer lock, so the task/context cannot expire while
+ * visited. It may request deferred Stop, but must not destroy the task/timer. */
+bool IHS_TimerTaskVisitOwned(IHS_Timer *timer, IHS_TimerTask **owner,
+    void (*visit)(IHS_TimerTask *task, void *context), void *context);

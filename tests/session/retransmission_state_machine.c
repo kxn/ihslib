@@ -103,8 +103,8 @@ int main(void) {
     assert(stats.outstanding == 0);
     assert(stats.acknowledged == 2);
 
-    /* A newer full-state message may supersede an older one. Preserve three
-     * gap-filling retries, then retire it without pretending an ACK arrived. */
+    /* Supersede cannot retire unconfirmed ciphertext: the transport has
+     * no permission to leave a hole, even if a newer full report exists. */
     IHS_SessionPacketClear(&packet, true);
     InitPacket(&packet, 44, 0, 0xc3);
     assert(IHS_RetransmissionTrack(&retransmission, &packet, 6000));
@@ -119,9 +119,9 @@ int main(void) {
     assert(capture.retransmitCount == 3);
     assert(IHS_RetransmissionProcessAt(&retransmission, 6176, CaptureSend, &capture) == 0);
     IHS_RetransmissionGetStats(&retransmission, &stats, 6176);
-    assert(stats.outstanding == 0);
+    assert(stats.outstanding == 1);
     assert(stats.acknowledged == 2);
-    assert(stats.superseded == 1);
+    assert(stats.superseded == 0);
     assert(stats.giveUps == 0);
     IHS_SessionPacketClear(&packet, true);
     IHS_RetransmissionDeinit(&retransmission);

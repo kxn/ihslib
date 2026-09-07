@@ -31,6 +31,7 @@
 struct IHS_SessionPacketsWindow {
     IHS_SessionWindowItem *data;
     uint16_t capacity;
+    bool reliable;
     /*
      * [+][+][+][-]
      *       ^ head.pos = 2
@@ -65,6 +66,15 @@ IHS_SessionPacketsWindow *IHS_SessionPacketsWindowCreate(uint16_t capacity) {
     return window;
 }
 
+IHS_SessionPacketsWindow *IHS_SessionPacketsWindowCreateReliable(uint16_t capacity, uint16_t firstId) {
+    IHS_SessionPacketsWindow *window = IHS_SessionPacketsWindowCreate(capacity);
+    window->reliable = true;
+    window->head.pos = 1;
+    window->tail.pos = 0;
+    window->tail.id = (uint16_t) (firstId - 1u);
+    return window;
+}
+
 void IHS_SessionPacketsWindowReleaseAll(IHS_SessionPacketsWindow *window) {
     for (int i = 0, j = window->capacity; i < j; i++) {
         if (FrameItemIsUsed(&window->data[i])) {
@@ -90,12 +100,33 @@ bool IHS_SessionPacketsWindowAdd(IHS_SessionPacketsWindow *window, IHS_SessionPa
     /* Calculate distance of 2 items */
     int tailOffset = window->tail.pos < 0 ? 1 : (int16_t) (packet->header.packetId - window->tail.id);
     /* We already processed this packet, so ignore it */
-    if (tailOffset < 0 && -tailOffset > IHS_SessionPacketsWindowSize(window)) {
+    if (tailOffset <= 0 && -tailOffset >= IHS_SessionPacketsWindowSize(window)) {
         return true;
+    }
+    /* BInsertPacket 0x7f7274 rejects forward distance >=0x4000;
+     * EnsureCapacity grows the window independently of the 320-bit NACK mask. */
+    if (window->reliable && tailOffset > 0) {
+        unsigned size = IHS_SessionPacketsWindowSize(window);
+        unsigned required = size + tailOffset;
+        if (required > 16384) return true;
+        if (required > window->capacity) {
+            unsigned capacity = window->capacity;
+            while (capacity < required) capacity = capacity > 8192 ? 16384 : capacity * 2;
+            IHS_SessionWindowItem *data = calloc(capacity, sizeof(*data));
+            if (!data) return false;
+            for (unsigned i = 0; i < size; i++)
+                data[i] = window->data[(window->head.pos + i) % window->capacity];
+            free(window->data);
+            window->data = data;
+            window->capacity = capacity;
+            window->head.pos = size ? 0 : (int)capacity;
+            /* Preserve the sequence origin even when this window was empty. */
+            window->tail.pos = size ? (int)size - 1 : (int)capacity - 1;
+        }
     }
     /* Not sure why but the offset is significantly larger than window capacity. Ignore it reset */
     if (tailOffset > window->capacity) {
-        return true;
+        return !window->reliable;
     }
     /* Large offset means overflow, abort processing and hangup */
     if (tailOffset > (int) IHS_SessionPacketsWindowAvailable(window)) {
@@ -129,7 +160,7 @@ bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionF
      * we see is a fragment whose head we will never get, because Add() drops
      * anything older than the window. Skip those orphans, or the head never
      * becomes a frame start and the window wedges full forever. */
-    while (FrameItemIsUsed(head) && !FrameItemIsHead(head)) {
+    while (!window->reliable && FrameItemIsUsed(head) && !FrameItemIsHead(head)) {
         FrameItemRecycle(head);
         window->head.pos = (window->head.pos + 1) % window->capacity;
         if (--size == 0) {
@@ -145,7 +176,7 @@ bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionF
 
     /* Must have size enough for all fragments */
     int packetsCount = 1 + head->header.fragmentId;
-    if (size < packetsCount) {
+    if (packetsCount < 1 || size < packetsCount) {
         return false;
     }
 
@@ -164,6 +195,9 @@ bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionF
     for (int i = window->head.pos, j = window->head.pos + packetsCount; i < j; i++) {
         IHS_SessionWindowItem *item = &window->data[i % window->capacity];
         IHS_BufferAppend(&frame->body, &item->body);
+        if ((int32_t) (item->header.receiveTimestamp - frame->header.receiveTimestamp) > 0) {
+            frame->header.receiveTimestamp = item->header.receiveTimestamp;
+        }
 
         /* This item is used, recycle it */
         FrameItemRecycle(item);
@@ -272,10 +306,7 @@ static inline void FrameItemRecycle(IHS_SessionWindowItem *item) {
 }
 uint16_t IHS_SessionPacketsWindowNextNeededPacketId(const IHS_SessionPacketsWindow *window) {
     uint16_t size = IHS_SessionPacketsWindowSize(window);
-    if (size == 0) {
-        return 0;
-    }
-    return (uint16_t) (window->tail.id - (uint16_t) (size - 1));
+    return (uint16_t) (window->tail.id + 1u - size);
 }
 
 size_t IHS_SessionPacketsWindowHoleBitmap(const IHS_SessionPacketsWindow *window,
@@ -311,4 +342,14 @@ bool IHS_SessionPacketsWindowHasHole(const IHS_SessionPacketsWindow *window) {
         }
     }
     return false;
+}
+
+uint16_t IHS_SessionPacketsWindowContiguousId(const IHS_SessionPacketsWindow *window) {
+    uint16_t size = IHS_SessionPacketsWindowSize(window);
+    uint16_t id = (uint16_t) (window->tail.id - size);
+    for (unsigned i = 0; i < size; i++) {
+        if (!FrameItemIsUsed(&window->data[(window->head.pos + i) % window->capacity])) break;
+        id++;
+    }
+    return id;
 }

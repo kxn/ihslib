@@ -24,6 +24,7 @@
  */
 
 #pragma once
+#include <stdatomic.h>
 
 #include "channel.h"
 #include "protobuf/remoteplay.pb-c.h"
@@ -36,6 +37,7 @@ typedef struct IHS_SessionDataFrameHeader {
     uint32_t timestamp;
     uint16_t inputMark;
     uint32_t inputRecvTimestamp;
+    uint32_t sendTimestamp, receiveTimestamp; /* transport metadata, not header bytes */
 } IHS_SessionDataFrameHeader;
 
 typedef struct IHS_SessionChannelData {
@@ -45,7 +47,7 @@ typedef struct IHS_SessionChannelData {
     IHS_Cond *windowCond;
 
     IHS_Thread *worker;
-    bool interrupted;
+    atomic_bool interrupted;
     IHS_Mutex *lock;
 
     uint32_t lastPacketTimestamp;

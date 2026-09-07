@@ -42,44 +42,34 @@ static uint64_t StreamingRequestTimer(int runCount, void *context);
 static void StreamingRequestCleanup(void *context);
 
 bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host, const IHS_StreamingRequest *request) {
-    IHS_BaseLock(&client->base);
-    if (client->taskHandles.streaming) {
-        IHS_BaseUnlock(&client->base);
-        return false;
-    }
-    IHS_BaseUnlock(&client->base);
-
     IHS_ClientLog(client, IHS_LogLevelInfo, "Client", "Begin sending streaming request to host %s", host->hostname);
     IHS_StreamingState *state = malloc(sizeof(IHS_StreamingState));
+    if (!state) return false;
     state->client = client;
     state->host = *host;
     state->request = *request;
     state->requestId = IHS_CryptoRandomUInt32();
     state->lastMsgType = k_ERemoteClientBroadcastMsgDiscovery;
     state->lastMsgTime = IHS_TimerNow();
-    IHS_TimerTask *task = IHS_TimerTaskStart(client->timers, StreamingRequestTimer, StreamingRequestCleanup,
-                                             25, state);
-    if (task == NULL) {
+    if (!IHS_TimerTaskStartOwned(client->timers, &client->taskHandles.streaming,
+            StreamingRequestTimer, StreamingRequestCleanup, 25, state)) {
         free(state);
         return false;
     }
-
-    IHS_BaseLock(&client->base);
-    if (client->taskHandles.streaming) {
-        IHS_BaseUnlock(&client->base);
-        IHS_TimerTaskStop(task);
-        return false;
-    }
-    client->taskHandles.streaming = task;
-    IHS_BaseUnlock(&client->base);
     return true;
 }
 
-void IHS_ClientStreamingCallback(IHS_Client *client, const IHS_SocketAddress *address,
-                                 CMsgRemoteClientBroadcastHeader *header, ProtobufCMessage *message) {
-    IHS_UNUSED(address);
-    IHS_TimerTask *timer = client->taskHandles.streaming;
-    if (!timer) return;
+typedef struct {
+    IHS_Client *client;
+    CMsgRemoteClientBroadcastHeader *header;
+    ProtobufCMessage *message;
+} StreamingResponseContext;
+
+static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
+    StreamingResponseContext *responseContext = context;
+    IHS_Client *client = responseContext->client;
+    CMsgRemoteClientBroadcastHeader *header = responseContext->header;
+    ProtobufCMessage *message = responseContext->message;
     IHS_StreamingState *state = IHS_TimerTaskGetContext(timer);
     state->lastMsgType = header->msg_type;
     state->lastMsgTime = IHS_TimerNow();
@@ -164,6 +154,14 @@ void IHS_ClientStreamingCallback(IHS_Client *client, const IHS_SocketAddress *ad
         default:
             break;
     }
+}
+
+void IHS_ClientStreamingCallback(IHS_Client *client, const IHS_SocketAddress *address,
+                                 CMsgRemoteClientBroadcastHeader *header, ProtobufCMessage *message) {
+    IHS_UNUSED(address);
+    StreamingResponseContext context = {client, header, message};
+    IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.streaming,
+                            StreamingResponseVisit, &context);
 }
 
 static uint64_t StreamingRequestTimer(int runCount, void *context) {
@@ -260,10 +258,5 @@ static uint64_t StreamingRequestTimer(int runCount, void *context) {
 }
 
 static void StreamingRequestCleanup(void *context) {
-    IHS_StreamingState *state = context;
-    IHS_Client *client = state->client;
-    IHS_BaseLock(&client->base);
-    client->taskHandles.streaming = NULL;
-    IHS_BaseUnlock(&client->base);
     free(context);
 }

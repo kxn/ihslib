@@ -54,12 +54,14 @@ enum {
     EV_COMPLETE = 18,
 };
 
-/* Timestamps are now milliseconds (matching the host's interpretation).
- * Wrapped subtraction keeps timestamps that crossed the uint32 boundary
- * correct (ms wraps every ~49.7 days; the cost is one cast). */
+/* All events are 16.16 fixed-point seconds (IHS_SessionPacketTimestamp,
+ * matching GetStreamTimestamp per STEAMLINK_PROTOCOL_RE.md §9c.1). Deltas
+ * between two such stamps convert to ms by ×1000/65536. Wrapped subtraction
+ * keeps timestamps that crossed the uint32 boundary correct (16.16 wraps
+ * every ~18.2 hours; the cost is one cast). */
 static float ticks_to_ms(uint32_t earlier, uint32_t later) {
     uint32_t delta = later - earlier;
-    return (float) delta;
+    return (float) delta * (1000.0f / 65536.0f);
 }
 
 IHS_FrameStatsAggregator *IHS_FrameStatsAggregatorCreate(void) {
@@ -83,10 +85,20 @@ void IHS_FrameStatsAggregatorDestroy(IHS_FrameStatsAggregator *agg) {
     free(agg);
 }
 
-void IHS_FrameStatsAggregatorSetTimeBase(IHS_FrameStatsAggregator *agg, uint32_t timeBase) {
-    IHS_MutexLock(agg->lock);
-    agg->timeBase = timeBase;
-    IHS_MutexUnlock(agg->lock);
+size_t IHS_FrameStatsEncodeEvents(const IHS_FrameStatsSlot *slot, int32_t clockOffset,
+                                   CFrameEvent *events, CFrameEvent **pointers) {
+    size_t count = 0;
+    uint32_t previous = 0;
+    for (unsigned e = 0; e < IHS_FRAME_STATS_EVENT_COUNT; e++) {
+        if ((e >= 2 && e <= 12) || !(slot->eventMask & (1u << e)) || !slot->events[e]) continue;
+        cframe_event__init(&events[count]);
+        events[count].event_id = (EStreamFrameEvent) e;
+        events[count].timestamp = count ? slot->events[e] - previous : slot->events[e] + (uint32_t) clockOffset;
+        previous = slot->events[e];
+        pointers[count] = &events[count];
+        count++;
+    }
+    return count;
 }
 
 void IHS_FrameStatsAggregatorSetFullReporting(IHS_FrameStatsAggregator *agg, bool enabled) {

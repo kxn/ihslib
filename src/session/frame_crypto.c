@@ -68,6 +68,10 @@ IHS_SessionFrameDecryptResult IHS_SessionFrameDecrypt(IHS_Session *session, cons
     const uint8_t *key = session->info.sessionKey;
     const size_t keyLen = session->info.sessionKeyLen;
     IHS_SessionFrameDecryptResult result = IHS_SessionFrameDecryptFailed;
+    /* BDecrypt (0x7f3688): an IV alone is not encrypted payload. */
+    if (in->size <= 16 || (in->size - 16) % 16 != 0) {
+        return result;
+    }
     IHS_BufferEnsureMaxSizeExact(out, in->size);
     size_t outLen = IHS_BufferMaxSize(out);
     if (IHS_CryptoSymmetricDecryptWithIV(IHS_BufferPointerAt(in, 16), in->size - 16,
@@ -76,6 +80,9 @@ IHS_SessionFrameDecryptResult IHS_SessionFrameDecrypt(IHS_Session *session, cons
         goto exit;
     }
     out->size = outLen;
+    if (outLen < sizeof(uint64_t)) {
+        goto exit;
+    }
 
     const mbedtls_md_info_t *md = mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
     uint8_t hash[16];

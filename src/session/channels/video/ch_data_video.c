@@ -186,6 +186,7 @@ static bool DataStart(IHS_SessionChannel *channel) {
 }
 
 static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrameHeader *header, IHS_Buffer *body) {
+    if (!header || body->size < 7) return;
     IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *) channel;
     IHS_VideoFrameHeader vhead;
     IHS_BufferOffsetBy(body, (int) VideoFrameHeaderParse(&vhead, IHS_BufferPointer(body)));
@@ -193,15 +194,15 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
     /* Seed events 5 (FrameEventStart) / 12 (FrameEventSend) / 13 (FrameEventRecv)
      * for this frame in the stats aggregator. Done outside the videoCh mutex so
      * the aggregator's own lock orders independently. Mirrors Steam's
-     * RecordFrameReceived (0x001faac4): the partial-frame header carries the
-     * sender's frame timestamp; we treat it as both event 5 and event 12 (we
-     * do not yet maintain a separate sender-send timestamp), and stamp event
-     * 13 with the local recv clock. */
+     * RecordFrameReceived: translate the frame and transport-send timestamps
+     * from the peer clock; preserve the original transport receive timestamp. */
     if (channel->session->frameStats != NULL) {
+        int32_t offset = IHS_StreamClockOffset(&channel->session->clock);
         IHS_FrameStatsRecordReceived(channel->session->frameStats, header->id,
-                                     header->timestamp, header->timestamp,
-                                     IHS_SessionPacketTimestamp(), 0 /* frameSize unknown until assembly */,
-                                     0 /* inputMark — not yet on the wire here */);
+                                     header->timestamp - offset,
+                                     header->sendTimestamp - offset,
+                                     header->receiveTimestamp, 0 /* frameSize unknown until assembly */,
+                                     header->inputMark);
     }
 
     IHS_MutexLock(videoCh->stateMutex);
@@ -276,7 +277,7 @@ static void DataStop(IHS_SessionChannel *channel) {
     IHS_Session *session = channel->session;
     IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *) channel;
     if (videoCh->statsTimer != NULL) {
-        IHS_TimerTaskStop(videoCh->statsTimer);
+        IHS_TimerTaskStopImmediate(videoCh->statsTimer);
         videoCh->statsTimer = NULL;
     }
     const IHS_StreamVideoCallbacks *callbacks = session->callbacks.video;
@@ -452,10 +453,13 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
     message.data_type = k_EStreamingVideoData;
     message.latest_frame_id = latest;
 
-    /* Pull the accumulator snapshot under the aggregator's lock by walking it
-     * directly; the drain already populated it. Build the repeated
-     * accumulated_stats field with one row per non-empty slot. */
-    IHS_FrameStatsAccumulator *accum = &session->frameStats->accumulator;
+    /* The drain populated the accumulator; snapshot it and the RX-controlled
+     * reporting flag under their lock before building protobuf rows. */
+    IHS_MutexLock(session->frameStats->lock);
+    IHS_FrameStatsAccumulator accumSnapshot = session->frameStats->accumulator;
+    bool fullReporting = session->frameStats->fullReporting;
+    IHS_MutexUnlock(session->frameStats->lock);
+    IHS_FrameStatsAccumulator *accum = &accumSnapshot;
     CFrameStatAccumulatedValue accumRows[IHS_FRAME_STATS_ACCUM_SLOTS];
     CFrameStatAccumulatedValue *accumPtrs[IHS_FRAME_STATS_ACCUM_SLOTS];
     size_t rowCount = 0;
@@ -485,17 +489,20 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
     message.n_accumulated_stats = rowCount;
     message.accumulated_stats = accumPtrs;
 
-    /* Per-frame rows with event timestamps relative to the stream-time base
-     * (official CFastFrameStats::Save subtracts the connection base). The
-     * host's per-frame network-time judgment consumes these events. */
-    uint32_t timeBase = session->frameStats->timeBase;
-    static CFrameStats frameRows[IHS_FRAME_STATS_RING_SIZE];
-    static CFrameEvent eventRows[IHS_FRAME_STATS_RING_SIZE * IHS_FRAME_STATS_EVENT_COUNT];
-    static CFrameEvent *eventPtrs[IHS_FRAME_STATS_RING_SIZE * IHS_FRAME_STATS_EVENT_COUNT];
-    static CFrameStats *framePtrs[IHS_FRAME_STATS_RING_SIZE];
+    /* Save(stats, true, clockOffset), 0x7a8470: first event translated to
+     * peer time, subsequent events delta-coded against the last emitted event. */
+    int32_t clockOffset = IHS_StreamClockOffset(&session->clock);
+    CFrameStats *frameRows = calloc(IHS_FRAME_STATS_RING_SIZE, sizeof(*frameRows));
+    CFrameEvent *eventRows = calloc(IHS_FRAME_STATS_RING_SIZE * IHS_FRAME_STATS_EVENT_COUNT, sizeof(*eventRows));
+    CFrameEvent **eventPtrs = calloc(IHS_FRAME_STATS_RING_SIZE * IHS_FRAME_STATS_EVENT_COUNT, sizeof(*eventPtrs));
+    CFrameStats **framePtrs = calloc(IHS_FRAME_STATS_RING_SIZE, sizeof(*framePtrs));
+    if (!frameRows || !eventRows || !eventPtrs || !framePtrs) {
+        free(frameRows); free(eventRows); free(eventPtrs); free(framePtrs);
+        return 1000;
+    }
     size_t frameCount = 0;
     size_t eventCount = 0;
-    if (session->frameStats->fullReporting) {
+    if (fullReporting) {
         for (size_t i = 0; i < folded; i++) {
             const IHS_FrameStatsSlot *slot = &drained[i];
             CFrameStats *row = &frameRows[frameCount];
@@ -503,18 +510,9 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
             row->frame_id = slot->frameId;
             row->n_events = 0;
             row->events = &eventPtrs[eventCount];
-            for (int e = 0; e < IHS_FRAME_STATS_EVENT_COUNT; e++) {
-                if (!(slot->eventMask & (1u << e))) {
-                    continue;
-                }
-                CFrameEvent *ev = &eventRows[eventCount];
-                cframe_event__init(ev);
-                ev->event_id = (EStreamFrameEvent) e;
-                ev->timestamp = slot->events[e] - timeBase;
-                eventPtrs[eventCount] = ev;
-                eventCount++;
-                row->n_events++;
-            }
+            row->n_events = IHS_FrameStatsEncodeEvents(slot, clockOffset,
+                &eventRows[eventCount], &eventPtrs[eventCount]);
+            eventCount += row->n_events;
             row->result = slot->result;
             if (slot->inputMark != 0) {
                 row->has_input_mark = 1;
@@ -535,6 +533,9 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
 
     IHS_SessionChannelStatsSend(stats, k_EStreamStatsFrameEvents, (const ProtobufCMessage *) &message,
                                 IHS_PACKET_ID_NEXT);
-    IHS_FrameStatsAccumulatorReset(accum);
+    free(frameRows); free(eventRows); free(eventPtrs); free(framePtrs);
+    IHS_MutexLock(session->frameStats->lock);
+    IHS_FrameStatsAccumulatorReset(&session->frameStats->accumulator);
+    IHS_MutexUnlock(session->frameStats->lock);
     return 1000;
 }

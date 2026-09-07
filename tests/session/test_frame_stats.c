@@ -51,8 +51,8 @@ static void expect_slot(const IHS_FrameStatsAggregator *agg, int slot, uint32_t 
     }
 }
 
-/* Timestamps are milliseconds now. */
-#define MS_TICKS(ms) ((uint32_t)(ms))
+/* Wire timestamps are 16.16 seconds. */
+#define MS_TICKS(ms) ((uint32_t)((uint64_t)(ms) * 65536 / 1000))
 
 int main(void) {
     IHS_FrameStatsAggregator *agg = IHS_FrameStatsAggregatorCreate();

@@ -42,12 +42,13 @@ IHS_HIDManager *IHS_HIDManagerCreate() {
     IHS_ArrayListInit(&manager->devices, sizeof(IHS_HIDManagedDevice *));
     IHS_ArrayListInit(&manager->inputReports, sizeof(IHS_HIDDeviceReportMessage *));
     manager->devicesLock = IHS_MutexCreate();
+    manager->reportSendLock = IHS_MutexCreate();
     return manager;
 }
 
 void IHS_HIDManagerDestroy(IHS_HIDManager *manager) {
     if (manager->pollTimer != NULL) {
-        IHS_TimerTaskStop(manager->pollTimer);
+        IHS_TimerTaskStopImmediate(manager->pollTimer);
         manager->pollTimer = NULL;
     }
     // Defensively close anything still open. Discovery deinit normally runs CloseAll, but
@@ -59,11 +60,12 @@ void IHS_HIDManagerDestroy(IHS_HIDManager *manager) {
         assert(provider->manager == manager);
         provider->manager = NULL;
     }
-    // Every slot holds a managed device that's already been through ManagedDeviceClose
-    // (so the inner IHS_HIDDevice is gone). Reclaim the outer struct + its lock + holder.
+    // Both allocations survive Close; reclaim provider memory, holder and lock now.
     for (size_t i = 0, j = manager->devices.size; i < j; ++i) {
         IHS_HIDManagedDevice *managed = *((IHS_HIDManagedDevice **) IHS_ArrayListGet(&manager->devices, i));
         assert(managed->closed);
+        managed->device->managed = NULL;
+        managed->device->cls->free(managed->device);
         IHS_HIDReportHolderDeinit(&managed->reportHolder);
         IHS_MutexDestroy(managed->lock);
         free(managed);
@@ -72,6 +74,7 @@ void IHS_HIDManagerDestroy(IHS_HIDManager *manager) {
     IHS_ArrayListDeinit(&manager->providers);
     IHS_ArrayListDeinit(&manager->inputReports);
     IHS_MutexDestroy(manager->devicesLock);
+    IHS_MutexDestroy(manager->reportSendLock);
     free(manager);
 }
 
@@ -152,6 +155,7 @@ IHS_HIDManagedDevice **IHS_HIDManagerSnapshotOpenDevices(IHS_HIDManager *manager
     IHS_MutexLock(manager->devicesLock);
     size_t total = manager->devices.size;
     IHS_HIDManagedDevice **out = total > 0 ? calloc(total, sizeof(IHS_HIDManagedDevice *)) : NULL;
+    if (total && !out) { IHS_MutexUnlock(manager->devicesLock); *count = 0; return NULL; }
     size_t n = 0;
     for (size_t i = 0; i < total; ++i) {
         IHS_HIDManagedDevice *managed = *((IHS_HIDManagedDevice **) IHS_ArrayListGet(&manager->devices, i));
@@ -177,10 +181,8 @@ void IHS_HIDManagerRemoveClosedDevice(IHS_HIDManager *manager, IHS_HIDManagedDev
     // Deferred-free model: flip `closed` under the list lock so concurrent Find* callers
     // stop returning this slot, but leave the IHS_HIDManagedDevice * itself valid. Any
     // thread that already obtained the pointer before the flag flipped continues to see
-    // live memory; the slot is reclaimed in IHS_HIDManagerDestroy. The inner IHS_HIDDevice
-    // is freed by the caller (IHS_HIDManagedDeviceClose) right after this returns —
-    // callers using `managed->device` racing against close is a separate, pre-existing
-    // hazard that this change does not address.
+    // live memory; both allocations are reclaimed in IHS_HIDManagerDestroy.
+    // Operations on device resources must still hold managed->lock and check closed.
     IHS_SessionLog(manager->session, IHS_LogLevelDebug, "HID", "MarkDeviceClosed, id=%u", managed->id);
     IHS_MutexLock(manager->devicesLock);
     managed->closed = true;
@@ -226,8 +228,11 @@ static uint64_t HIDPollTick(int runCount, void *context) {
     bool anyData = false;
     for (size_t i = 0; i < count; ++i) {
         IHS_HIDManagedDevice *managed = snapshot[i];
-        if (managed->device->cls->poll == NULL) continue;
         IHS_HIDDeviceLock(managed->device);
+        if (managed->closed || managed->device->cls->poll == NULL) {
+            IHS_HIDDeviceUnlock(managed->device);
+            continue;
+        }
         int result = managed->device->cls->poll(managed->device);
         IHS_HIDDeviceUnlock(managed->device);
         if (result > 0) {

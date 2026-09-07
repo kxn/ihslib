@@ -80,6 +80,11 @@ static void Stash(IHS_HIDReportHolder *holder, const uint8_t *current, size_t le
 // True when `current` is byte-identical to what was last flushed, so a full report
 // carrying it would tell the host nothing it does not already know.
 static bool SameAsLastSent(const IHS_HIDReportHolder *holder, const uint8_t *current, size_t len) {
+    /* Compare with the latest generated state when this batch already has
+     * reports. Comparing only with the last flushed state drops a full release
+     * following an unsent press in the same batch. */
+    if (holder->pendingCurrentLen)
+        return holder->pendingCurrentLen == len && memcmp(holder->pendingCurrent, current, len) == 0;
     return holder->lastSent != NULL && holder->lastSentLen == len &&
            memcmp(holder->lastSent, current, len) == 0;
 }
@@ -91,8 +96,7 @@ void IHS_HIDReportHolderSetReportLength(IHS_HIDReportHolder *holder, size_t repo
 static void AddFull(IHS_HIDReportHolder *holder, const uint8_t *current, size_t len, bool force) {
     assert(holder->reportLength >= len);
     /* A full report is self-contained, so one that repeats the last flushed state is
-     * normally pure noise. Forced callers use it as an explicit host-requested refresh
-     * or low-rate heartbeat, so those bypass the byte-identical drop. */
+     * normally redundant. Explicit host-requested refreshes bypass deduplication. */
     if (!force && SameAsLastSent(holder, current, len)) {
         return;
     }
@@ -130,8 +134,7 @@ void IHS_HIDReportHolderAddForcedFullMaskDelta(IHS_HIDReportHolder *holder,
                                                const uint8_t *current, size_t len) {
     /* Same wire shape as a delta report, but with every mask bit forced so the
      * payload carries the complete state: the host can resync from any baseline.
-     * The official client expresses resync state this way - its
-     * CHIDDeviceInputReport::set_full_report has no call sites. */
+     * This compatibility helper is not used by the SDL send path. */
     assert(holder->reportLength >= len);
     Stash(holder, current, len);
     size_t offset = holder->dataBuffer.size;

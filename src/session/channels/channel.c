@@ -92,12 +92,18 @@ IHS_SessionChannel *IHS_SessionChannelForType(IHS_Session *session, IHS_SessionC
 }
 
 void IHS_SessionChannelAdd(IHS_Session *session, IHS_SessionChannel *channel) {
-    if (IHS_SessionChannelFor(session, channel->id)) {
+    if (!channel) return;
+    IHS_SessionChannel *existing = IHS_SessionChannelFor(session, channel->id);
+    if (existing == channel) return;
+    if (existing || session->numChannels >= sizeof(session->channels) / sizeof(session->channels[0])) {
+        IHS_SessionChannelStop(channel);
+        IHS_SessionChannelDestroy(channel);
         return;
     }
     IHS_SessionLog(session, IHS_LogLevelInfo, "Channel", "Adding channel %u", channel->id);
     session->channels[session->numChannels] = channel;
     session->numChannels++;
+    IHS_SessionDrainPendingData(session, channel);
 }
 
 void IHS_SessionChannelRemove(IHS_Session *session, IHS_SessionChannelId channelId) {
@@ -198,12 +204,12 @@ bool IHS_SessionChannelQueueFrame(IHS_SessionChannel *channel, IHS_SessionFrame 
 }
 
 void IHS_SessionChannelPacketAck(IHS_SessionChannel *channel, int32_t packetId,
-                                 int16_t fragmentId, bool ok) {
+                                 int16_t fragmentId, bool ok, uint32_t echoedTimestamp) {
     IHS_SessionPacket packet;
     IHS_SessionPacketType type = ok ? IHS_SessionPacketTypeACK : IHS_SessionPacketTypeNACK;
     IHS_SessionChannelInitializePacket(channel, &packet, type, true, packetId);
     packet.header.fragmentId = fragmentId;
-    IHS_BufferAppendUInt32LE(&packet.body, IHS_SessionPacketTimestamp());
+    IHS_BufferAppendUInt32LE(&packet.body, echoedTimestamp);
     IHS_SessionChannelQueuePacket(channel, &packet, false);
     IHS_SessionPacketClear(&packet, true);
 }

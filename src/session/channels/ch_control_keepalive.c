@@ -46,7 +46,7 @@ void IHS_SessionChannelControlStartHeartbeat(IHS_SessionChannel *channel) {
 void IHS_SessionChannelControlStopHeartbeat(IHS_SessionChannel *channel) {
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
     if (!control->keepAliveTimer) return;
-    IHS_TimerTaskStop(control->keepAliveTimer);
+    IHS_TimerTaskStopImmediate(control->keepAliveTimer);
     control->keepAliveTimer = NULL;
 }
 

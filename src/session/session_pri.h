@@ -26,9 +26,11 @@
 #pragma once
 
 #include "ihslib/session.h"
+#include <stdatomic.h>
 #include "base.h"
 #include "packet.h"
 #include "retransmission.h"
+#include "clock.h"
 
 #include "channels/channel.h"
 
@@ -69,13 +71,11 @@ typedef struct IHS_SessionState {
      * BStreamingAudio / BStreamingVideo accessors reading from
      * clientConfig.enable_*_streaming.
      */
-    bool streamingInput;
+    atomic_bool streamingInput;
     bool streamingAudio;
     bool streamingVideo;
-    /** Host-issued SetInputTemporarilyDisabled: suppress input reports until
-     * re-enabled (official behavior — the client stops sending while the
-     * host/game is not consuming input). */
-    bool inputTemporarilyDisabled;
+    /* Host notification for UI/diagnostics; not an outbound HID gate. */
+    atomic_bool inputTemporarilyDisabled;
 } IHS_SessionState;
 
 struct IHS_FrameStatsAggregator;
@@ -84,23 +84,27 @@ struct IHS_Session {
     IHS_Base base;
     IHS_SessionInfo info;
     IHS_SessionState state;
-    /* Video codec chosen during negotiation and the host capture size. Used to
-     * lazily create the video channel when the host streams video without ever
-     * sending k_EStreamControlStartVideoData (observed with desktop streaming). */
+    /* Negotiated codec preference and capture size; StartVideoData supplies
+     * the actual decoder configuration. */
     int negotiatedVideoCodec;
     uint32_t captureWidth, captureHeight;
     /* Set while IHS_SessionDisconnect waits for the host to acknowledge its
      * StopRequest. -1 when no stop is outstanding; packet 0 is a legitimate id. */
-    int32_t stopPacketId;
-    volatile bool stopAcked;
+    atomic_int_least32_t stopPacketId;
+    atomic_bool stopAcked;
+    IHS_TimerTask *stopAckTimer;
+    atomic_bool destroying;
     uint8_t numChannels;
     IHS_SessionChannel *channels[16];
     IHS_Thread *sendThread;
     IHS_Cond *sendQueueCond;
     IHS_Mutex *sendQueueMutex;
     IHS_Queue *sendQueue;
+    IHS_Queue *pendingData; /* RX-thread-owned packets awaiting Start*Data metadata */
+    unsigned pendingDataCount;
     IHS_Timer *timers;
     IHS_SessionRetransmission retransmission;
+    IHS_StreamClock clock;
     IHS_HIDManager *hidManager;
     struct IHS_FrameStatsAggregator *frameStats;
     struct {
@@ -150,3 +154,5 @@ bool IHS_SessionInputEnabled(IHS_Session *session);
 bool IHS_SessionStreaming(IHS_Session *session);
 
 void IHS_SessionHostStopped(IHS_Session *session);
+
+void IHS_SessionDrainPendingData(IHS_Session *session, IHS_SessionChannel *channel);
