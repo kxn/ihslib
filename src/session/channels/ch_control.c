@@ -386,9 +386,18 @@ static void OnControlReceived(IHS_SessionChannel *channel, IHS_SessionPacket *pa
         if (IsMessageEncrypted(type)) {
             IHS_Buffer plain;
             IHS_BufferInit(&plain, 1024, 1024 * 1024);
-            uint64_t expectSequence = control->recvEncryptSequence++, actualSequence;
+            /* Official BDecrypt advances the counter only when a frame decrypts
+             * (0x7ad06c `(*(this+136))++` on the success path). Advancing on
+             * every attempt welds a single lost frame into a PERMANENT +1
+             * offset — 2026-09-07 session: one lost host frame at t+378s
+             * desynced every subsequent host->client message (45 dropped:
+             * rumble + SetTargetFramerate) for the rest of the run, because
+             * expect chased actual one step behind. Freezing the counter on
+             * mismatch lets a retransmitted/delayed frame resync naturally. */
+            uint64_t expectSequence = control->recvEncryptSequence, actualSequence;
             switch (IHS_SessionFrameDecrypt(channel->session, &frame.body, &plain, expectSequence, &actualSequence)) {
                 case IHS_SessionPacketResultOK: {
+                    control->recvEncryptSequence++;
                     IHS_SessionChannelControlOnMessageReceived(channel, type, &plain, &frame.header);
                     break;
                 }
