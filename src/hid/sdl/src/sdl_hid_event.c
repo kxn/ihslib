@@ -56,11 +56,11 @@ static bool HandleSensorEvent(IHS_HIDManager *manager, const SDL_GamepadSensorEv
  *   wire[27]     = version byte, 3 (RAW selector; skips the <=2 flags fixup)
  *   wire[28..71] = IMU/touch area, zeros (V2 tail layout unconfirmed)
  *
- * Button bit positions are the EGamepadButton enum, decoded from the enum
- * name table at libmain 0x3dabc4 (alphabetical names, value column):
- * A=3, B=24, X=15, Y=1, Start=10, Select=11, Steam=16, L3=18, R3=6,
- * LB=8, RB=9, DPad Up=19 Down=2 Left=26 Right=25.
- * The button table and packer live in sdl_hid_common.h so the
+ * Button bit positions are SDL_GamepadButton values directly (official
+ * OnButtonEvent 0x754034 writes `1 << ev->button` into the +16 bitfield) —
+ * NOT the EGamepadButton protobuf enum; mapping through that enum scrambled
+ * every button on hardware (2026-09-07: Y acted as menu/B, A/B/X dead).
+ * The packer lives in sdl_hid_common.h so the
  * StartInputReports/RequestFullReport path shares one implementation. */
 
 #define HIDSDL_WIRE_STATE_SIZE 72
