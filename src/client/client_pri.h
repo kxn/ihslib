@@ -37,6 +37,14 @@ typedef void (IHS_MessageCallback)(IHS_Client *client, const IHS_SocketAddress *
 
 struct IHS_Client {
     IHS_Base base;
+    struct {
+        IHS_HostInfo host;
+        uint32_t requestId;
+        uint64_t until, lastCancel;
+    } canceled[8];
+    unsigned canceledNext;
+    IHS_HostInfo lastLaunchHost;
+    uint32_t lastLaunchId;
     IHS_Timer *timers;
     IHS_TimerTask *discoveryTimer;
     uint32_t discoveryInterval;
@@ -80,3 +88,12 @@ void IHS_ClientAuthorizationCallback(IHS_Client *client, const IHS_SocketAddress
 
 void IHS_ClientStreamingCallback(IHS_Client *client, const IHS_SocketAddress *address,
                                  CMsgRemoteClientBroadcastHeader *header, ProtobufCMessage *message);
+
+/* Caller validates transaction IDs separately; status/identity cannot replace them. */
+static inline bool IHS_ClientMatchesHost(const IHS_HostInfo *host,
+        const IHS_SocketAddress *address, const CMsgRemoteClientBroadcastHeader *header) {
+    return address->port == host->address.port &&
+        IHS_IPAddressCompare(&address->ip, &host->address.ip) == 0 &&
+        header->has_client_id && header->client_id == host->clientId &&
+        (!host->instanceId || !header->has_instance_id || header->instance_id == host->instanceId);
+}

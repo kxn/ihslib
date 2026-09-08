@@ -66,7 +66,7 @@ static void AuthorizationCancelVisit(IHS_TimerTask *task, void *context) {
     IHS_AuthorizationState *state = IHS_TimerTaskGetContext(task);
     CMsgRemoteDeviceAuthorizationCancelRequest request = CMSG_REMOTE_DEVICE_AUTHORIZATION_CANCEL_REQUEST__INIT;
     IHS_SocketAddress address = state->host.address;
-    IHS_TimerTaskStop(task);
+    IHS_TimerTaskStopOwned(client->timers, &client->taskHandles.authorization);
     IHS_ClientSend(client, address, k_ERemoteDeviceAuthorizationCancelRequest, (ProtobufCMessage *) &request);
 }
 
@@ -79,6 +79,7 @@ typedef struct {
     IHS_Client *client;
     CMsgRemoteClientBroadcastHeader *header;
     ProtobufCMessage *message;
+    const IHS_SocketAddress *address;
 } AuthorizationResponseContext;
 
 static void AuthorizationResponseVisit(IHS_TimerTask *task, void *context) {
@@ -86,6 +87,8 @@ static void AuthorizationResponseVisit(IHS_TimerTask *task, void *context) {
     IHS_Client *client = response->client;
     CMsgRemoteClientBroadcastHeader *header = response->header;
     ProtobufCMessage *message = response->message;
+    IHS_AuthorizationState *current = IHS_TimerTaskGetContext(task);
+    if (!IHS_ClientMatchesHost(&current->host, response->address, header)) return;
     if (header->msg_type == k_ERemoteDeviceAuthorizationConfirmed) {
         CMsgRemoteDeviceAuthorizationConfirmed *confirmed =
                 (CMsgRemoteDeviceAuthorizationConfirmed *) message;
@@ -158,8 +161,7 @@ bool IHS_ClientAuthorizationPubKey(IHS_Client *client, IHS_SteamUniverse univers
 
 void IHS_ClientAuthorizationCallback(IHS_Client *client, const IHS_SocketAddress *address,
                                      CMsgRemoteClientBroadcastHeader *header, ProtobufCMessage *message) {
-    IHS_UNUSED(address);
-    AuthorizationResponseContext context = {client, header, message};
+    AuthorizationResponseContext context = {client, header, message, address};
     IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.authorization,
                             AuthorizationResponseVisit, &context);
 }

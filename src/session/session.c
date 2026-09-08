@@ -48,8 +48,6 @@
 
 /* Long enough to ride out one lost packet and its 10 ms retransmit, short enough
  * that a host which never answers doesn't hold the UI. */
-#define STOP_ACK_TIMEOUT_MS 250
-#define STOP_ACK_POLL_MS 5
 #define SESSION_RECV_TIMEOUT_US 10000
 
 typedef struct IHS_QueueItem {
@@ -88,7 +86,6 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig, const IHS_S
     IHS_RetransmissionInit(&session->retransmission, session);
     session->hidManager = IHS_HIDManagerCreate();
     session->frameStats = IHS_FrameStatsAggregatorCreate();
-    session->stopPacketId = -1; /* calloc's 0 is a valid packet id */
     atomic_init(&session->hostRequestedStop, false);
     atomic_init(&session->hostVideoStopped, false);
 
@@ -118,55 +115,10 @@ bool IHS_SessionConnect(IHS_Session *session) {
     return IHS_BaseStartWorker(&session->base, "IHSSession");
 }
 
-/* Poll for the host's ACK of our StopRequest, then drop the transport. This runs
- * on the timer thread on purpose: half of IHS_SessionDisconnect's callers are error
- * paths inside the receive thread, and that is the very thread that must process
- * the ACK. Blocking any of them would guarantee the timeout it is waiting on. */
-static uint64_t StopAckTimerRun(int runCount, void *context) {
-    IHS_Session *session = context;
-    if (session->stopAcked) {
-        return 0;
-    }
-    if ((runCount + 1) * STOP_ACK_POLL_MS >= STOP_ACK_TIMEOUT_MS) {
-        IHS_SessionLog(session, IHS_LogLevelWarn, "Session",
-                       "Host did not acknowledge StopRequest within %d ms", STOP_ACK_TIMEOUT_MS);
-        return 0;
-    }
-    return STOP_ACK_POLL_MS;
-}
-
-static void StopAckTimerEnd(void *context) {
-    IHS_Session *session = context;
-    if (session->destroying) return;
-    session->stopPacketId = -1;
-    IHS_SessionChannelDiscoveryDisconnect(IHS_SessionChannelFor(session, IHS_SessionChannelIdDiscovery));
-}
-
+/* Transport disconnect preserves the host game. StopRequest(129) is the
+ * separate official "stop game" action; never send it during generic cleanup. */
 void IHS_SessionDisconnect(IHS_Session *session) {
-    /* Tell the host we are done before dropping the transport. Without the
-     * StopRequest it only sees a client that stopped answering, and leaves the
-     * streaming session up until its own timeout: Steam stays in streaming mode,
-     * the game keeps running, and the next connection lands mid-session. */
-    IHS_SessionChannel *control = IHS_SessionChannelFor(session, IHS_SessionChannelIdControl);
-    if (control == NULL) {
-        IHS_SessionChannelDiscoveryDisconnect(IHS_SessionChannelFor(session, IHS_SessionChannelIdDiscovery));
-        return;
-    }
-    IHS_Mutex *sendLock = ((IHS_SessionChannelControl *)control)->sendLock;
-    IHS_MutexLock(sendLock);
-    if (session->stopPacketId >= 0) { IHS_MutexUnlock(sendLock); return; }
-    /* Reserve the exact StopRequest ID under the same lock as control sends. */
-    session->stopPacketId = control->nextPacketId;
-    session->stopAcked = false;
-    CStopRequest stop = CSTOP_REQUEST__INIT;
-    IHS_SessionChannelControlSend(control, k_EStreamControlStopRequest, (const ProtobufCMessage *) &stop,
-                                  IHS_PACKET_ID_NEXT);
-    IHS_MutexUnlock(sendLock);
-    /* Closing the socket now would strand the StopRequest in the send queue, or
-     * lose it to the one packet drop this link is entitled to. Disconnect once the
-     * host has acknowledged it, or once we stop waiting. */
-    IHS_TimerTaskStartOwned(session->timers, &session->stopAckTimer,
-        StopAckTimerRun, StopAckTimerEnd, 0, session);
+    IHS_SessionChannelDiscoveryDisconnect(IHS_SessionChannelFor(session, IHS_SessionChannelIdDiscovery));
 }
 
 void IHS_SessionThreadedJoin(IHS_Session *session) {
@@ -175,7 +127,6 @@ void IHS_SessionThreadedJoin(IHS_Session *session) {
 
 void IHS_SessionDestroy(IHS_Session *session) {
     session->destroying = true;
-    IHS_TimerTaskStopOwned(session->timers, &session->stopAckTimer);
     if (session->hidManager->pollTimer) {
         IHS_TimerTaskStopImmediate(session->hidManager->pollTimer);
         session->hidManager->pollTimer = NULL;
@@ -392,11 +343,7 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
         IHS_RetransmissionAcknowledgeThrough(&session->retransmission, channelId,
                                              (uint16_t) (packet.header.packetId + 1u),
                                              IHS_TimerNow());
-        if (channelId == IHS_SessionChannelIdControl &&
-            session->stopPacketId >= 0 &&
-            (int16_t) (packet.header.packetId - (uint16_t) session->stopPacketId) >= 0) {
-            session->stopAcked = true; /* releases IHS_SessionDisconnect */
-        }
+
     } else if (packetType == IHS_SessionPacketTypeDisconnect) {
         /* Host quit the game / tore the session down. Without this the client
          * sat in a dead session forever: no video, dead inputs, no exit.

@@ -26,6 +26,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stddef.h>
 
 #include "ihslib/common.h"
@@ -69,7 +70,7 @@ struct IHS_Base {
 
     IHS_Thread *worker;
     IHS_Mutex *lock;
-    bool interrupted;
+    atomic_bool interrupted;
 };
 
 #define IHS_UNUSED(x) (void) (x)

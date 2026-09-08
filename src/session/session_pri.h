@@ -88,11 +88,6 @@ struct IHS_Session {
      * the actual decoder configuration. */
     int negotiatedVideoCodec;
     uint32_t captureWidth, captureHeight;
-    /* Set while IHS_SessionDisconnect waits for the host to acknowledge its
-     * StopRequest. -1 when no stop is outstanding; packet 0 is a legitimate id. */
-    atomic_int_least32_t stopPacketId;
-    atomic_bool stopAcked;
-    IHS_TimerTask *stopAckTimer;
     atomic_bool destroying;
     atomic_bool hostVideoStopped;
     atomic_bool hostRequestedStop; /* Explicit inbound StopRequest / Disconnect only. */

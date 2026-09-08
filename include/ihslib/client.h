@@ -184,3 +184,10 @@ bool IHS_ClientAuthorizationCancel(IHS_Client *client);
 
 bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
                                 const IHS_StreamingRequest *request);
+
+/** Cancel the current launch transaction, preserving a bounded late-response record. */
+bool IHS_ClientStreamingCancel(IHS_Client *client);
+
+/** Worker consumed the successful launch response into a session. Subsequent
+ * local stop is a session disconnect, not a launch cancellation. */
+void IHS_ClientStreamingEstablished(IHS_Client *client);

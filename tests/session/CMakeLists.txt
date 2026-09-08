@@ -31,3 +31,6 @@ target_link_libraries(ihstest_hid_send_order PRIVATE ihs-test-session)
 
 ihs_add_test(game_activity test_game_activity.c)
 target_link_libraries(ihstest_game_activity PRIVATE ihs-test-session)
+
+ihs_add_test(launch_transactions test_launch_transactions.c)
+target_link_libraries(ihstest_launch_transactions PRIVATE ihs-test-session)

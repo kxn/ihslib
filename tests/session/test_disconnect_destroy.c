@@ -37,6 +37,7 @@
 #include "session/session_pri.h"
 #include "session/channels/channel.h"
 #include "session/channels/ch_discovery.h"
+#include "session/channels/ch_control.h"
 #include "test_session.h"
 
 static void test_destroy_immediately_after_disconnect(void) {
@@ -93,7 +94,10 @@ static void test_explicit_host_stop(void) {
     assert(IHS_SessionHostRequestedStop(session));
     IHS_SessionDestroy(session);
     session = IHS_TestSessionCreate();
+    IHS_SessionChannel *control = IHS_SessionChannelFor(session, IHS_SessionChannelIdControl);
+    uint16_t before = control->nextPacketId;
     IHS_SessionDisconnect(session);
+    assert(control->nextPacketId == before); /* no StopRequest / game termination */
     assert(!IHS_SessionHostRequestedStop(session));
     IHS_SessionDestroy(session);
 }

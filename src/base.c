@@ -60,6 +60,7 @@ void IHS_BaseInit(IHS_Base *base, const IHS_ClientConfig *config, IHS_BaseReceiv
     assert(base != NULL);
     assert(initialized);
     memset(base, 0, sizeof(IHS_Base));
+    atomic_init(&base->interrupted, false);
     base->broadcast = broadcast;
     base->lock = IHS_MutexCreate();
     base->callbacks.received = recvCb;

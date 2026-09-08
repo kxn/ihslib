@@ -138,6 +138,8 @@ typedef struct IHS_HostInfo {
     IHS_SteamOSType ostype;
     IHS_SteamUniverse universe;
     bool gamesRunning;
+    bool hasGamesRunning, hasTimestamp;
+    uint32_t timestamp;
 } IHS_HostInfo;
 
 typedef enum IHS_LogLevel {

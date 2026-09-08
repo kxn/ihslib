@@ -63,13 +63,16 @@ void IHS_ClientDiscoveryCallback(IHS_Client *client, const IHS_SocketAddress *ad
                                  ProtobufCMessage *message) {
     if (header->msg_type == k_ERemoteClientBroadcastMsgStatus) {
         CMsgRemoteClientBroadcastStatus *status = (CMsgRemoteClientBroadcastStatus *)message;
-        IHS_HostInfo info;
+        IHS_HostInfo info = {0};
         info.clientId = header->client_id;
         info.instanceId = header->instance_id;
         info.address = *address;
         info.ostype = status->ostype;
         info.universe = status->euniverse;
         info.gamesRunning = status->games_running;
+        info.hasGamesRunning = status->has_games_running;
+        info.hasTimestamp = status->has_timestamp;
+        info.timestamp = status->timestamp;
         strncpy(info.hostname, status->hostname, sizeof(info.hostname) - 1);
         info.hostname[sizeof(info.hostname) - 1] = '\0';
         IHS_BaseLock(&client->base);

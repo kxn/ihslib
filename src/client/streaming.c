@@ -35,11 +35,41 @@ typedef struct IHS_StreamingState {
     uint32_t requestId;
     ERemoteClientBroadcastMsg lastMsgType;
     uint64_t lastMsgTime;
+    bool terminal;
 } IHS_StreamingState;
 
 static uint64_t StreamingRequestTimer(int runCount, void *context);
 
 static void StreamingRequestCleanup(void *context);
+
+static void SendCancel(IHS_Client *client, const IHS_HostInfo *host, uint32_t id) {
+    CMsgRemoteDeviceStreamingCancelRequest msg = CMSG_REMOTE_DEVICE_STREAMING_CANCEL_REQUEST__INIT;
+    msg.request_id = id;
+    IHS_ClientSend(client, host->address, k_ERemoteDeviceStreamingCancelRequest, (ProtobufCMessage *)&msg);
+}
+static void CancelVisit(IHS_TimerTask *task, void *context) {
+    IHS_UNUSED(task);
+    IHS_Client *client = context;
+    IHS_TimerTaskStopOwned(client->timers, &client->taskHandles.streaming);
+}
+bool IHS_ClientStreamingCancel(IHS_Client *client) {
+    /* Visit locks out callbacks/retries before retiring the transaction. */
+    IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.streaming, CancelVisit, client);
+    IHS_BaseLock(&client->base);
+    uint32_t id = client->lastLaunchId;
+    IHS_HostInfo host = client->lastLaunchHost;
+    if (id) {
+        unsigned i = client->canceledNext++ % 8;
+        client->canceled[i].host = host;
+        client->canceled[i].requestId = id;
+        client->canceled[i].until = IHS_TimerNow() + 60000;
+        client->canceled[i].lastCancel = IHS_TimerNow();
+        client->lastLaunchId = 0;
+    }
+    IHS_BaseUnlock(&client->base);
+    if (id) SendCancel(client, &host, id);
+    return id != 0;
+}
 
 bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
                                 const IHS_StreamingRequest *request) {
@@ -48,10 +78,24 @@ bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
     IHS_StreamingState *state = malloc(sizeof(IHS_StreamingState));
     if (!state)
         return false;
+    state->terminal = false;
     state->client = client;
     state->host = *host;
     state->request = *request;
-    state->requestId = IHS_CryptoRandomUInt32();
+    IHS_ClientStreamingCancel(client);
+    bool collision;
+    do {
+        state->requestId = IHS_CryptoRandomUInt32();
+        collision = !state->requestId;
+        IHS_BaseLock(&client->base);
+        for (unsigned i = 0; i < 8; ++i)
+            collision |= client->canceled[i].requestId == state->requestId;
+        IHS_BaseUnlock(&client->base);
+    } while (collision);
+    IHS_BaseLock(&client->base);
+    client->lastLaunchId = state->requestId;
+    client->lastLaunchHost = *host;
+    IHS_BaseUnlock(&client->base);
     state->lastMsgType = k_ERemoteClientBroadcastMsgDiscovery;
     state->lastMsgTime = IHS_TimerNow();
     if (!IHS_TimerTaskStartOwned(client->timers, &client->taskHandles.streaming,
@@ -66,6 +110,7 @@ typedef struct {
     IHS_Client *client;
     CMsgRemoteClientBroadcastHeader *header;
     ProtobufCMessage *message;
+    const IHS_SocketAddress *address;
 } StreamingResponseContext;
 
 static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
@@ -74,15 +119,30 @@ static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
     CMsgRemoteClientBroadcastHeader *header = responseContext->header;
     ProtobufCMessage *message = responseContext->message;
     IHS_StreamingState *state = IHS_TimerTaskGetContext(timer);
+    if (state->terminal || !IHS_ClientMatchesHost(&state->host, responseContext->address, header)) return;
+    uint32_t id;
+    switch (header->msg_type) {
+    case k_ERemoteDeviceProofRequest: {
+        CMsgRemoteDeviceProofRequest *proof = (void *)message;
+        id = proof->has_request_id ? proof->request_id : state->requestId;
+        break;
+    }
+    case k_ERemoteDeviceStreamingResponse: id = ((CMsgRemoteDeviceStreamingResponse *)message)->request_id; break;
+    case k_ERemoteDeviceStreamingProgress: id = ((CMsgRemoteDeviceStreamingProgress *)message)->request_id; break;
+    default: return;
+    }
+    if (id != state->requestId) return;
     state->lastMsgType = header->msg_type;
     state->lastMsgTime = IHS_TimerNow();
     switch (header->msg_type) {
     case k_ERemoteDeviceProofRequest: {
         CMsgRemoteDeviceProofRequest *request = (CMsgRemoteDeviceProofRequest *)message;
-        if (request->request_id != state->requestId)
-            return;
         CMsgRemoteDeviceProofResponse response = CMSG_REMOTE_DEVICE_PROOF_RESPONSE__INIT;
-        response.has_request_id = true;
+        response.has_request_id = request->has_request_id;
+        /* This KeyEscrow client uses an installation secret shared across hosts.
+         * Explicitly decline per-host rotation rather than corrupting that secret. */
+        response.has_updated_secret = true;
+        response.updated_secret = false;
         response.request_id = request->request_id;
 
         uint8_t encrypted[1024];
@@ -107,6 +167,10 @@ static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
                        (ProtobufCMessage *)&response);
         break;
     }
+    case k_ERemoteDeviceStreamingProgress:
+        if (client->callbacks.streaming && client->callbacks.streaming->progress)
+            client->callbacks.streaming->progress(client, &state->host, client->callbackContexts.streaming);
+        break;
     case k_ERemoteDeviceStreamingResponse: {
         CMsgRemoteDeviceStreamingResponse *response = (CMsgRemoteDeviceStreamingResponse *)message;
         if (response->request_id != state->requestId)
@@ -121,6 +185,7 @@ static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
             }
             return;
         case k_ERemoteDeviceStreamingSuccess:
+            state->terminal = true;
             IHS_ClientLog(client, IHS_LogLevelDebug, "Client",
                           "Streaming request succeeded: host %s", state->host.hostname);
             if (client->callbacks.streaming && client->callbacks.streaming->success) {
@@ -147,6 +212,7 @@ static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
             }
             break;
         default:
+            state->terminal = true;
             IHS_ClientLog(client, IHS_LogLevelWarn, "Client", "Streaming request failed: host %s",
                           state->host.hostname);
             if (client->callbacks.streaming && client->callbacks.streaming->failed) {
@@ -167,8 +233,30 @@ static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
 void IHS_ClientStreamingCallback(IHS_Client *client, const IHS_SocketAddress *address,
                                  CMsgRemoteClientBroadcastHeader *header,
                                  ProtobufCMessage *message) {
-    IHS_UNUSED(address);
-    StreamingResponseContext context = {client, header, message};
+    if (header->msg_type == k_ERemoteDeviceStreamingResponse) {
+        CMsgRemoteDeviceStreamingResponse *resp = (void *)message;
+        IHS_HostInfo oldHost;
+        bool resend = false;
+        uint64_t now = IHS_TimerNow();
+        IHS_BaseLock(&client->base);
+        for (unsigned i = 0; i < 8; ++i) {
+            if (client->canceled[i].requestId == resp->request_id &&
+                client->canceled[i].until > now &&
+                IHS_ClientMatchesHost(&client->canceled[i].host, address, header)) {
+                if (resp->result == k_ERemoteDeviceStreamingInProgress &&
+                    now - client->canceled[i].lastCancel >= 250) {
+                    oldHost = client->canceled[i].host;
+                    client->canceled[i].lastCancel = now;
+                    resend = true;
+                }
+                IHS_BaseUnlock(&client->base);
+                if (resend) SendCancel(client, &oldHost, resp->request_id);
+                return;
+            }
+        }
+        IHS_BaseUnlock(&client->base);
+    }
+    StreamingResponseContext context = {client, header, message, address};
     IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.streaming, StreamingResponseVisit,
                             &context);
 }
@@ -275,4 +363,11 @@ static uint64_t StreamingRequestTimer(int runCount, void *context) {
 
 static void StreamingRequestCleanup(void *context) {
     free(context);
+}
+
+void IHS_ClientStreamingEstablished(IHS_Client *client) {
+    IHS_TimerTaskStopOwned(client->timers, &client->taskHandles.streaming);
+    IHS_BaseLock(&client->base);
+    client->lastLaunchId = 0;
+    IHS_BaseUnlock(&client->base);
 }
