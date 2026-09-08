@@ -25,9 +25,9 @@
 
 #pragma once
 
-#include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 typedef struct IHS_Session IHS_Session;
 
@@ -108,7 +108,8 @@ typedef struct IHS_StreamInputCallbacks {
 
     bool (*deleteCursor)(IHS_Session *session, uint64_t cursorId, void *context);
 
-    void (*cursorImage)(IHS_Session *session, const IHS_StreamInputCursorImage *image, void *context);
+    void (*cursorImage)(IHS_Session *session, const IHS_StreamInputCursorImage *image,
+                        void *context);
 
     void (*showCursor)(IHS_Session *session, float x, float y, void *context);
 
@@ -132,7 +133,10 @@ typedef struct IHS_StreamInputCallbacks {
      * apply it to scancodes the client subsequently sends with
      * IHS_SessionSendKeyDown/Up.
      */
-    void (*setKeymap)(IHS_Session *session, const IHS_KeymapEntry *entries, size_t count, void *context);
+    void (*setKeymap)(IHS_Session *session, const IHS_KeymapEntry *entries, size_t count,
+                      void *context);
+    /** Host activity metadata, borrowed until callback returns; not a game library. */
+    void (*activity)(IHS_Session *session, uint64_t gameId, const char *name, void *context);
 } IHS_StreamInputCallbacks;
 
 bool IHS_SessionSendMousePosition(IHS_Session *session, float x, float y);

@@ -25,13 +25,13 @@
 
 #include "base.h"
 
-#include <stdlib.h>
-#include <stdio.h>
-#include <stdarg.h>
 #include <assert.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
 
-#include "endianness.h"
 #include "crypto.h"
+#include "endianness.h"
 #include "ihs_buffer.h"
 #include "session/channels/ch_control.h"
 
@@ -40,20 +40,23 @@ static void BaseWorker(IHS_Base *base);
 static bool initialized;
 
 void IHS_Init() {
-    if (initialized) return;
+    if (initialized)
+        return;
     IHS_ControlDiagnosticsInit();
     initialized = true;
     IHS_TimerInit();
 }
 
 void IHS_Quit() {
-    if (!initialized) return;
+    if (!initialized)
+        return;
     IHS_TimerQuit();
     IHS_ControlDiagnosticsQuit();
     initialized = false;
 }
 
-void IHS_BaseInit(IHS_Base *base, const IHS_ClientConfig *config, IHS_BaseReceivedFunction recvCb, bool broadcast) {
+void IHS_BaseInit(IHS_Base *base, const IHS_ClientConfig *config, IHS_BaseReceivedFunction recvCb,
+                  bool broadcast) {
     assert(base != NULL);
     assert(initialized);
     memset(base, 0, sizeof(IHS_Base));
@@ -63,14 +66,15 @@ void IHS_BaseInit(IHS_Base *base, const IHS_ClientConfig *config, IHS_BaseReceiv
 
     base->deviceId = config->deviceId;
     memcpy(base->secretKey, config->secretKey, 32);
-    strncpy(base->deviceName, config->deviceName ? config->deviceName : "IHSLib", sizeof(base->deviceName) - 1);
+    strncpy(base->deviceName, config->deviceName ? config->deviceName : "IHSLib",
+            sizeof(base->deviceName) - 1);
     base->deviceName[sizeof(base->deviceName) - 1] = '\0';
 
     uint8_t in[8];
     size_t deviceTokenLen = sizeof(base->deviceToken);
     IHS_WriteUInt64LE(in, base->deviceId);
-    IHS_CryptoSymmetricEncrypt(in, 8, base->secretKey, sizeof(base->secretKey),
-                               base->deviceToken, &deviceTokenLen);
+    IHS_CryptoSymmetricEncrypt(in, 8, base->secretKey, sizeof(base->secretKey), base->deviceToken,
+                               &deviceTokenLen);
 }
 
 void IHS_BaseSetLogFunction(IHS_Base *base, IHS_LogFunction *logFunction) {
@@ -90,31 +94,35 @@ void IHS_BaseSetRunCallbacks(IHS_Base *base, const IHS_BaseRunCallbacks *callbac
 
 void IHS_BaseLog(IHS_Base *base, IHS_LogLevel level, const char *tag, const char *fmt, ...) {
     assert(base != NULL);
-    if (!base->callbacks.log) return;
+    IHS_BaseLock(base);
+    IHS_LogFunction *log = base->callbacks.log;
+    IHS_BaseUnlock(base);
+    if (!log)
+        return;
     char buf[4096];
     va_list args;
     va_start(args, fmt);
     vsnprintf(buf, 4095, fmt, args);
-    base->callbacks.log(level, tag, buf);
+    log(level, tag, buf);
     va_end(args);
 }
 
 const char *IHS_LogLevelName(IHS_LogLevel level) {
     switch (level) {
-        case IHS_LogLevelFatal:
-            return "Fatal";
-        case IHS_LogLevelError:
-            return "Error";
-        case IHS_LogLevelWarn:
-            return "Warn";
-        case IHS_LogLevelInfo:
-            return "Info";
-        case IHS_LogLevelDebug:
-            return "Debug";
-        case IHS_LogLevelVerbose:
-            return "Verbose";
-        default:
-            return "";
+    case IHS_LogLevelFatal:
+        return "Fatal";
+    case IHS_LogLevelError:
+        return "Error";
+    case IHS_LogLevelWarn:
+        return "Warn";
+    case IHS_LogLevelInfo:
+        return "Info";
+    case IHS_LogLevelDebug:
+        return "Debug";
+    case IHS_LogLevelVerbose:
+        return "Verbose";
+    default:
+        return "";
     }
 }
 
@@ -125,7 +133,7 @@ bool IHS_BaseStartWorker(IHS_Base *base, const char *name) {
         IHS_BaseUnlock(base);
         return false;
     }
-    base->worker = IHS_ThreadCreate((IHS_ThreadFunction *) BaseWorker, name, base);
+    base->worker = IHS_ThreadCreate((IHS_ThreadFunction *)BaseWorker, name, base);
     IHS_BaseLog(base, IHS_LogLevelInfo, "Worker", "Worker thread %s created", name);
     IHS_BaseUnlock(base);
     return true;
@@ -190,7 +198,12 @@ static void BaseWorker(IHS_Base *base) {
     }
     IHS_UDPPacket recv;
     IHS_BufferInit(&recv.buffer, 2048, 2048);
-    while (!base->interrupted) {
+    for (;;) {
+        IHS_BaseLock(base);
+        bool interrupted = base->interrupted;
+        IHS_BaseUnlock(base);
+        if (interrupted)
+            break;
         int ret;
         if ((ret = IHS_UDPSocketReceive(socket, &recv)) < 0) {
             break;
@@ -213,4 +226,3 @@ static void BaseWorker(IHS_Base *base) {
     IHS_BaseUnlock(base);
     IHS_UDPSocketClose(socket);
 }
-

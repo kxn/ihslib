@@ -25,14 +25,13 @@
 
 #pragma once
 
-#include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "common.h"
 
 typedef struct IHS_Client IHS_Client;
-
 
 /**
  * Corresponding to ERemoteDeviceAuthorizationResult
@@ -102,6 +101,8 @@ typedef struct IHS_StreamingRequest {
      * correct. 0 sends no reservation.
      */
     int32_t gamepadCount;
+    /** Optional real game ID from host activity. Zero starts the selected interface. */
+    uint64_t gameId;
 } IHS_StreamingRequest;
 
 typedef struct IHS_ClientDiscoveryCallbacks {
@@ -113,7 +114,8 @@ typedef struct IHS_ClientAuthorizationCallbacks {
 
     void (*success)(IHS_Client *client, const IHS_HostInfo *host, uint64_t steamId, void *context);
 
-    void (*failed)(IHS_Client *client, const IHS_HostInfo *host, IHS_AuthorizationResult result, void *context);
+    void (*failed)(IHS_Client *client, const IHS_HostInfo *host, IHS_AuthorizationResult result,
+                   void *context);
 } IHS_ClientAuthorizationCallbacks;
 
 typedef struct IHS_ClientStreamingCallbacks {
@@ -122,9 +124,9 @@ typedef struct IHS_ClientStreamingCallbacks {
     void (*success)(IHS_Client *client, const IHS_HostInfo *host, const IHS_SocketAddress *address,
                     const uint8_t *sessionKey, size_t sessionKeyLen, void *context);
 
-    void (*failed)(IHS_Client *client, const IHS_HostInfo *host, IHS_StreamingResult result, void *context);
+    void (*failed)(IHS_Client *client, const IHS_HostInfo *host, IHS_StreamingResult result,
+                   void *context);
 } IHS_ClientStreamingCallbacks;
-
 
 IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config);
 
@@ -136,12 +138,15 @@ void IHS_ClientThreadedJoin(IHS_Client *client);
 
 void IHS_ClientDestroy(IHS_Client *client);
 
-void IHS_ClientSetDiscoveryCallbacks(IHS_Client *client, const IHS_ClientDiscoveryCallbacks *callbacks, void *context);
+void IHS_ClientSetDiscoveryCallbacks(IHS_Client *client,
+                                     const IHS_ClientDiscoveryCallbacks *callbacks, void *context);
 
-void IHS_ClientSetAuthorizationCallbacks(IHS_Client *client, const IHS_ClientAuthorizationCallbacks *callbacks,
+void IHS_ClientSetAuthorizationCallbacks(IHS_Client *client,
+                                         const IHS_ClientAuthorizationCallbacks *callbacks,
                                          void *context);
 
-void IHS_ClientSetStreamingCallbacks(IHS_Client *client, const IHS_ClientStreamingCallbacks *callbacks, void *context);
+void IHS_ClientSetStreamingCallbacks(IHS_Client *client,
+                                     const IHS_ClientStreamingCallbacks *callbacks, void *context);
 
 const char *IHS_ClientError(IHS_Client *client);
 
@@ -173,9 +178,9 @@ bool IHS_ClientAuthorizationRequest(IHS_Client *client, const IHS_HostInfo *host
 
 bool IHS_ClientAuthorizationCancel(IHS_Client *client);
 
-
 /* ----------------------------------------------------
  * - Streaming functions
  * ---------------------------------------------------- */
 
-bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host, const IHS_StreamingRequest *request);
+bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
+                                const IHS_StreamingRequest *request);

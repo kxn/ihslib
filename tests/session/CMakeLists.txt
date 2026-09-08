@@ -28,3 +28,6 @@ target_link_libraries(ihstest_protocol_evidence PRIVATE ihs-test-session)
 
 ihs_add_test(hid_send_order test_hid_send_order.c)
 target_link_libraries(ihstest_hid_send_order PRIVATE ihs-test-session)
+
+ihs_add_test(game_activity test_game_activity.c)
+target_link_libraries(ihstest_game_activity PRIVATE ihs-test-session)

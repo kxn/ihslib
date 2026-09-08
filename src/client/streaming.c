@@ -23,10 +23,10 @@
  *
  */
 
-#include <string.h>
-#include <stdlib.h>
 #include "client_pri.h"
 #include "crypto.h"
+#include <stdlib.h>
+#include <string.h>
 
 typedef struct IHS_StreamingState {
     IHS_Client *client;
@@ -41,10 +41,13 @@ static uint64_t StreamingRequestTimer(int runCount, void *context);
 
 static void StreamingRequestCleanup(void *context);
 
-bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host, const IHS_StreamingRequest *request) {
-    IHS_ClientLog(client, IHS_LogLevelInfo, "Client", "Begin sending streaming request to host %s", host->hostname);
+bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
+                                const IHS_StreamingRequest *request) {
+    IHS_ClientLog(client, IHS_LogLevelInfo, "Client", "Begin sending streaming request to host %s",
+                  host->hostname);
     IHS_StreamingState *state = malloc(sizeof(IHS_StreamingState));
-    if (!state) return false;
+    if (!state)
+        return false;
     state->client = client;
     state->host = *host;
     state->request = *request;
@@ -52,7 +55,7 @@ bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host, co
     state->lastMsgType = k_ERemoteClientBroadcastMsgDiscovery;
     state->lastMsgTime = IHS_TimerNow();
     if (!IHS_TimerTaskStartOwned(client->timers, &client->taskHandles.streaming,
-            StreamingRequestTimer, StreamingRequestCleanup, 25, state)) {
+                                 StreamingRequestTimer, StreamingRequestCleanup, 25, state)) {
         free(state);
         return false;
     }
@@ -74,98 +77,104 @@ static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
     state->lastMsgType = header->msg_type;
     state->lastMsgTime = IHS_TimerNow();
     switch (header->msg_type) {
-        case k_ERemoteDeviceProofRequest: {
-            CMsgRemoteDeviceProofRequest *request = (CMsgRemoteDeviceProofRequest *) message;
-            if (request->request_id != state->requestId) return;
-            CMsgRemoteDeviceProofResponse response = CMSG_REMOTE_DEVICE_PROOF_RESPONSE__INIT;
-            response.has_request_id = true;
-            response.request_id = request->request_id;
+    case k_ERemoteDeviceProofRequest: {
+        CMsgRemoteDeviceProofRequest *request = (CMsgRemoteDeviceProofRequest *)message;
+        if (request->request_id != state->requestId)
+            return;
+        CMsgRemoteDeviceProofResponse response = CMSG_REMOTE_DEVICE_PROOF_RESPONSE__INIT;
+        response.has_request_id = true;
+        response.request_id = request->request_id;
 
-            uint8_t encrypted[1024];
-            response.response.data = encrypted;
-            response.response.len = sizeof(encrypted);
-            int encryptRet = IHS_CryptoSymmetricEncrypt(request->challenge.data, request->challenge.len,
-                                                        client->base.secretKey, sizeof(client->base.secretKey),
-                                                        response.response.data, &response.response.len);
-            if (encryptRet != 0) {
-                // Mirrors CServerManager::HandleStreamingProofRequest (0x1e1ad0):
-                // log and drop, let the server retry / time out. Sending the response
-                // anyway would ship uninitialized stack bytes that the server would
-                // reject as a bad HMAC — same observable outcome, but with no client
-                // log trail for a real crypto regression.
-                IHS_ClientLog(client, IHS_LogLevelWarn, "Client",
-                              "Proof challenge encrypt failed for host %s: %d",
-                              state->host.hostname, encryptRet);
-                break;
-            }
-
-            IHS_ClientSend(client, state->host.address, k_ERemoteDeviceProofResponse,
-                           (ProtobufCMessage *) &response);
+        uint8_t encrypted[1024];
+        response.response.data = encrypted;
+        response.response.len = sizeof(encrypted);
+        int encryptRet = IHS_CryptoSymmetricEncrypt(
+            request->challenge.data, request->challenge.len, client->base.secretKey,
+            sizeof(client->base.secretKey), response.response.data, &response.response.len);
+        if (encryptRet != 0) {
+            // Mirrors CServerManager::HandleStreamingProofRequest (0x1e1ad0):
+            // log and drop, let the server retry / time out. Sending the response
+            // anyway would ship uninitialized stack bytes that the server would
+            // reject as a bad HMAC — same observable outcome, but with no client
+            // log trail for a real crypto regression.
+            IHS_ClientLog(client, IHS_LogLevelWarn, "Client",
+                          "Proof challenge encrypt failed for host %s: %d", state->host.hostname,
+                          encryptRet);
             break;
         }
-        case k_ERemoteDeviceStreamingResponse: {
-            CMsgRemoteDeviceStreamingResponse *response = (CMsgRemoteDeviceStreamingResponse *) message;
-            if (response->request_id != state->requestId) return;
-            switch (response->result) {
-                case k_ERemoteDeviceStreamingInProgress:
-                    IHS_ClientLog(client, IHS_LogLevelDebug, "Client", "Streaming request in progress: host %s",
-                                  state->host.hostname);
-                    if (client->callbacks.streaming && client->callbacks.streaming->progress) {
-                        client->callbacks.streaming->progress(client, &state->host, client->callbackContexts.streaming);
-                    }
-                    return;
-                case k_ERemoteDeviceStreamingSuccess:
-                    IHS_ClientLog(client, IHS_LogLevelDebug, "Client", "Streaming request succeeded: host %s",
-                                  state->host.hostname);
-                    if (client->callbacks.streaming && client->callbacks.streaming->success) {
-                        ProtobufCBinaryData enc = response->encrypted_session_key;
-                        uint8_t key[128];
-                        size_t keyLen = sizeof(key);
-                        int decryptRet = IHS_CryptoSymmetricDecrypt(enc.data, enc.len, client->base.secretKey,
-                                                                    sizeof(client->base.secretKey), key, &keyLen);
-                        if (decryptRet != 0) {
-                            // Same class of bug as the proof-request encrypt path. Without this
-                            // check we'd hand the app an uninitialized 128-byte stack buffer as
-                            // the session key — downstream video/audio decode would fail with a
-                            // cryptic error far from the actual cause.
-                            IHS_ClientLog(client, IHS_LogLevelWarn, "Client",
-                                          "Session key decrypt failed for host %s: %d",
-                                          state->host.hostname, decryptRet);
-                        } else {
-                            IHS_SocketAddress streamingAddress = {state->host.address.ip, response->port};
-                            client->callbacks.streaming->success(client, &state->host, &streamingAddress, key, keyLen,
-                                                                 client->callbackContexts.streaming);
-                        }
-                    }
-                    break;
-                default:
-                    IHS_ClientLog(client, IHS_LogLevelWarn, "Client", "Streaming request failed: host %s",
-                                  state->host.hostname);
-                    if (client->callbacks.streaming && client->callbacks.streaming->failed) {
-                        IHS_StreamingResult result = (IHS_StreamingResult) response->result;
-                        client->callbacks.streaming->failed(client, &state->host, result,
-                                                            client->callbackContexts.streaming);
-                    }
-                    break;
+
+        IHS_ClientSend(client, state->host.address, k_ERemoteDeviceProofResponse,
+                       (ProtobufCMessage *)&response);
+        break;
+    }
+    case k_ERemoteDeviceStreamingResponse: {
+        CMsgRemoteDeviceStreamingResponse *response = (CMsgRemoteDeviceStreamingResponse *)message;
+        if (response->request_id != state->requestId)
+            return;
+        switch (response->result) {
+        case k_ERemoteDeviceStreamingInProgress:
+            IHS_ClientLog(client, IHS_LogLevelDebug, "Client",
+                          "Streaming request in progress: host %s", state->host.hostname);
+            if (client->callbacks.streaming && client->callbacks.streaming->progress) {
+                client->callbacks.streaming->progress(client, &state->host,
+                                                      client->callbackContexts.streaming);
             }
-            IHS_TimerTaskStop(timer);
+            return;
+        case k_ERemoteDeviceStreamingSuccess:
+            IHS_ClientLog(client, IHS_LogLevelDebug, "Client",
+                          "Streaming request succeeded: host %s", state->host.hostname);
+            if (client->callbacks.streaming && client->callbacks.streaming->success) {
+                ProtobufCBinaryData enc = response->encrypted_session_key;
+                uint8_t key[128];
+                size_t keyLen = sizeof(key);
+                int decryptRet =
+                    IHS_CryptoSymmetricDecrypt(enc.data, enc.len, client->base.secretKey,
+                                               sizeof(client->base.secretKey), key, &keyLen);
+                if (decryptRet != 0) {
+                    // Same class of bug as the proof-request encrypt path. Without this
+                    // check we'd hand the app an uninitialized 128-byte stack buffer as
+                    // the session key — downstream video/audio decode would fail with a
+                    // cryptic error far from the actual cause.
+                    IHS_ClientLog(client, IHS_LogLevelWarn, "Client",
+                                  "Session key decrypt failed for host %s: %d",
+                                  state->host.hostname, decryptRet);
+                } else {
+                    IHS_SocketAddress streamingAddress = {state->host.address.ip, response->port};
+                    client->callbacks.streaming->success(client, &state->host, &streamingAddress,
+                                                         key, keyLen,
+                                                         client->callbackContexts.streaming);
+                }
+            }
             break;
-        }
         default:
+            IHS_ClientLog(client, IHS_LogLevelWarn, "Client", "Streaming request failed: host %s",
+                          state->host.hostname);
+            if (client->callbacks.streaming && client->callbacks.streaming->failed) {
+                IHS_StreamingResult result = (IHS_StreamingResult)response->result;
+                client->callbacks.streaming->failed(client, &state->host, result,
+                                                    client->callbackContexts.streaming);
+            }
             break;
+        }
+        IHS_TimerTaskStop(timer);
+        break;
+    }
+    default:
+        break;
     }
 }
 
 void IHS_ClientStreamingCallback(IHS_Client *client, const IHS_SocketAddress *address,
-                                 CMsgRemoteClientBroadcastHeader *header, ProtobufCMessage *message) {
+                                 CMsgRemoteClientBroadcastHeader *header,
+                                 ProtobufCMessage *message) {
     IHS_UNUSED(address);
     StreamingResponseContext context = {client, header, message};
-    IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.streaming,
-                            StreamingResponseVisit, &context);
+    IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.streaming, StreamingResponseVisit,
+                            &context);
 }
 
 static uint64_t StreamingRequestTimer(int runCount, void *context) {
-    (void) runCount;
+    (void)runCount;
     IHS_StreamingState *state = context;
     IHS_Client *client = state->client;
     if ((IHS_TimerNow() - state->lastMsgTime) > 15000) {
@@ -188,7 +197,7 @@ static uint64_t StreamingRequestTimer(int runCount, void *context) {
 
     message.has_pin = true;
     message.pin.len = strnlen(request.pin, sizeof(request.pin));
-    message.pin.data = (uint8_t *) request.pin;
+    message.pin.data = (uint8_t *)request.pin;
 
     message.has_maximum_resolution_x = request.maxResolution.x > 0;
     message.maximum_resolution_x = request.maxResolution.x;
@@ -211,10 +220,14 @@ static uint64_t StreamingRequestTimer(int runCount, void *context) {
     message.restricted = false;
 
     message.has_stream_interface = true;
-    message.stream_interface = (EStreamInterface) request.streamingInterface;
+    message.stream_interface = (EStreamInterface)request.streamingInterface;
 
     message.has_stream_desktop = true;
     message.stream_desktop = request.streamDesktop;
+    if (request.gameId != 0) {
+        message.has_gameid = true;
+        message.gameid = request.gameId;
+    }
 
     message.has_form_factor = true;
     message.form_factor = k_EStreamDeviceFormFactorTV;
@@ -240,7 +253,8 @@ static uint64_t StreamingRequestTimer(int runCount, void *context) {
     CMsgRemoteDeviceStreamingRequest__ReservedGamepad reserved[16];
     CMsgRemoteDeviceStreamingRequest__ReservedGamepad *reservedPtrs[16];
     int gamepadCount = request.gamepadCount;
-    if (gamepadCount > 16) gamepadCount = 16;
+    if (gamepadCount > 16)
+        gamepadCount = 16;
     if (gamepadCount > 0) {
         message.has_gamepad_count = true;
         message.gamepad_count = gamepadCount;
@@ -252,8 +266,10 @@ static uint64_t StreamingRequestTimer(int runCount, void *context) {
         message.gamepads = reservedPtrs;
     }
 
-    IHS_ClientLog(client, IHS_LogLevelDebug, "Client", "Sending streaming request packet to host %s", host.hostname);
-    IHS_ClientSend(client, host.address, k_ERemoteDeviceStreamingRequest, (ProtobufCMessage *) &message);
+    IHS_ClientLog(client, IHS_LogLevelDebug, "Client",
+                  "Sending streaming request packet to host %s", host.hostname);
+    IHS_ClientSend(client, host.address, k_ERemoteDeviceStreamingRequest,
+                   (ProtobufCMessage *)&message);
     return 3000;
 }
 

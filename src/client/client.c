@@ -25,17 +25,17 @@
 
 #include "ihslib/client.h"
 
+#include <memory.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <memory.h>
 
-#include "protobuf/discovery.pb-c.h"
-#include "endianness.h"
+#include "base.h"
 #include "client_pri.h"
 #include "crypto.h"
-#include "base.h"
+#include "endianness.h"
 #include "ihs_buffer.h"
 #include "ihs_buffer_ext.h"
+#include "protobuf/discovery.pb-c.h"
 #include "protobuf/pb_utils.h"
 
 static void ClientInitialized(IHS_Base *base, void *context);
@@ -44,7 +44,8 @@ static const unsigned char PACKET_MAGIC[8] = {0xff, 0xff, 0xff, 0xff, 0x21, 0x4c
 
 static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data);
 
-static const ProtobufCMessageDescriptor *MessageDescriptors[k_ERemoteClientBroadcastMsgPairingExclusivity + 1] = {
+static const ProtobufCMessageDescriptor
+    *MessageDescriptors[k_ERemoteClientBroadcastMsgPairingExclusivity + 1] = {
         &cmsg_remote_client_broadcast_discovery__descriptor,
         &cmsg_remote_client_broadcast_status__descriptor,
         NULL,
@@ -65,7 +66,7 @@ static const ProtobufCMessageDescriptor *MessageDescriptors[k_ERemoteClientBroad
 };
 
 static IHS_BaseRunCallbacks ClientRunCallbacks = {
-        .initialized = ClientInitialized,
+    .initialized = ClientInitialized,
 };
 
 IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config) {
@@ -102,18 +103,23 @@ void IHS_ClientDestroy(IHS_Client *client) {
     free(client);
 }
 
-void IHS_ClientSetDiscoveryCallbacks(IHS_Client *client, const IHS_ClientDiscoveryCallbacks *callbacks, void *context) {
+void IHS_ClientSetDiscoveryCallbacks(IHS_Client *client,
+                                     const IHS_ClientDiscoveryCallbacks *callbacks, void *context) {
+    IHS_BaseLock(&client->base);
     client->callbacks.discovery = callbacks;
     client->callbackContexts.discovery = context;
+    IHS_BaseUnlock(&client->base);
 }
 
-void IHS_ClientSetAuthorizationCallbacks(IHS_Client *client, const IHS_ClientAuthorizationCallbacks *callbacks,
+void IHS_ClientSetAuthorizationCallbacks(IHS_Client *client,
+                                         const IHS_ClientAuthorizationCallbacks *callbacks,
                                          void *context) {
     client->callbacks.authorization = callbacks;
     client->callbackContexts.authorization = context;
 }
 
-void IHS_ClientSetStreamingCallbacks(IHS_Client *client, const IHS_ClientStreamingCallbacks *callbacks, void *context) {
+void IHS_ClientSetStreamingCallbacks(IHS_Client *client,
+                                     const IHS_ClientStreamingCallbacks *callbacks, void *context) {
     client->callbacks.streaming = callbacks;
     client->callbackContexts.streaming = context;
 }
@@ -136,7 +142,8 @@ bool IHS_ClientSend(IHS_Client *client, IHS_SocketAddress address, ERemoteClient
     IHS_BufferInit(&buf, 1024, 2048);
     IHS_BufferAppendMem(&buf, PACKET_MAGIC, sizeof(PACKET_MAGIC));
     IHS_BufferAppendUInt32LE(&buf, header_size);
-    cmsg_remote_client_broadcast_header__pack(&header, IHS_BufferPointerForAppend(&buf, header_size));
+    cmsg_remote_client_broadcast_header__pack(&header,
+                                              IHS_BufferPointerForAppend(&buf, header_size));
     buf.size += header_size;
     if (message != NULL) {
         size_t payload_size = protobuf_c_message_get_packed_size(message);
@@ -154,7 +161,8 @@ bool IHS_ClientSend(IHS_Client *client, IHS_SocketAddress address, ERemoteClient
 
 bool IHS_ClientBroadcast(IHS_Client *client, ERemoteClientBroadcastMsg type,
                          ProtobufCMessage *message) {
-    static const IHS_SocketAddress address = {{.v4={IHS_IPAddressFamilyIPv4, {0xFF, 0xFF, 0xFF, 0xFF}}}, 27036};
+    static const IHS_SocketAddress address = {
+        {.v4 = {IHS_IPAddressFamilyIPv4, {0xFF, 0xFF, 0xFF, 0xFF}}}, 27036};
     return IHS_ClientSend(client, address, type, message);
 }
 
@@ -163,7 +171,8 @@ static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
     // dereferencing — the audit found four crash vectors at this entry point.
     // Minimum well-formed packet: PACKET_MAGIC + 4-byte header_size + 4-byte payload_size.
     const size_t MIN_DATAGRAM = sizeof(PACKET_MAGIC) + 4 + 4;
-    if (data->size < MIN_DATAGRAM) return;
+    if (data->size < MIN_DATAGRAM)
+        return;
     if (memcmp(IHS_BufferPointer(data), PACKET_MAGIC, sizeof(PACKET_MAGIC)) != 0) {
         IHS_BaseLog(base, IHS_LogLevelDebug, "Client", "Unrecognized packet!");
         return;
@@ -171,18 +180,19 @@ static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
     IHS_BufferOffsetBy(data, sizeof(PACKET_MAGIC));
 
     uint32_t header_size, payload_size;
-    IHS_BufferOffsetBy(data, (int) IHS_ReadUInt32LE(IHS_BufferPointer(data), &header_size));
+    IHS_BufferOffsetBy(data, (int)IHS_ReadUInt32LE(IHS_BufferPointer(data), &header_size));
     // header_size must fit in the remaining buffer along with the 4-byte payload_size prefix.
-    if (header_size > data->size || data->size - header_size < 4) return;
+    if (header_size > data->size || data->size - header_size < 4)
+        return;
 
-    CMsgRemoteClientBroadcastHeader *header = IHS_UNPACK_BUFFER_SIZE(cmsg_remote_client_broadcast_header__unpack, data,
-                                                                     header_size);
+    CMsgRemoteClientBroadcastHeader *header =
+        IHS_UNPACK_BUFFER_SIZE(cmsg_remote_client_broadcast_header__unpack, data, header_size);
     if (header == NULL) {
         IHS_BaseLog(base, IHS_LogLevelDebug, "Client", "Malformed broadcast header");
         return;
     }
-    IHS_BufferOffsetBy(data, (int) header_size);
-    IHS_BufferOffsetBy(data, (int) IHS_ReadUInt32LE(IHS_BufferPointer(data), &payload_size));
+    IHS_BufferOffsetBy(data, (int)header_size);
+    IHS_BufferOffsetBy(data, (int)IHS_ReadUInt32LE(IHS_BufferPointer(data), &payload_size));
     if (payload_size > data->size) {
         cmsg_remote_client_broadcast_header__free_unpacked(header, NULL);
         return;
@@ -192,41 +202,44 @@ static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
     // The MessageDescriptors table only covers entries explicitly known to this client.
     // Any enum value beyond that (or negative) would read OOB and dereference garbage.
     const ProtobufCMessageDescriptor *descriptor = NULL;
-    if ((int) type >= 0 && (size_t) type < sizeof(MessageDescriptors) / sizeof(MessageDescriptors[0])) {
+    if ((int)type >= 0 &&
+        (size_t)type < sizeof(MessageDescriptors) / sizeof(MessageDescriptors[0])) {
         descriptor = MessageDescriptors[type];
     }
-    ProtobufCMessage *message = descriptor ? protobuf_c_message_unpack(descriptor, NULL, payload_size,
-                                                                       IHS_BufferPointer(data)) : NULL;
-    IHS_Client *client = (IHS_Client *) base;
+    ProtobufCMessage *message =
+        descriptor
+            ? protobuf_c_message_unpack(descriptor, NULL, payload_size, IHS_BufferPointer(data))
+            : NULL;
+    IHS_Client *client = (IHS_Client *)base;
     switch (type) {
-        case k_ERemoteClientBroadcastMsgDiscovery:
-        case k_ERemoteClientBroadcastMsgStatus:
-        case k_ERemoteClientBroadcastMsgOffline:
-        case k_ERemoteClientBroadcastMsgClientIDDeconflict:
-            client->privCallbacks.discovery(client, address, header, message);
-            break;
-        case k_ERemoteDeviceAuthorizationRequest:
-        case k_ERemoteDeviceAuthorizationResponse:
-        case k_ERemoteDeviceAuthorizationCancelRequest:
-        case k_ERemoteDeviceAuthorizationConfirmed:
-            client->privCallbacks.authorization(client, address, header, message);
-            break;
-        case k_ERemoteDeviceStreamingRequest:
-        case k_ERemoteDeviceStreamingResponse:
-        case k_ERemoteDeviceStreamingProgress:
-        case k_ERemoteDeviceStreamingCancelRequest:
-        case k_ERemoteDeviceProofRequest:
-        case k_ERemoteDeviceProofResponse:
-            client->privCallbacks.streaming(client, address, header, message);
-            break;
-        case k_ERemoteClientBroadcastMsgPairingState:
-        case k_ERemoteClientBroadcastMsgPairingExclusivity:
-            IHS_BaseLog(base, IHS_LogLevelInfo, "Client",
-                        "Unhandled pairing broadcast msg_type=%d payload_size=%u",
-                        (int) type, payload_size);
-            break;
-        default:
-            break;
+    case k_ERemoteClientBroadcastMsgDiscovery:
+    case k_ERemoteClientBroadcastMsgStatus:
+    case k_ERemoteClientBroadcastMsgOffline:
+    case k_ERemoteClientBroadcastMsgClientIDDeconflict:
+        client->privCallbacks.discovery(client, address, header, message);
+        break;
+    case k_ERemoteDeviceAuthorizationRequest:
+    case k_ERemoteDeviceAuthorizationResponse:
+    case k_ERemoteDeviceAuthorizationCancelRequest:
+    case k_ERemoteDeviceAuthorizationConfirmed:
+        client->privCallbacks.authorization(client, address, header, message);
+        break;
+    case k_ERemoteDeviceStreamingRequest:
+    case k_ERemoteDeviceStreamingResponse:
+    case k_ERemoteDeviceStreamingProgress:
+    case k_ERemoteDeviceStreamingCancelRequest:
+    case k_ERemoteDeviceProofRequest:
+    case k_ERemoteDeviceProofResponse:
+        client->privCallbacks.streaming(client, address, header, message);
+        break;
+    case k_ERemoteClientBroadcastMsgPairingState:
+    case k_ERemoteClientBroadcastMsgPairingExclusivity:
+        IHS_BaseLog(base, IHS_LogLevelInfo, "Client",
+                    "Unhandled pairing broadcast msg_type=%d payload_size=%u", (int)type,
+                    payload_size);
+        break;
+    default:
+        break;
     }
     cmsg_remote_client_broadcast_header__free_unpacked(header, NULL);
     // protobuf_c_message_free_unpacked must not be called on NULL — it crashes on at
@@ -238,7 +251,7 @@ static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
 }
 
 static void ClientInitialized(IHS_Base *base, void *context) {
-    (void) context;
+    (void)context;
     IHS_UDPSocketSetBlocking(base->socket, true);
     IHS_UDPSocketSetRecvTimeout(base->socket, 10000 /* 10ms */);
 }
