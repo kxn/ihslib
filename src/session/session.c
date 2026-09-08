@@ -89,6 +89,7 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig, const IHS_S
     session->hidManager = IHS_HIDManagerCreate();
     session->frameStats = IHS_FrameStatsAggregatorCreate();
     session->stopPacketId = -1; /* calloc's 0 is a valid packet id */
+    atomic_init(&session->hostRequestedStop, false);
 
     // Default the negotiated-streaming flags to true; OnSetClientConfig will reflect the
     // server's actual answer once the SetStreamingClientConfig control message arrives.
@@ -320,7 +321,12 @@ void IHS_SessionGetReliabilityStats(IHS_Session *session,
     }
 }
 
+bool IHS_SessionHostRequestedStop(IHS_Session *session) {
+    return session && atomic_load(&session->hostRequestedStop);
+}
+
 void IHS_SessionHostStopped(IHS_Session *session) {
+    atomic_store(&session->hostRequestedStop, true);
     IHS_SessionLog(session, IHS_LogLevelWarn, "Session", "Host stopped the session");
     /* Best-effort goodbye: bounded, never blocks on the dead peer. */
     IHS_SessionDisconnect(session);

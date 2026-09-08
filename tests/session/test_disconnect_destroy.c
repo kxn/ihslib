@@ -77,8 +77,29 @@ static void test_threaded_disconnect_without_host_ack(void) {
     alarm(0);
 }
 
+static int host_stop_calls;
+static void host_stopped(IHS_Session *session, void *context) {
+    (void)context;
+    assert(IHS_SessionHostRequestedStop(session));
+    ++host_stop_calls;
+}
+static void test_explicit_host_stop(void) {
+    IHS_Session *session = IHS_TestSessionCreate();
+    assert(!IHS_SessionHostRequestedStop(session));
+    IHS_StreamSessionCallbacks cb = {.disconnected = host_stopped};
+    IHS_SessionSetSessionCallbacks(session, &cb, NULL);
+    IHS_SessionHostStopped(session);
+    assert(host_stop_calls >= 1);
+    assert(IHS_SessionHostRequestedStop(session));
+    IHS_SessionDestroy(session);
+    session = IHS_TestSessionCreate();
+    IHS_SessionDisconnect(session);
+    assert(!IHS_SessionHostRequestedStop(session));
+    IHS_SessionDestroy(session);
+}
 int main(void) {
     IHS_Init();
+    test_explicit_host_stop();
     for (int i = 0; i < 5; ++i) {
         test_destroy_immediately_after_disconnect();
     }

@@ -713,6 +713,9 @@ void IHS_SessionChannelControlOnMessageReceived(IHS_SessionChannel *channel,
         CSetActivityMsg *message = IHS_UNPACK_BUFFER(cset_activity_msg__unpack, payload);
         if (message == NULL)
             break;
+        if (message->has_gameid)
+            IHS_SessionLog(channel->session, IHS_LogLevelInfo, "Activity",
+                           "Host activity gameid=%llu", (unsigned long long)message->gameid);
         const IHS_StreamInputCallbacks *callbacks = channel->session->callbacks.input;
         if (callbacks && callbacks->activity && message->has_gameid && message->gameid &&
             message->game_name && message->game_name[0]) {

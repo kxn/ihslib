@@ -125,6 +125,10 @@ void IHS_SessionInterrupt(IHS_Session *session);
  */
 void IHS_SessionDisconnect(IHS_Session *session);
 
+/* True only after an explicit host StopRequest or transport Disconnect.
+ * Local teardown, authentication failures and silence do not set this flag. */
+bool IHS_SessionHostRequestedStop(IHS_Session *session);
+
 /**
  * Wait for all threads to finish
  * @param session Session instance
