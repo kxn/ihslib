@@ -90,6 +90,9 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig, const IHS_S
     session->frameStats = IHS_FrameStatsAggregatorCreate();
     session->stopPacketId = -1; /* calloc's 0 is a valid packet id */
     atomic_init(&session->hostRequestedStop, false);
+    atomic_init(&session->receivedVideoPackets, 0);
+    atomic_init(&session->receivedAudioPackets, 0);
+    atomic_init(&session->receivedControlPackets, 0);
 
     // Default the negotiated-streaming flags to true; OnSetClientConfig will reflect the
     // server's actual answer once the SetStreamingClientConfig control message arrives.
@@ -288,6 +291,9 @@ void IHS_SessionGetReliabilityStats(IHS_Session *session,
     if (session == NULL) {
         return;
     }
+    stats->receivedVideoPackets = atomic_load(&session->receivedVideoPackets);
+    stats->receivedAudioPackets = atomic_load(&session->receivedAudioPackets);
+    stats->receivedControlPackets = atomic_load(&session->receivedControlPackets);
     IHS_RetransmissionStats reliable;
     IHS_RetransmissionGetStats(&session->retransmission, &reliable, IHS_TimerNow());
     stats->reliableTracked = reliable.tracked;
@@ -401,6 +407,18 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
         return;
     }
     IHS_SessionChannel *channel = IHS_SessionChannelFor(session, channelId);
+    if (channel && (packetType == IHS_SessionPacketTypeReliable ||
+                    packetType == IHS_SessionPacketTypeReliableFrag ||
+                    packetType == IHS_SessionPacketTypeUnreliable ||
+                    packetType == IHS_SessionPacketTypeUnreliableFrag)) {
+        if (channel->type == IHS_SessionChannelTypeDataVideo)
+            atomic_fetch_add(&session->receivedVideoPackets, 1);
+        else if (channel->type == IHS_SessionChannelTypeDataAudio)
+            atomic_fetch_add(&session->receivedAudioPackets, 1);
+        else if (channelId == IHS_SessionChannelIdControl)
+            atomic_fetch_add(&session->receivedControlPackets, 1);
+    }
+
     if (channel == NULL && channelId >= IHS_SessionChannelIdDataStart &&
         (packetType == IHS_SessionPacketTypeUnreliable || packetType == IHS_SessionPacketTypeUnreliableFrag)) {
         /* OnDataPacket queues early data; StartVideoData supplies codec/channel

@@ -72,6 +72,7 @@ typedef struct IHS_SessionReliabilityStats {
     uint64_t hidSent; /* successfully queued RemoteHID messages */
     uint64_t hidAcknowledged; /* confirmed HID transport packets, including fragments */
     uint64_t hidSuperseded;
+    uint64_t receivedVideoPackets, receivedAudioPackets, receivedControlPackets;
     uint32_t hidPending; /* queued HID packets before their first send attempt */
     uint32_t hidInFlight; /* attempted HID packets still awaiting confirmation */
     int32_t hidOldestInFlightPacketId;
