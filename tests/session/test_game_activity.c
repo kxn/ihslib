@@ -21,6 +21,20 @@ static void activity(IHS_Session *s, uint64_t id, const char *name, void *ctx) {
     assert(!strcmp(name, "Host game"));
     calls++;
 }
+static unsigned state_calls;
+static void activity_state(IHS_Session *s, int kind, uint64_t id, const char *name, void *ctx) {
+    (void)s; (void)ctx;
+    if (state_calls == 0) {
+        assert(kind == k_EStreamActivityGame);
+        assert(id == UINT64_C(0x123456789abcdef));
+        assert(!strcmp(name, "Host game"));
+    } else if (state_calls == 1) {
+        assert(kind == k_EStreamActivityDesktop && id == 0);
+    } else {
+        assert(kind == k_EStreamActivityIdle && id == 123 && !name[0]);
+    }
+    ++state_calls;
+}
 static uint32_t le32(const uint8_t *p) {
     return p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
@@ -28,18 +42,23 @@ int main(void) {
     IHS_Init();
     IHS_Session *s = IHS_TestSessionCreate();
     assert(s);
-    IHS_StreamInputCallbacks cb = {.activity = activity};
+    IHS_StreamInputCallbacks cb = {.activity = activity, .activityState = activity_state};
     IHS_SessionSetInputCallbacks(s, &cb, NULL);
     IHS_SessionChannel channel = {.session = s};
     CSetActivityMsg msg = CSET_ACTIVITY_MSG__INIT;
     msg.has_gameid = true;
+    msg.has_activity = true;
+    msg.activity = k_EStreamActivityGame;
     msg.gameid = UINT64_C(0x123456789abcdef);
     msg.game_name = "Host game";
     for (int i = 0; i < 3; ++i) {
-        if (i == 1)
+        if (i == 1) {
             msg.gameid = 0;
+            msg.activity = k_EStreamActivityDesktop;
+        }
         if (i == 2) {
             msg.gameid = 123;
+            msg.activity = k_EStreamActivityIdle;
             msg.game_name = NULL;
         }
         IHS_Buffer buf;
@@ -49,7 +68,7 @@ int main(void) {
                                                    NULL);
         IHS_BufferClear(&buf, true);
     }
-    assert(calls == 1);
+    assert(calls == 1 && state_calls == 3);
     IHS_SessionDestroy(s);
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     assert(fd >= 0);

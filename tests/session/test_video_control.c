@@ -211,6 +211,25 @@ int main(void) {
         /* No callback expected; the only assertion is "did not abort". */
     }
 
+    /* StopVideoData is explicit even without a currently allocated channel.
+     * It is not a request to stop audio or disconnect the session. */
+    assert(!IHS_SessionHostVideoStopped(session));
+    CStopVideoDataMsg stop = CSTOP_VIDEO_DATA_MSG__INIT;
+    dispatch_video_msg(&channel, k_EStreamControlStopVideoData, (const ProtobufCMessage *)&stop);
+    assert(IHS_SessionHostVideoStopped(session));
+    assert(!IHS_SessionHostRequestedStop(session));
+    CStartVideoDataMsg start = CSTART_VIDEO_DATA_MSG__INIT;
+    start.channel = 3;
+    start.has_codec = true;
+    start.codec = k_EStreamVideoCodecH264;
+    start.has_width = start.has_height = true;
+    start.width = 1280;
+    start.height = 720;
+    dispatch_video_msg(&channel, k_EStreamControlStartVideoData, (const ProtobufCMessage *)&start);
+    assert(!IHS_SessionHostVideoStopped(session));
+    dispatch_video_msg(&channel, k_EStreamControlStopVideoData, (const ProtobufCMessage *)&stop);
+    assert(IHS_SessionHostVideoStopped(session));
+    assert(!IHS_SessionHostRequestedStop(session));
     IHS_SessionDestroy(session);
     IHS_Quit();
     return 0;

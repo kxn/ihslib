@@ -43,7 +43,8 @@ void IHS_SessionChannelControlOnVideo(IHS_SessionChannel *channel, EStreamContro
                 IHS_SessionLog(session, IHS_LogLevelWarn, "Video", "Malformed CStartVideoDataMsg");
                 break;
             }
-            IHS_SessionLog(session, IHS_LogLevelInfo, "Video",
+            atomic_store(&session->hostVideoStopped, false);
+            IHS_SessionLog(session, IHS_LogLevelInfo, "StreamState",
                            "StartVideoData(channel=%u, codec=%d, size=%ux%u, codecData=%zu)",
                            message->channel, message->has_codec ? message->codec : 0,
                            message->has_width ? message->width : 0,
@@ -62,6 +63,12 @@ void IHS_SessionChannelControlOnVideo(IHS_SessionChannel *channel, EStreamContro
             break;
         }
         case k_EStreamControlStopVideoData: {
+            CStopVideoDataMsg *message = cstop_video_data_msg__unpack(NULL, payload->size,
+                                         payload->size ? IHS_BufferPointer(payload) : NULL);
+            if (!message) break;
+            cstop_video_data_msg__free_unpacked(message, NULL);
+            atomic_store(&session->hostVideoStopped, true);
+            IHS_SessionLog(session, IHS_LogLevelInfo, "StreamState", "StopVideoData received");
             IHS_SessionChannel *video = IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataVideo);
             if (!video) {
                 IHS_SessionLog(session, IHS_LogLevelInfo, "Video",

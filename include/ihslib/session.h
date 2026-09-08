@@ -72,7 +72,6 @@ typedef struct IHS_SessionReliabilityStats {
     uint64_t hidSent; /* successfully queued RemoteHID messages */
     uint64_t hidAcknowledged; /* confirmed HID transport packets, including fragments */
     uint64_t hidSuperseded;
-    uint64_t receivedVideoPackets, receivedAudioPackets, receivedControlPackets;
     uint32_t hidPending; /* queued HID packets before their first send attempt */
     uint32_t hidInFlight; /* attempted HID packets still awaiting confirmation */
     int32_t hidOldestInFlightPacketId;
@@ -129,6 +128,8 @@ void IHS_SessionDisconnect(IHS_Session *session);
 /* True only after an explicit host StopRequest or transport Disconnect.
  * Local teardown, authentication failures and silence do not set this flag. */
 bool IHS_SessionHostRequestedStop(IHS_Session *session);
+/* Explicit StopVideoData, cleared by StartVideoData; independent of audio/session. */
+bool IHS_SessionHostVideoStopped(IHS_Session *session);
 
 /**
  * Wait for all threads to finish

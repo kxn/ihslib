@@ -135,6 +135,10 @@ typedef struct IHS_StreamInputCallbacks {
      */
     void (*setKeymap)(IHS_Session *session, const IHS_KeymapEntry *entries, size_t count,
                       void *context);
+    /** Full SetActivity semantics: activity 1 idle, 2 game, 3 desktop,
+     * 4 secure desktop, 5 music. Unlike activity(), includes zero/unnamed IDs. */
+    void (*activityState)(IHS_Session *session, int activity, uint64_t gameId,
+                          const char *name, void *context);
     /** Host activity metadata, borrowed until callback returns; not a game library. */
     void (*activity)(IHS_Session *session, uint64_t gameId, const char *name, void *context);
 } IHS_StreamInputCallbacks;

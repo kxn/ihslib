@@ -713,10 +713,15 @@ void IHS_SessionChannelControlOnMessageReceived(IHS_SessionChannel *channel,
         CSetActivityMsg *message = IHS_UNPACK_BUFFER(cset_activity_msg__unpack, payload);
         if (message == NULL)
             break;
-        if (message->has_gameid)
-            IHS_SessionLog(channel->session, IHS_LogLevelInfo, "Activity",
-                           "Host activity gameid=%llu", (unsigned long long)message->gameid);
+        uint64_t gameid = message->has_gameid ? message->gameid : message->appid;
+        IHS_SessionLog(channel->session, IHS_LogLevelInfo, "Activity",
+                       "SetActivity activity=%d gameid=%llu name=%s", message->activity,
+                       (unsigned long long)gameid, message->game_name ? message->game_name : "");
         const IHS_StreamInputCallbacks *callbacks = channel->session->callbacks.input;
+        if (callbacks && callbacks->activityState)
+            callbacks->activityState(channel->session, message->activity, gameid,
+                                     message->game_name ? message->game_name : "",
+                                     channel->session->callbackContexts.input);
         if (callbacks && callbacks->activity && message->has_gameid && message->gameid &&
             message->game_name && message->game_name[0]) {
             callbacks->activity(channel->session, message->gameid, message->game_name,

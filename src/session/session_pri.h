@@ -94,7 +94,7 @@ struct IHS_Session {
     atomic_bool stopAcked;
     IHS_TimerTask *stopAckTimer;
     atomic_bool destroying;
-    atomic_uint_fast64_t receivedVideoPackets, receivedAudioPackets, receivedControlPackets;
+    atomic_bool hostVideoStopped;
     atomic_bool hostRequestedStop; /* Explicit inbound StopRequest / Disconnect only. */
     uint8_t numChannels;
     IHS_SessionChannel *channels[16];
