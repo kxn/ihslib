@@ -1,23 +1,23 @@
 /*
- *  _____  _   _  _____  _  _  _     
- * |_   _|| | | |/  ___|| |(_)| |     Steam    
+ *  _____  _   _  _____  _  _  _
+ * |_   _|| | | |/  ___|| |(_)| |     Steam
  *   | |  | |_| |\ `--. | | _ | |__     In-Home
  *   | |  |  _  | `--. \| || || '_ \      Streaming
  *  _| |_ | | | |/\__/ /| || || |_) |       Library
  *  \___/ \_| |_/\____/ |_||_||_.__/
  *
  * Copyright (c) 2022 Mariotaku <https://github.com/mariotaku>.
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
  * version 3 of the License, or (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * Lesser General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Lesser General Public License
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  *
@@ -25,8 +25,8 @@
 
 #pragma once
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "buffer.h"
 
@@ -76,6 +76,14 @@ typedef enum IHS_StreamFramerateLimiter {
     IHS_StreamFramerateBurstThrottle = 0x40,
 } IHS_StreamFramerateLimiter;
 
+typedef struct IHS_FrameTicket IHS_FrameTicket;
+typedef struct IHS_VideoEpochInfo {
+    uint64_t session_id, video_epoch;
+} IHS_VideoEpochInfo;
+
+/* Set before starting session workers. Identity cannot be reassigned. */
+bool IHS_SessionSetVideoTrackingIdentity(IHS_Session *, uint64_t session_id);
+
 typedef struct IHS_StreamVideoCallbacks {
     int (*start)(IHS_Session *session, const IHS_StreamVideoConfig *config, void *context);
 
@@ -122,4 +130,12 @@ typedef struct IHS_StreamVideoCallbacks {
      * post-override rate. `value == 0` means override cleared. May be NULL.
      */
     void (*setBitrateOverride)(IHS_Session *session, int32_t value, void *context);
+    /* All three or none; exclusive with legacy start/submit/stop. Source ABI. */
+    int (*startTracked)(IHS_Session *, const IHS_VideoEpochInfo *, const IHS_StreamVideoConfig *,
+                        void *);
+    IHS_StreamVideoSubmitResult (*submitTracked)(IHS_Session *, const IHS_VideoEpochInfo *,
+                                                 uint16_t, IHS_FrameTicket *, IHS_Buffer *,
+                                                 IHS_StreamVideoFrameFlag, bool *ticketTaken,
+                                                 void *);
+    void (*stopTracked)(IHS_Session *, const IHS_VideoEpochInfo *, void *);
 } IHS_StreamVideoCallbacks;

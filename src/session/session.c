@@ -23,26 +23,27 @@
  *
  */
 
-#include <stdlib.h>
-#include <memory.h>
-#include <string.h>
 #include <errno.h>
+#include <memory.h>
+#include <stdlib.h>
+#include <string.h>
 
-#include "ihslib/session.h"
-#include "ihslib/common.h"
 #include "base.h"
-#include "packet.h"
 #include "crypto.h"
+#include "ihslib/common.h"
+#include "ihslib/session.h"
+#include "packet.h"
 
-#include "session_pri.h"
 #include "frame_stats.h"
+#include "frame_tracker.h"
+#include "session_pri.h"
 
-#include "session/channels/channel.h"
-#include "session/channels/ch_discovery.h"
-#include "session/channels/ch_control.h"
-#include "session/channels/ch_stats.h"
-#include "session/channels/video/ch_data_video.h"
 #include "protobuf/remoteplay.pb-c.h"
+#include "session/channels/ch_control.h"
+#include "session/channels/ch_discovery.h"
+#include "session/channels/ch_stats.h"
+#include "session/channels/channel.h"
+#include "session/channels/video/ch_data_video.h"
 
 #include "hid/manager.h"
 
@@ -68,11 +69,12 @@ static QueuedPacket *QueuedPacketCreate(IHS_Session *session, IHS_SessionPacket 
 static void QueuedPacketDestroy(QueuedPacket *queued, void *unused);
 
 static const IHS_BaseRunCallbacks SessionRunCallbacks = {
-        .initialized = SessionInitialized,
-        .finalized = SessionFinalized,
+    .initialized = SessionInitialized,
+    .finalized = SessionFinalized,
 };
 
-IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig, const IHS_SessionInfo *sessionInfo) {
+IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig,
+                               const IHS_SessionInfo *sessionInfo) {
     IHS_Session *session = calloc(1, sizeof(IHS_Session));
     IHS_BaseInit(&session->base, clientConfig, SessionRecvCallback, false);
     IHS_BaseSetRunCallbacks(&session->base, &SessionRunCallbacks, NULL);
@@ -108,7 +110,6 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig, const IHS_S
     return session;
 }
 
-
 bool IHS_SessionConnect(IHS_Session *session) {
     IHS_SessionLog(session, IHS_LogLevelInfo, "Session", "Starting session thread");
     // After worker ready, send connect packet
@@ -118,18 +119,20 @@ bool IHS_SessionConnect(IHS_Session *session) {
 /* Transport disconnect preserves the host game. StopRequest(129) is the
  * separate official "stop game" action; never send it during generic cleanup. */
 void IHS_SessionDisconnect(IHS_Session *session) {
-    IHS_SessionChannelDiscoveryDisconnect(IHS_SessionChannelFor(session, IHS_SessionChannelIdDiscovery));
+    IHS_SessionChannelDiscoveryDisconnect(
+        IHS_SessionChannelFor(session, IHS_SessionChannelIdDiscovery));
 }
 
 bool IHS_SessionStopGame(IHS_Session *session) {
-    if (!session) return false;
+    if (!session)
+        return false;
     IHS_BaseLock(&session->base);
     bool connected = session->state.connectionState == IHS_SessionConnectionStateConnected;
     bool sent = false;
     if (connected) {
         CStopRequest request = CSTOP_REQUEST__INIT;
         sent = IHS_SessionSendControlMessage(session, k_EStreamControlStopRequest,
-                                           (const ProtobufCMessage *) &request);
+                                             (const ProtobufCMessage *)&request);
     }
     IHS_BaseUnlock(&session->base);
     return sent;
@@ -146,7 +149,8 @@ void IHS_SessionDestroy(IHS_Session *session) {
         session->hidManager->pollTimer = NULL;
     }
     IHS_SessionInterrupt(session);
-    if (session->base.worker) IHS_SessionThreadedJoin(session);
+    if (session->base.worker)
+        IHS_SessionThreadedJoin(session);
     IHS_HIDManagerCloseAll(session->hidManager);
     /* Data workers may still call control/stats on stop: destroy them first. */
     for (int i = session->numChannels - 1; i >= 3; --i) {
@@ -155,8 +159,11 @@ void IHS_SessionDestroy(IHS_Session *session) {
     }
     session->numChannels = 3;
     /* Discovery shutdown closes HID devices using the still-live control channel. */
-    for (int i = 0; i < 3; i++) IHS_SessionChannelDestroy(session->channels[i]);
+    for (int i = 0; i < 3; i++)
+        IHS_SessionChannelDestroy(session->channels[i]);
     IHS_HIDManagerDestroy(session->hidManager);
+    if (session->frameTracker)
+        IHS_FrameTrackerClose(session->frameTracker);
     IHS_FrameStatsAggregatorDestroy(session->frameStats);
     IHS_TimerDestroy(session->timers);
     IHS_RetransmissionDeinit(&session->retransmission);
@@ -209,8 +216,7 @@ bool IHS_SessionQueuePacket(IHS_Session *session, IHS_SessionPacket *packet, boo
     assert(!packet->header.hasCrc || packet->body.suffix == 4);
     /* Register before exposing the initial send to the worker. Otherwise a fast
      * ACK can arrive between sendto() and registration and be lost forever. */
-    if (retransmit && !IHS_RetransmissionTrack(&session->retransmission, packet,
-                                               IHS_TimerNow())) {
+    if (retransmit && !IHS_RetransmissionTrack(&session->retransmission, packet, IHS_TimerNow())) {
         IHS_SessionLog(session, IHS_LogLevelError, "Retransmission",
                        "Failed to track reliable Packet(channelId=%u, packetId=%u, fragmentId=%d)",
                        packet->header.channelId, packet->header.packetId,
@@ -229,7 +235,8 @@ bool IHS_SessionQueuePacket(IHS_Session *session, IHS_SessionPacket *packet, boo
     return true;
 }
 
-bool IHS_SessionSendControlMessage(IHS_Session *session, EStreamControlMessage type, const ProtobufCMessage *message) {
+bool IHS_SessionSendControlMessage(IHS_Session *session, EStreamControlMessage type,
+                                   const ProtobufCMessage *message) {
     IHS_SessionChannel *channel = IHS_SessionChannelFor(session, IHS_SessionChannelIdControl);
     return IHS_SessionChannelControlSend(channel, type, message, IHS_PACKET_ID_NEXT);
 }
@@ -244,8 +251,7 @@ const IHS_SessionInfo *IHS_SessionGetInfo(const IHS_Session *session) {
     return &session->info;
 }
 
-void IHS_SessionGetReliabilityStats(IHS_Session *session,
-                                    IHS_SessionReliabilityStats *stats) {
+void IHS_SessionGetReliabilityStats(IHS_Session *session, IHS_SessionReliabilityStats *stats) {
     if (stats == NULL) {
         return;
     }
@@ -273,7 +279,7 @@ void IHS_SessionGetReliabilityStats(IHS_Session *session,
 
     IHS_SessionChannel *channel = IHS_SessionChannelFor(session, IHS_SessionChannelIdControl);
     if (channel != NULL) {
-        IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
+        IHS_SessionChannelControl *control = (IHS_SessionChannelControl *)channel;
         IHS_MutexLock(control->sendLock);
         stats->hidSubmitted = control->hidSubmitted;
         stats->hidCoalesced = control->hidCoalesced;
@@ -301,8 +307,8 @@ void IHS_SessionHostStopped(IHS_Session *session) {
     /* Best-effort goodbye: bounded, never blocks on the dead peer. */
     IHS_SessionDisconnect(session);
     IHS_BaseLock(&session->base);
-    bool notify = session->callbacks.session != NULL &&
-                  session->callbacks.session->disconnected != NULL;
+    bool notify =
+        session->callbacks.session != NULL && session->callbacks.session->disconnected != NULL;
     IHS_BaseUnlock(&session->base);
     if (notify) {
         session->callbacks.session->disconnected(session, session->callbackContexts.session);
@@ -311,8 +317,9 @@ void IHS_SessionHostStopped(IHS_Session *session) {
     IHS_SessionInterrupt(session);
 }
 
-static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data) {
-    IHS_Session *session = (IHS_Session *) base;
+static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
+                                IHS_Buffer *data) {
+    IHS_Session *session = (IHS_Session *)base;
     IHS_SessionPacket packet;
     IHS_SessionPacketReturn ret = IHS_SessionPacketParse(&packet, data);
     if (ret != IHS_SessionPacketResultOK) {
@@ -340,10 +347,13 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
     IHS_SessionChannelId channelId = packet.header.channelId;
     IHS_SessionPacketType packetType = packet.header.type;
     if (packetType == IHS_SessionPacketTypeACK) {
-        if (packet.body.size < 4) { IHS_SessionPacketClear(&packet, true); return; }
+        if (packet.body.size < 4) {
+            IHS_SessionPacketClear(&packet, true);
+            return;
+        }
         const uint8_t *b = IHS_BufferPointer(&packet.body);
-        uint32_t echo = (uint32_t) b[0] | (uint32_t) b[1] << 8 |
-                        (uint32_t) b[2] << 16 | (uint32_t) b[3] << 24;
+        uint32_t echo =
+            (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
         IHS_StreamClockFeedback(&session->clock, echo, packet.header.sendTimestamp,
                                 IHS_SessionPacketTimestamp());
     }
@@ -355,7 +365,7 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
          * needless retries. A causal link to the historical 20 s input stalls
          * cannot be established from this client-side branch alone. */
         IHS_RetransmissionAcknowledgeThrough(&session->retransmission, channelId,
-                                             (uint16_t) (packet.header.packetId + 1u),
+                                             (uint16_t)(packet.header.packetId + 1u),
                                              IHS_TimerNow());
 
     } else if (packetType == IHS_SessionPacketTypeDisconnect) {
@@ -368,26 +378,27 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
     }
     IHS_SessionChannel *channel = IHS_SessionChannelFor(session, channelId);
     if (channel == NULL && channelId >= IHS_SessionChannelIdDataStart &&
-        (packetType == IHS_SessionPacketTypeUnreliable || packetType == IHS_SessionPacketTypeUnreliableFrag)) {
+        (packetType == IHS_SessionPacketTypeUnreliable ||
+         packetType == IHS_SessionPacketTypeUnreliableFrag)) {
         /* OnDataPacket queues early data; StartVideoData supplies codec/channel
          * identity before HandlePendingDataPackets (0x7ae1f4). Do not guess. */
         if (session->pendingDataCount == 320) {
-            QueuedPacket *old = (void *) IHS_QueuePoll(session->pendingData);
+            QueuedPacket *old = (void *)IHS_QueuePoll(session->pendingData);
             IHS_SessionPacketClear(&old->packet, true);
-            IHS_QueueItemFree((void *) old);
+            IHS_QueueItemFree((void *)old);
             session->pendingDataCount--;
         }
-        QueuedPacket *queued = (void *) IHS_QueueItemObtain(session->pendingData);
+        QueuedPacket *queued = (void *)IHS_QueueItemObtain(session->pendingData);
         queued->packet = packet;
         memset(&packet.body, 0, sizeof(packet.body));
-        IHS_QueueAppend(session->pendingData, (void *) queued);
+        IHS_QueueAppend(session->pendingData, (void *)queued);
         session->pendingDataCount++;
     }
     if (channel != NULL) {
         IHS_SessionChannelReceivedPacket(channel, &packet);
     } else {
-        IHS_SessionLog(session, IHS_LogLevelDebug, "Session", "Unknown channel for packet(type=%u, ch=%u)", packetType,
-                       channelId);
+        IHS_SessionLog(session, IHS_LogLevelDebug, "Session",
+                       "Unknown channel for packet(type=%u, ch=%u)", packetType, channelId);
     }
     IHS_SessionPacketClear(&packet, true);
 }
@@ -401,13 +412,13 @@ void IHS_SessionDrainPendingData(IHS_Session *session, IHS_SessionChannel *chann
         session->pendingDataCount--;
         IHS_SessionChannelReceivedPacket(channel, &queued->packet);
         IHS_SessionPacketClear(&queued->packet, true);
-        IHS_QueueItemFree((void *) queued);
+        IHS_QueueItemFree((void *)queued);
     }
 }
 
 static void SessionInitialized(IHS_Base *base, void *context) {
-    (void) context;
-    IHS_Session *session = (IHS_Session *) base;
+    (void)context;
+    IHS_Session *session = (IHS_Session *)base;
     /* Interrupting a worker only changes base.interrupted; it cannot wake a
      * blocking recvfrom(). Once StopRequest makes the host go quiet, join must
      * still observe the interrupt without waiting for another datagram. */
@@ -442,8 +453,8 @@ static void SessionInitialized(IHS_Base *base, void *context) {
 }
 
 static void SessionFinalized(IHS_Base *base, void *context) {
-    (void) context;
-    IHS_Session *session = (IHS_Session *) base;
+    (void)context;
+    IHS_Session *session = (IHS_Session *)base;
     IHS_ThreadJoin(session->sendThread);
     session->sendThread = NULL;
     if (session->callbacks.session && session->callbacks.session->finalized) {
@@ -452,7 +463,7 @@ static void SessionFinalized(IHS_Base *base, void *context) {
 }
 
 static void SessionSendWorker(void *context) {
-    IHS_Session *session = (IHS_Session *) context;
+    IHS_Session *session = (IHS_Session *)context;
     while (!session->base.interrupted) {
         IHS_MutexLock(session->sendQueueMutex);
         QueuedPacket *queued;
@@ -476,9 +487,8 @@ static void SessionSendWorker(void *context) {
         }
 
         if (queued->reliable) {
-            IHS_RetransmissionNoteInitialSend(&session->retransmission,
-                                              &queued->packet.header, sent,
-                                              IHS_TimerNow());
+            IHS_RetransmissionNoteInitialSend(&session->retransmission, &queued->packet.header,
+                                              sent, IHS_TimerNow());
         }
         QueuedPacketDestroy(queued, NULL);
         IHS_QueueItemFree(queued);
@@ -494,6 +504,6 @@ static QueuedPacket *QueuedPacketCreate(IHS_Session *session, IHS_SessionPacket 
 }
 
 static void QueuedPacketDestroy(QueuedPacket *queued, void *unused) {
-    (void) unused;
+    (void)unused;
     IHS_SessionPacketClear(&queued->packet, true);
 }

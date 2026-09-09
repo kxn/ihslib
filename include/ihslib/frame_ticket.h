@@ -1,7 +1,7 @@
 #pragma once
+#include "session.h"
 #include <stdbool.h>
 #include <stdint.h>
-#include "session.h"
 
 /* CPU-only endpoint storage; never contains an IHS_Session or GPU pointer.
  * A ticket reference must be held for every call, including retain. After
@@ -26,3 +26,7 @@ IHS_FrameIdentity IHS_FrameTicketIdentity(const IHS_FrameTicket *);
 /* Bounded atomic publication, without acquiring the endpoint/session lock.
  * Exactly one contender wins against completion, expiration, and close. */
 bool IHS_FrameTicketComplete(IHS_FrameTicket *, const IHS_FrameOutcome *);
+
+/* Decoder-side only; these take the endpoint short lock. */
+bool IHS_FrameTicketDecodeStage(IHS_FrameTicket *, bool end, uint64_t us);
+void IHS_FrameTicketSetSize(IHS_FrameTicket *, uint32_t bytes);

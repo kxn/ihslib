@@ -25,12 +25,12 @@
 
 #pragma once
 
-#include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
-#include "ihslib/session.h"
 #include "ihs_thread.h"
+#include "ihslib/session.h"
 #include "protobuf/remoteplay.pb-c.h"
 
 /**
@@ -48,13 +48,13 @@
 
 typedef struct IHS_FrameStatsSlot {
     uint16_t frameId;
-    uint32_t eventMask;             /* bit i set iff events[i] is valid */
+    uint32_t eventMask; /* bit i set iff events[i] is valid */
     uint32_t events[IHS_FRAME_STATS_EVENT_COUNT];
-    uint32_t frameSize;             /* bytes; 0 if unknown */
-    uint16_t inputMark;             /* 0 if not bound to an input mark */
+    uint32_t frameSize; /* bytes; 0 if unknown */
+    uint16_t inputMark; /* 0 if not bound to an input mark */
     IHS_VideoFrameResult result;
-    bool inUse;
-    bool complete;                  /* event 18 (Complete) recorded */
+    bool inUse, tracked;
+    bool complete; /* event 18 (Complete) recorded */
 } IHS_FrameStatsSlot;
 
 /**
@@ -80,11 +80,12 @@ typedef struct IHS_FrameStatsAccumulator {
  * invoking them to avoid lock-order inversion.
  */
 #define IHS_FRAME_STATS_RING_SIZE 128
+#define IHS_FRAME_REPORT_CAPACITY 256
 
 typedef struct IHS_FrameStatsReport {
     uint64_t serial;
     IHS_FrameStatsAccumulator accumulator;
-    IHS_FrameStatsSlot frames[IHS_FRAME_STATS_RING_SIZE];
+    IHS_FrameStatsSlot frames[IHS_FRAME_REPORT_CAPACITY];
     size_t count;
     uint16_t latestFrameId;
     bool fullReporting;
@@ -96,14 +97,19 @@ typedef struct IHS_FrameStatsAggregator {
     IHS_FrameStatsAccumulator accumulator;
     uint16_t lastSentFrameId;
     uint16_t lastDisplayedFrameId;
-    uint32_t lastFrameTimestamp;    /* event 18 of the previous *completed* frame */
-    bool fullReporting;             /* mirrors CStreamClient::sendFullFrameStats */
+    uint32_t lastFrameTimestamp; /* event 18 of the previous *completed* frame */
+    bool fullReporting;          /* mirrors CStreamClient::sendFullFrameStats */
 
     IHS_FrameStatsReport pendingReport;
     uint64_t reportSerial;
     bool reportPending;
-    uint16_t lastQueuedFrameId;     /* queue acceptance, separate from ring drain */
+    uint16_t lastQueuedFrameId; /* queue acceptance, separate from ring drain */
     uint64_t closedUnsentFrames;
+    bool trackedMode, trackedDisplayed;
+    uint64_t lastPresentationSerial;
+    uint16_t trackedLatest;
+    IHS_FrameStatsSlot trackedFrames[IHS_FRAME_REPORT_CAPACITY];
+    size_t trackedCount;
 
 } IHS_FrameStatsAggregator;
 
@@ -114,15 +120,14 @@ void IHS_FrameStatsAggregatorDestroy(IHS_FrameStatsAggregator *agg);
 void IHS_FrameStatsAggregatorSetFullReporting(IHS_FrameStatsAggregator *agg, bool enabled);
 
 size_t IHS_FrameStatsEncodeEvents(const IHS_FrameStatsSlot *slot, int32_t clockOffset,
-                                   CFrameEvent *events, CFrameEvent **pointers);
+                                  CFrameEvent *events, CFrameEvent **pointers);
 
 /**
  * Drain like IHS_FrameStatsAggregatorDrain, additionally copying each folded
  * slot (events still in absolute timestamp units) into `out` (up to max).
  * Returns the number of slots drained. */
-size_t IHS_FrameStatsAggregatorDrainSlots(IHS_FrameStatsAggregator *agg,
-                                          IHS_FrameStatsSlot *out, size_t max,
-                                          uint16_t *outLatestFrameId);
+size_t IHS_FrameStatsAggregatorDrainSlots(IHS_FrameStatsAggregator *agg, IHS_FrameStatsSlot *out,
+                                          size_t max, uint16_t *outLatestFrameId);
 
 /**
  * Record one of the four app-driven events (DecodeBegin/DecodeEnd/UploadBegin/UploadEnd).
@@ -151,11 +156,8 @@ void IHS_FrameStatsRecordComplete(IHS_FrameStatsAggregator *agg, uint16_t frameI
  * refresh event 13. `frameSize` is from the IHS_VideoFrameHeader.
  */
 void IHS_FrameStatsRecordReceived(IHS_FrameStatsAggregator *agg, uint16_t frameId,
-                                  uint32_t senderFrameTimestamp,
-                                  uint32_t senderSendTimestamp,
-                                  uint32_t recvTimestamp,
-                                  uint32_t frameSize,
-                                  uint16_t inputMark);
+                                  uint32_t senderFrameTimestamp, uint32_t senderSendTimestamp,
+                                  uint32_t recvTimestamp, uint32_t frameSize, uint16_t inputMark);
 
 /**
  * Drain the ring for everything between lastSentFrameId and lastDisplayedFrameId
@@ -179,3 +181,8 @@ bool IHS_FrameStatsReportCommit(IHS_FrameStatsAggregator *, uint64_t serial);
 /* Exclude the report consumer first (stop its timer); never replay an old
  * channel's failed report from a replacement channel. */
 void IHS_FrameStatsReportAbandon(IHS_FrameStatsAggregator *);
+
+struct IHS_FrameTracker;
+void IHS_FrameStatsBeginTrackedEpoch(IHS_FrameStatsAggregator *);
+void IHS_FrameStatsSettleTracked(IHS_FrameStatsAggregator *, struct IHS_FrameTracker *,
+                                 uint64_t nowUs);

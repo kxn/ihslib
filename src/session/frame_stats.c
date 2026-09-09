@@ -24,6 +24,7 @@
  */
 
 #include "frame_stats.h"
+#include "frame_tracker.h"
 
 #include <assert.h>
 #include <math.h>
@@ -61,7 +62,7 @@ enum {
  * every ~18.2 hours; the cost is one cast). */
 static float ticks_to_ms(uint32_t earlier, uint32_t later) {
     uint32_t delta = later - earlier;
-    return (float) delta * (1000.0f / 65536.0f);
+    return (float)delta * (1000.0f / 65536.0f);
 }
 
 IHS_FrameStatsAggregator *IHS_FrameStatsAggregatorCreate(void) {
@@ -86,14 +87,17 @@ void IHS_FrameStatsAggregatorDestroy(IHS_FrameStatsAggregator *agg) {
 }
 
 size_t IHS_FrameStatsEncodeEvents(const IHS_FrameStatsSlot *slot, int32_t clockOffset,
-                                   CFrameEvent *events, CFrameEvent **pointers) {
+                                  CFrameEvent *events, CFrameEvent **pointers) {
     size_t count = 0;
     uint32_t previous = 0;
     for (unsigned e = 0; e < IHS_FRAME_STATS_EVENT_COUNT; e++) {
-        if ((e >= 2 && e <= 12) || !(slot->eventMask & (1u << e)) || !slot->events[e]) continue;
+        if ((e >= 2 && e <= 12) || !(slot->eventMask & (1u << e)) ||
+            (!slot->tracked && !slot->events[e]))
+            continue;
         cframe_event__init(&events[count]);
-        events[count].event_id = (EStreamFrameEvent) e;
-        events[count].timestamp = count ? slot->events[e] - previous : slot->events[e] + (uint32_t) clockOffset;
+        events[count].event_id = (EStreamFrameEvent)e;
+        events[count].timestamp =
+            count ? slot->events[e] - previous : slot->events[e] + (uint32_t)clockOffset;
         previous = slot->events[e];
         pointers[count] = &events[count];
         count++;
@@ -130,7 +134,7 @@ static bool has_event(const IHS_FrameStatsSlot *slot, uint32_t eventId) {
 void IHS_FrameStatsRecordStage(IHS_FrameStatsAggregator *agg, uint16_t frameId,
                                IHS_VideoFrameStage stage, uint32_t timestamp) {
     /* IHS_VideoFrameStage values are deliberately equal to EStreamFrameEvent ids. */
-    uint32_t ev = (uint32_t) stage;
+    uint32_t ev = (uint32_t)stage;
     if (ev >= IHS_FRAME_STATS_EVENT_COUNT) {
         return;
     }
@@ -158,11 +162,8 @@ void IHS_FrameStatsRecordComplete(IHS_FrameStatsAggregator *agg, uint16_t frameI
 }
 
 void IHS_FrameStatsRecordReceived(IHS_FrameStatsAggregator *agg, uint16_t frameId,
-                                  uint32_t senderFrameTimestamp,
-                                  uint32_t senderSendTimestamp,
-                                  uint32_t recvTimestamp,
-                                  uint32_t frameSize,
-                                  uint16_t inputMark) {
+                                  uint32_t senderFrameTimestamp, uint32_t senderSendTimestamp,
+                                  uint32_t recvTimestamp, uint32_t frameSize, uint16_t inputMark) {
     IHS_MutexLock(agg->lock);
     IHS_FrameStatsSlot *slot = &agg->ring[frameId & (IHS_FRAME_STATS_RING_SIZE - 1)];
     if (!slot->inUse || slot->frameId != frameId) {
@@ -185,6 +186,8 @@ static void accum_add(IHS_FrameStatsAccumulator *accum, int statId, double value
     if (statId < 0 || statId >= IHS_FRAME_STATS_ACCUM_SLOTS) {
         return;
     }
+    if (accum->slots[statId].count == INT32_MAX)
+        return;
     accum->slots[statId].count++;
     accum->slots[statId].sum += value;
     accum->slots[statId].sumSquares += value * value;
@@ -209,8 +212,7 @@ static void fold_slot(IHS_FrameStatsAggregator *agg, IHS_FrameStatsSlot *slot) {
 
     /* Network duration (stat 6): event 12 → 13. */
     if (has_event(slot, EV_FRAME_SEND) && has_event(slot, EV_FRAME_RECV)) {
-        accum_add(accum, 6,
-                  ticks_to_ms(slot->events[EV_FRAME_SEND], slot->events[EV_FRAME_RECV]));
+        accum_add(accum, 6, ticks_to_ms(slot->events[EV_FRAME_SEND], slot->events[EV_FRAME_RECV]));
     }
     /* Decode duration (stat 7): event 14 → 15. */
     if (has_event(slot, EV_DECODE_BEGIN) && has_event(slot, EV_DECODE_END)) {
@@ -224,8 +226,7 @@ static void fold_slot(IHS_FrameStatsAggregator *agg, IHS_FrameStatsSlot *slot) {
     }
     /* Client end-to-end (stat 9): event 13 → 18. */
     if (has_event(slot, EV_FRAME_RECV) && has_event(slot, EV_COMPLETE)) {
-        accum_add(accum, 9,
-                  ticks_to_ms(slot->events[EV_FRAME_RECV], slot->events[EV_COMPLETE]));
+        accum_add(accum, 9, ticks_to_ms(slot->events[EV_FRAME_RECV], slot->events[EV_COMPLETE]));
     }
 
     /* Stats 0 (FPS), 11/12/13 (input latency variants), 14 (ping), 15/16/17
@@ -235,13 +236,13 @@ static void fold_slot(IHS_FrameStatsAggregator *agg, IHS_FrameStatsSlot *slot) {
 }
 
 static size_t FrameStatsDrainLocked(IHS_FrameStatsAggregator *agg, IHS_FrameStatsSlot *out,
-                                  size_t max, uint16_t *outLatestFrameId) {
+                                    size_t max, uint16_t *outLatestFrameId) {
     size_t folded = 0;
 
     uint16_t lastSent = agg->lastSentFrameId;
     uint16_t lastDisplayed = agg->lastDisplayedFrameId;
     while (lastSent != lastDisplayed) {
-        uint16_t frameId = (uint16_t) (lastSent + 1);
+        uint16_t frameId = (uint16_t)(lastSent + 1);
         IHS_FrameStatsSlot *slot = &agg->ring[frameId & (IHS_FRAME_STATS_RING_SIZE - 1)];
         if (slot->inUse && slot->frameId == frameId) {
             if (!slot->complete) {
@@ -279,8 +280,16 @@ const IHS_FrameStatsReport *IHS_FrameStatsReportBegin(IHS_FrameStatsAggregator *
     IHS_MutexLock(agg->lock);
     IHS_FrameStatsReport *report = &agg->pendingReport;
     if (!agg->reportPending && agg->reportSerial != UINT64_MAX) {
-        report->count = FrameStatsDrainLocked(agg, report->frames,
-            IHS_FRAME_STATS_RING_SIZE, &report->latestFrameId);
+        if (agg->trackedMode) {
+            report->count = agg->trackedDisplayed ? agg->trackedCount : 0;
+            if (report->count) {
+                memcpy(report->frames, agg->trackedFrames, report->count * sizeof(*report->frames));
+                report->latestFrameId = agg->trackedLatest;
+                agg->trackedCount = 0;
+            }
+        } else
+            report->count = FrameStatsDrainLocked(agg, report->frames, IHS_FRAME_STATS_RING_SIZE,
+                                                  &report->latestFrameId);
         if (report->count) {
             report->serial = ++agg->reportSerial;
             report->accumulator = agg->accumulator;
@@ -309,8 +318,9 @@ void IHS_FrameStatsReportAbandon(IHS_FrameStatsAggregator *agg) {
     IHS_MutexLock(agg->lock);
     if (agg->reportPending) {
         uint64_t count = agg->pendingReport.count;
-        agg->closedUnsentFrames = UINT64_MAX - agg->closedUnsentFrames < count ?
-            UINT64_MAX : agg->closedUnsentFrames + count;
+        agg->closedUnsentFrames = UINT64_MAX - agg->closedUnsentFrames < count
+                                      ? UINT64_MAX
+                                      : agg->closedUnsentFrames + count;
         agg->reportPending = false;
     }
     IHS_MutexUnlock(agg->lock);
@@ -320,8 +330,76 @@ size_t IHS_FrameStatsAggregatorDrain(IHS_FrameStatsAggregator *agg, uint16_t *ou
     return FrameStatsDrainCore(agg, NULL, 0, outLatestFrameId);
 }
 
-size_t IHS_FrameStatsAggregatorDrainSlots(IHS_FrameStatsAggregator *agg,
-                                          IHS_FrameStatsSlot *out, size_t max,
-                                          uint16_t *outLatestFrameId) {
+size_t IHS_FrameStatsAggregatorDrainSlots(IHS_FrameStatsAggregator *agg, IHS_FrameStatsSlot *out,
+                                          size_t max, uint16_t *outLatestFrameId) {
     return FrameStatsDrainCore(agg, out, max, outLatestFrameId);
+}
+
+static uint32_t us_to_ticks(uint64_t us) {
+    return (uint32_t)(us / 1000000) * 65536u + (uint32_t)((us % 1000000) * 65536u / 1000000);
+}
+void IHS_FrameStatsBeginTrackedEpoch(IHS_FrameStatsAggregator *agg) {
+    IHS_MutexLock(agg->lock);
+    IHS_FrameStatsReportAbandon(agg);
+    IHS_FrameStatsAccumulatorReset(&agg->accumulator);
+    agg->trackedMode = true;
+    agg->trackedDisplayed = false;
+    agg->trackedCount = 0;
+    agg->lastPresentationSerial = 0;
+    agg->lastFrameTimestamp = 0;
+    IHS_MutexUnlock(agg->lock);
+}
+void IHS_FrameStatsSettleTracked(IHS_FrameStatsAggregator *agg, IHS_FrameTracker *tracker,
+                                 uint64_t nowUs) {
+    /* Small bounded scratch; repeat bounded by the tracker capacity. No renderer
+     * lock is acquired here, and no ticket is retained by a report snapshot. */
+    IHS_TrackedFrame frames[8];
+    IHS_MutexLock(agg->lock);
+    for (unsigned batch = 0; batch < IHS_FRAME_TRACKER_CAPACITY / 8; ++batch) {
+        size_t count = IHS_FrameTrackerSettle(tracker, nowUs, 2000000, frames, 8);
+        for (size_t i = 0; i < count; ++i) {
+            const IHS_TrackedFrame *f = &frames[i];
+            IHS_FrameStatsSlot slot = {.frameId = f->identity.frameId,
+                                       .inUse = true,
+                                       .tracked = true,
+                                       .complete = true,
+                                       .frameSize = f->receive.frameSize,
+                                       .inputMark = f->receive.inputMark,
+                                       .result = f->outcome.result};
+            set_event(&slot, EV_FRAME_START, f->receive.senderFrameTimestamp);
+            set_event(&slot, EV_FRAME_SEND, f->receive.senderSendTimestamp);
+            set_event(&slot, EV_FRAME_RECV, f->receive.receiveTimestamp);
+            if (f->hasDecodeBegin)
+                set_event(&slot, EV_DECODE_BEGIN, us_to_ticks(f->decodeBeginUs));
+            if (f->hasDecodeEnd)
+                set_event(&slot, EV_DECODE_END, us_to_ticks(f->decodeEndUs));
+            if (f->outcome.hasUpload) {
+                set_event(&slot, EV_UPLOAD_BEGIN, us_to_ticks(f->outcome.uploadBeginUs));
+                set_event(&slot, EV_UPLOAD_END, us_to_ticks(f->outcome.uploadEndUs));
+            }
+            set_event(&slot, EV_COMPLETE, us_to_ticks(f->outcome.completionUs));
+            agg->lastFrameTimestamp = 0; /* interval is supplied by presentation order */
+            fold_slot(agg, &slot);
+            agg->lastFrameTimestamp = 0;
+            if (f->outcome.result == IHS_VideoFrameResultDisplayed) {
+                if (f->outcome.hasPresentationInterval)
+                    accum_add(&agg->accumulator, 10, f->outcome.presentationIntervalUs / 1000.0);
+                if (f->outcome.presentationSerial > agg->lastPresentationSerial) {
+                    agg->lastPresentationSerial = f->outcome.presentationSerial;
+                    agg->trackedLatest = f->identity.frameId;
+                    agg->trackedDisplayed = true;
+                }
+            }
+            if (agg->trackedCount == IHS_FRAME_REPORT_CAPACITY) {
+                /* Fixed detail window; accumulated samples remain accounted. */
+                memmove(agg->trackedFrames, agg->trackedFrames + 1,
+                        (IHS_FRAME_REPORT_CAPACITY - 1) * sizeof(*agg->trackedFrames));
+                --agg->trackedCount;
+            }
+            agg->trackedFrames[agg->trackedCount++] = slot;
+        }
+        if (count < 8)
+            break;
+    }
+    IHS_MutexUnlock(agg->lock);
 }

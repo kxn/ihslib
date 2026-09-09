@@ -26,12 +26,14 @@
 #pragma once
 
 #include "ch_data_video.h"
+#include "ihslib/frame_ticket.h"
 
 #include <stddef.h>
 #include <stdint.h>
 
 typedef struct IHS_VideoPartialFrame {
     uint16_t frameId;
+    IHS_FrameTicket *ticket;
     /** Sender-side packet timestamp in 1/65536-second units (IHS_SessionPacketTimestamp). */
     uint32_t timestamp;
     IHS_VideoFrameHeader header;
@@ -47,12 +49,16 @@ typedef struct IHS_SessionVideoPartialFrames {
 
 void IHS_VideoPartialFramesInit(IHS_VideoPartialFrames *frames);
 
-IHS_VideoPartialFrame *IHS_VideoPartialFramesInsertBefore(IHS_VideoPartialFrames *frames, IHS_VideoPartialFrame *before,
-                                                          uint16_t frameId, const IHS_VideoFrameHeader *header,
+IHS_VideoPartialFrame *IHS_VideoPartialFramesInsertBefore(IHS_VideoPartialFrames *frames,
+                                                          IHS_VideoPartialFrame *before,
+                                                          uint16_t frameId,
+                                                          const IHS_VideoFrameHeader *header,
                                                           IHS_Buffer *data);
 
-IHS_VideoPartialFrame *IHS_VideoPartialFramesAppend(IHS_VideoPartialFrames *frames, uint16_t frameId,
-                                                    const IHS_VideoFrameHeader *header, IHS_Buffer *data);
+IHS_VideoPartialFrame *IHS_VideoPartialFramesAppend(IHS_VideoPartialFrames *frames,
+                                                    uint16_t frameId,
+                                                    const IHS_VideoFrameHeader *header,
+                                                    IHS_Buffer *data);
 
 void IHS_VideoPartialFramesRemove(IHS_VideoPartialFrames *frames, IHS_VideoPartialFrame *node);
 
@@ -60,4 +66,4 @@ size_t IHS_VideoPartialFramesCount(const IHS_VideoPartialFrames *frames);
 
 size_t IHS_VideoPartialFramesClear(IHS_VideoPartialFrames *frames);
 
-#define IHS_VideoPartialFramesForEach(a, b) for((a) = (b)->head; (a) != NULL; (a) = (a)->next)
+#define IHS_VideoPartialFramesForEach(a, b) for ((a) = (b)->head; (a) != NULL; (a) = (a)->next)

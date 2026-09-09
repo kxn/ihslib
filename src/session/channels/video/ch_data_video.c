@@ -1,55 +1,56 @@
 /*
- *  _____  _   _  _____  _  _  _     
- * |_   _|| | | |/  ___|| |(_)| |     Steam    
+ *  _____  _   _  _____  _  _  _
+ * |_   _|| | | |/  ___|| |(_)| |     Steam
  *   | |  | |_| |\ `--. | | _ | |__     In-Home
  *   | |  |  _  | `--. \| || || '_ \      Streaming
  *  _| |_ | | | |/\__/ /| || || |_) |       Library
  *  \___/ \_| |_/\____/ |_||_||_.__/
  *
  * Copyright (c) 2022 Mariotaku <https://github.com/mariotaku>.
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
  * version 3 of the License, or (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * Lesser General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Lesser General Public License
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  *
  */
 
-#include <stdlib.h>
 #include <math.h>
 #include <stdatomic.h>
+#include <stdlib.h>
 
-#include "session/channels/ch_data.h"
 #include "ch_data_video.h"
 #include "partial_frames.h"
+#include "session/channels/ch_data.h"
 
 #include "ihs_timer.h"
 
 #include "crypto.h"
 #include "endianness.h"
-#include "session/session_pri.h"
-#include "session/frame_stats.h"
-#include "session/channels/ch_stats.h"
 #include "protobuf/pb_utils.h"
+#include "session/channels/ch_stats.h"
+#include "session/frame_stats.h"
+#include "session/frame_tracker.h"
 #include "session/packet.h"
+#include "session/session_pri.h"
 
 #include "frame_h264.h"
 #include "frame_hevc.h"
 
 /* Reserved once per channel, before registering the report timer. */
 typedef struct VideoReportScratch {
-    CFrameStats frames[IHS_FRAME_STATS_RING_SIZE];
-    CFrameStats *framePointers[IHS_FRAME_STATS_RING_SIZE];
-    CFrameEvent events[IHS_FRAME_STATS_RING_SIZE * IHS_FRAME_STATS_EVENT_COUNT];
-    CFrameEvent *eventPointers[IHS_FRAME_STATS_RING_SIZE * IHS_FRAME_STATS_EVENT_COUNT];
+    CFrameStats frames[IHS_FRAME_REPORT_CAPACITY];
+    CFrameStats *framePointers[IHS_FRAME_REPORT_CAPACITY];
+    CFrameEvent events[IHS_FRAME_REPORT_CAPACITY * IHS_FRAME_STATS_EVENT_COUNT];
+    CFrameEvent *eventPointers[IHS_FRAME_REPORT_CAPACITY * IHS_FRAME_STATS_EVENT_COUNT];
 } VideoReportScratch;
 
 typedef struct IHS_SessionChannelVideo {
@@ -73,9 +74,12 @@ typedef struct IHS_SessionChannelVideo {
     atomic_uint_fast64_t frameCounter;
     bool appStarted;
     VideoReportScratch *reportScratch;
+    IHS_VideoEpochInfo epoch;
+    IHS_FrameTicket *incoming, *assembly;
+    uint16_t assemblyId;
+    bool tracked, contributed;
     IHS_Mutex *stateMutex;
 } IHS_SessionChannelVideo;
-
 
 static void ChannelVideoInit(IHS_SessionChannel *channel, const void *config);
 
@@ -83,7 +87,8 @@ static void ChannelVideoDeinit(IHS_SessionChannel *channel);
 
 static bool DataStart(IHS_SessionChannel *channel);
 
-static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrameHeader *header, IHS_Buffer *body);
+static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrameHeader *header,
+                         IHS_Buffer *body);
 
 static void DataStop(IHS_SessionChannel *channel);
 
@@ -96,7 +101,7 @@ static size_t VideoFrameHeaderParse(IHS_VideoFrameHeader *header, const uint8_t 
  */
 static bool AssembleFrame(IHS_SessionChannel *channel);
 
-static void AppendToFrameBuffer(IHS_SessionChannelVideo *channel, const IHS_Buffer *data,
+static bool AppendToFrameBuffer(IHS_SessionChannelVideo *channel, const IHS_Buffer *data,
                                 const IHS_VideoFrameHeader *header);
 
 static void SubmitFrame(IHS_SessionChannel *channel, uint16_t frameId, IHS_Buffer *data,
@@ -127,43 +132,61 @@ static void CheckPartialOverflow(IHS_SessionChannel *channel);
 static void DiscardPending(IHS_SessionChannelVideo *channel);
 
 static const IHS_SessionChannelDataClass ChannelClass = {
-        {
-                .init = ChannelVideoInit,
-                .deinit = ChannelVideoDeinit,
-                .received = IHS_SessionChannelDataReceived,
-                .stopped = IHS_SessionChannelDataStopped,
-                .instanceSize = sizeof(IHS_SessionChannelVideo)
-        },
-        .start = DataStart,
-        .dataFrame = DataReceived,
-        .stop = DataStop,
+    {.init = ChannelVideoInit,
+     .deinit = ChannelVideoDeinit,
+     .received = IHS_SessionChannelDataReceived,
+     .stopped = IHS_SessionChannelDataStopped,
+     .instanceSize = sizeof(IHS_SessionChannelVideo)},
+    .start = DataStart,
+    .dataFrame = DataReceived,
+    .stop = DataStop,
 };
 
 static const uint8_t EmptyIV[16] = {
-        0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 };
 
-IHS_SessionChannel *IHS_SessionChannelDataVideoCreate(IHS_Session *session, const CStartVideoDataMsg *message) {
+IHS_SessionChannel *IHS_SessionChannelDataVideoCreate(IHS_Session *session,
+                                                      const CStartVideoDataMsg *message) {
     return IHS_SessionChannelDataCreate(&ChannelClass, session, IHS_SessionChannelTypeDataVideo,
-                                        message->channel, (void *) message);
+                                        message->channel, (void *)message);
 }
 
 static void ChannelVideoInit(IHS_SessionChannel *channel, const void *config) {
-    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *) channel;
+    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
     const CStartVideoDataMsg *message = config;
     videoCh->config.width = message->width;
     videoCh->config.height = message->height;
-    videoCh->config.codec = (IHS_StreamVideoCodec) message->codec;
-    if (message->has_codec_data) {
+    videoCh->config.codec = (IHS_StreamVideoCodec)message->codec;
+    if (message->has_codec_data && message->codec_data.len) {
+        if (message->codec_data.len > 2u * 1024u * 1024u || !message->codec_data.data) {
+            channel->initFailed = true;
+            return;
+        }
         videoCh->config.codecDataLen = message->codec_data.len;
         videoCh->config.codecData = malloc(videoCh->config.codecDataLen);
+        if (!videoCh->config.codecData) {
+            channel->initFailed = true;
+            return;
+        }
         memcpy(videoCh->config.codecData, message->codec_data.data, message->codec_data.len);
     }
     videoCh->stateMutex = IHS_MutexCreate();
-    IHS_BufferInit(&videoCh->frame.buffer, 128 * 1024/*128KB*/, 2048 * 1024/*2MB*/);
+    IHS_BufferInit(&videoCh->frame.buffer, 128 * 1024 /*128KB*/, 2048 * 1024 /*2MB*/);
+    videoCh->frame.buffer.data = malloc(videoCh->frame.buffer.maxCapacity);
+    if (videoCh->frame.buffer.data)
+        videoCh->frame.buffer.capacity = videoCh->frame.buffer.maxCapacity;
+    if (!videoCh->stateMutex || !videoCh->frame.buffer.data) {
+        channel->initFailed = true;
+        return;
+    }
     IHS_VideoPartialFramesInit(&videoCh->frame.partial);
     atomic_init(&videoCh->frameCounter, 0);
+    videoCh->tracked =
+        channel->session->callbacks.video && channel->session->callbacks.video->startTracked;
+    videoCh->epoch.session_id = channel->session->videoTrackingId;
+    if (videoCh->tracked && channel->session->nextVideoEpoch != UINT64_MAX)
+        videoCh->epoch.video_epoch = ++channel->session->nextVideoEpoch;
     IHS_SessionChannelDataInit(channel, 2048);
 }
 
@@ -171,7 +194,7 @@ static void ChannelVideoDeinit(IHS_SessionChannel *channel) {
     IHS_SessionChannelDataDeinit(channel);
     /* The worker is joined; shared rollback is now safe and idempotent. */
     DataStop(channel);
-    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *) channel;
+    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
     IHS_MutexDestroy(videoCh->stateMutex);
     if (videoCh->config.codecData) {
         free(videoCh->config.codecData);
@@ -181,14 +204,32 @@ static void ChannelVideoDeinit(IHS_SessionChannel *channel) {
 }
 
 static bool DataStart(IHS_SessionChannel *channel) {
-    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *) channel;
+    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
     IHS_Session *session = channel->session;
     const IHS_StreamVideoCallbacks *callbacks = session->callbacks.video;
-    if (!callbacks || !callbacks->start) return true;
-    if (callbacks->start(session, &videoCh->config, session->callbackContexts.video) != 0) {
+    if (session->invalidVideoCallbacks)
+        return false;
+    if (!callbacks)
+        return true;
+    if (videoCh->tracked &&
+        (!session->frameTracker || !videoCh->epoch.video_epoch ||
+         !IHS_FrameTrackerOpenEpoch(session->frameTracker, videoCh->epoch.video_epoch)))
+        return false;
+    if (!videoCh->tracked && !callbacks->start)
+        return true;
+    int started =
+        videoCh->tracked
+            ? callbacks->startTracked(session, &videoCh->epoch, &videoCh->config,
+                                      session->callbackContexts.video)
+            : callbacks->start(session, &videoCh->config, session->callbackContexts.video);
+    if (started != 0) {
+        if (videoCh->tracked)
+            IHS_FrameTrackerCloseEpoch(session->frameTracker, videoCh->epoch.video_epoch);
         return false;
     }
     videoCh->appStarted = true;
+    if (videoCh->tracked)
+        IHS_FrameStatsBeginTrackedEpoch(session->frameStats);
     CVideoDecoderInfoMsg message = CVIDEO_DECODER_INFO_MSG__INIT;
     message.info = "Marvell hardware decoding";
     PROTOBUF_C_SET_VALUE(message, threads, 1);
@@ -199,11 +240,12 @@ static bool DataStart(IHS_SessionChannel *channel) {
         return false;
     }
     videoCh->states.lastStatsTime = IHS_TimerNow();
-    videoCh->statsTimer = IHS_TimerTaskStart(session->timers, ReportVideoStats, NULL, 1000, videoCh);
+    videoCh->statsTimer =
+        IHS_TimerTaskStart(session->timers, ReportVideoStats, NULL, 1000, videoCh);
 
     if (!videoCh->statsTimer ||
         !IHS_SessionSendControlMessage(session, k_EStreamControlVideoDecoderInfo,
-                                      (const ProtobufCMessage *) &message)) {
+                                       (const ProtobufCMessage *)&message)) {
         /* DataThreadWorker skips stop when start fails. Undo every successful
          * stage here, before channel/session destruction can begin. */
         DataStop(channel);
@@ -212,27 +254,47 @@ static bool DataStart(IHS_SessionChannel *channel) {
     return true;
 }
 
-static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrameHeader *header, IHS_Buffer *body) {
-    if (!header || body->size < 7) return;
-    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *) channel;
+static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrameHeader *header,
+                         IHS_Buffer *body) {
+    if (!header || body->size < 7)
+        return;
+    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
     IHS_VideoFrameHeader vhead;
-    IHS_BufferOffsetBy(body, (int) VideoFrameHeaderParse(&vhead, IHS_BufferPointer(body)));
+    IHS_BufferOffsetBy(body, (int)VideoFrameHeaderParse(&vhead, IHS_BufferPointer(body)));
 
     /* Seed events 5 (FrameEventStart) / 12 (FrameEventSend) / 13 (FrameEventRecv)
      * for this frame in the stats aggregator. Done outside the videoCh mutex so
      * the aggregator's own lock orders independently. Mirrors Steam's
      * RecordFrameReceived: translate the frame and transport-send timestamps
      * from the peer clock; preserve the original transport receive timestamp. */
-    if (channel->session->frameStats != NULL) {
+    if (!videoCh->tracked && channel->session->frameStats != NULL) {
         int32_t offset = IHS_StreamClockOffset(&channel->session->clock);
         IHS_FrameStatsRecordReceived(channel->session->frameStats, header->id,
-                                     header->timestamp - offset,
-                                     header->sendTimestamp - offset,
-                                     header->receiveTimestamp, 0 /* frameSize unknown until assembly */,
-                                     header->inputMark);
+                                     header->timestamp - offset, header->sendTimestamp - offset,
+                                     header->receiveTimestamp,
+                                     0 /* frameSize unknown until assembly */, header->inputMark);
     }
 
     IHS_MutexLock(videoCh->stateMutex);
+    videoCh->contributed = false;
+    if (videoCh->tracked) {
+        int32_t offset = IHS_StreamClockOffset(&channel->session->clock);
+        uint64_t now = IHS_TimerNow() * 1000;
+        IHS_FrameReceive received = {.firstReceiveUs = now,
+                                     .lastReceiveUs = now,
+                                     .senderFrameTimestamp = header->timestamp - offset,
+                                     .senderSendTimestamp = header->sendTimestamp - offset,
+                                     .receiveTimestamp = header->receiveTimestamp,
+                                     .inputMark = header->inputMark};
+        IHS_FrameBeginResult result =
+            IHS_FrameTrackerBegin(channel->session->frameTracker, videoCh->epoch.video_epoch,
+                                  header->id, &received, &videoCh->incoming);
+        if (result != IHS_FrameBeginOK) {
+            if (result != IHS_FrameBeginStale)
+                IHS_SessionDisconnect(channel->session);
+            goto unlock;
+        }
+    }
 
     if (vhead.flags & VideoFrameFlagKeyFrame) {
         DiscardPending(videoCh);
@@ -244,15 +306,16 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
         // Wait for 200ms after requesting keyframe. Then request again.
         uint64_t now = IHS_TimerNow();
         if (now - videoCh->states.waitingKeyFrame >= 200) {
-            IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Video", "Keyframe wait timeout, re-request keyframe");
+            IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Video",
+                           "Keyframe wait timeout, re-request keyframe");
             IHS_SessionChannelDataLost(channel);
             videoCh->states.waitingKeyFrame = IHS_TimerNow();
         }
     } else if (vhead.sequence != videoCh->states.expectedSequence) {
         if (videoCh->states.waitingKeyFrame == 0) {
             IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Video",
-                           "Unexpected video frame sequence %u (expect %u), request keyframe", vhead.sequence,
-                           videoCh->states.expectedSequence);
+                           "Unexpected video frame sequence %u (expect %u), request keyframe",
+                           vhead.sequence, videoCh->states.expectedSequence);
             IHS_SessionChannelDataLost(channel);
             videoCh->states.waitingKeyFrame = IHS_TimerNow();
         }
@@ -268,10 +331,9 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
         IHS_BufferInit(&plain, 0, 0);
         IHS_BufferEnsureMaxSizeExact(&plain, body->size);
         size_t outLen = body->size;
-        int decryptRet = IHS_CryptoSymmetricDecryptWithIV(IHS_BufferPointer(body), body->size,
-                                                          EmptyIV, sizeof(EmptyIV),
-                                                          config->sessionKey, config->sessionKeyLen,
-                                                          IHS_BufferPointer(&plain), &outLen);
+        int decryptRet = IHS_CryptoSymmetricDecryptWithIV(
+            IHS_BufferPointer(body), body->size, EmptyIV, sizeof(EmptyIV), config->sessionKey,
+            config->sessionKeyLen, IHS_BufferPointer(&plain), &outLen);
         if (decryptRet != 0) {
             IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Video",
                            "Failed to decrypt video frame: %d, request keyframe", decryptRet);
@@ -288,7 +350,11 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
     }
 
     if (AssembleFrame(channel)) {
-        SubmitFrame(channel, videoCh->states.lastFrameId, &videoCh->frame.buffer, videoCh->frame.flags);
+        SubmitFrame(channel, videoCh->assemblyId, &videoCh->frame.buffer, videoCh->frame.flags);
+        if (videoCh->assembly) {
+            IHS_FrameTicketRelease(videoCh->assembly);
+            videoCh->assembly = NULL;
+        }
         IHS_BufferClear(&videoCh->frame.buffer, false);
         videoCh->frame.flags = 0;
         videoCh->states.frameFinished = false;
@@ -296,13 +362,22 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
         atomic_fetch_add_explicit(&videoCh->frameCounter, 1, memory_order_relaxed);
     }
     CheckPartialOverflow(channel);
-    unlock:
+unlock:
+    if (videoCh->incoming) {
+        if (!videoCh->contributed) {
+            IHS_FrameOutcome outcome = {.result = IHS_VideoFrameResultDroppedNetworkLost,
+                                        .completionUs = IHS_TimerNow() * 1000};
+            IHS_FrameTicketComplete(videoCh->incoming, &outcome);
+        }
+        IHS_FrameTicketRelease(videoCh->incoming);
+        videoCh->incoming = NULL;
+    }
     IHS_MutexUnlock(videoCh->stateMutex);
 }
 
 static void DataStop(IHS_SessionChannel *channel) {
     IHS_Session *session = channel->session;
-    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *) channel;
+    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
     if (videoCh->statsTimer != NULL) {
         IHS_TimerTaskStopImmediate(videoCh->statsTimer);
         videoCh->statsTimer = NULL;
@@ -310,11 +385,17 @@ static void DataStop(IHS_SessionChannel *channel) {
     const IHS_StreamVideoCallbacks *callbacks = session->callbacks.video;
     free(videoCh->reportScratch);
     videoCh->reportScratch = NULL;
-    if (!videoCh->appStarted) return;
+    if (!videoCh->appStarted)
+        return;
     videoCh->appStarted = false;
-    if (session->frameStats) IHS_FrameStatsReportAbandon(session->frameStats);
-    if (!callbacks || !callbacks->stop) return;
-    callbacks->stop(session, session->callbackContexts.video);
+    if (session->frameStats)
+        IHS_FrameStatsReportAbandon(session->frameStats);
+    if (videoCh->tracked) {
+        IHS_FrameTrackerCloseEpoch(session->frameTracker, videoCh->epoch.video_epoch);
+        callbacks->stopTracked(session, &videoCh->epoch, session->callbackContexts.video);
+    } else if (callbacks && callbacks->stop)
+        callbacks->stop(session, session->callbackContexts.video);
+    DiscardPending(videoCh);
 }
 
 static size_t VideoFrameHeaderParse(IHS_VideoFrameHeader *header, const uint8_t *data) {
@@ -327,7 +408,7 @@ static size_t VideoFrameHeaderParse(IHS_VideoFrameHeader *header, const uint8_t 
 }
 
 static bool AssembleFrame(IHS_SessionChannel *channel) {
-    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *) channel;
+    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
 
     IHS_VideoPartialFrame *partial = videoCh->frame.partial.head;
     while (partial != NULL && !videoCh->states.frameFinished) {
@@ -344,8 +425,25 @@ static bool AssembleFrame(IHS_SessionChannel *channel) {
                 }
             }
         }
+        if (!videoCh->frame.buffer.size) {
+            videoCh->assemblyId = partial->frameId;
+            if (partial->ticket) {
+                if (!IHS_FrameTicketRetain(partial->ticket))
+                    return false;
+                videoCh->assembly = partial->ticket;
+            }
+        } else if (partial->frameId != videoCh->assemblyId ||
+                   (videoCh->tracked && partial->ticket != videoCh->assembly)) {
+            DiscardPending(videoCh);
+            IHS_SessionChannelDataLost(channel);
+            return false;
+        }
         // append buffer
-        AppendToFrameBuffer(videoCh, &partial->data, &partial->header);
+        if (!AppendToFrameBuffer(videoCh, &partial->data, &partial->header)) {
+            DiscardPending(videoCh);
+            IHS_SessionDisconnect(channel->session);
+            return false;
+        }
         if (partial->header.flags & VideoFrameFlagFrameFinish) {
             videoCh->states.frameFinished = true;
         }
@@ -360,22 +458,35 @@ static void AddPartialFrame(IHS_SessionChannelVideo *channel, uint16_t frameId, 
                             const IHS_VideoFrameHeader *header, IHS_Buffer *data) {
     // Find reset matching cur frame
     IHS_VideoPartialFrame *cur = NULL;
-    IHS_VideoPartialFramesForEach (cur, &channel->frame.partial) {
+    IHS_VideoPartialFramesForEach(cur, &channel->frame.partial) {
         if (frameId == cur->frameId && header->subFrameEnd < cur->header.subFrameStart) {
             break;
         }
     }
     IHS_VideoPartialFrame *inserted;
     if (cur != NULL) {
-        inserted = IHS_VideoPartialFramesInsertBefore(&channel->frame.partial, cur, frameId, header, data);
+        inserted =
+            IHS_VideoPartialFramesInsertBefore(&channel->frame.partial, cur, frameId, header, data);
     } else {
         inserted = IHS_VideoPartialFramesAppend(&channel->frame.partial, frameId, header, data);
     }
+    if (!inserted) {
+        IHS_SessionDisconnect(channel->base.base.session);
+        return;
+    }
     inserted->timestamp = timestamp;
+    if (channel->incoming) {
+        if (!IHS_FrameTicketRetain(channel->incoming)) {
+            IHS_SessionDisconnect(channel->base.base.session);
+            return;
+        }
+        inserted->ticket = channel->incoming;
+        channel->contributed = true;
+    }
 }
 
 static void CheckPartialOverflow(IHS_SessionChannel *channel) {
-    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *) channel;
+    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
     if (videoCh->states.waitingKeyFrame > 0) {
         return;
     }
@@ -385,7 +496,7 @@ static void CheckPartialOverflow(IHS_SessionChannel *channel) {
         return;
     }
     // 150 ms in 1/65536-second units. Span between oldest and newest pending fragment.
-    const uint32_t overflowSpan = (uint32_t) (150 * 65536 / 1000);
+    const uint32_t overflowSpan = (uint32_t)(150 * 65536 / 1000);
     uint32_t span = tail->timestamp - head->timestamp;
     if (span <= overflowSpan) {
         return;
@@ -397,58 +508,93 @@ static void CheckPartialOverflow(IHS_SessionChannel *channel) {
 }
 
 static void DiscardPending(IHS_SessionChannelVideo *channel) {
+    IHS_FrameOutcome outcome = {.result = IHS_VideoFrameResultDroppedReset,
+                                .completionUs = IHS_TimerNow() * 1000};
+    if (channel->assembly) {
+        if (channel->assembly != channel->incoming)
+            IHS_FrameTicketComplete(channel->assembly, &outcome);
+        IHS_FrameTicketRelease(channel->assembly);
+        channel->assembly = NULL;
+    }
+    for (IHS_VideoPartialFrame *part = channel->frame.partial.head; part; part = part->next)
+        if (part->ticket && part->ticket != channel->incoming)
+            IHS_FrameTicketComplete(part->ticket, &outcome);
     IHS_BufferClear(&channel->frame.buffer, 0);
+    channel->states.frameStarted = channel->states.frameFinished = false;
     size_t clearedCount = IHS_VideoPartialFramesClear(&channel->frame.partial);
     if (clearedCount > 0) {
-        IHS_SessionLog(((IHS_SessionChannel *) channel)->session, IHS_LogLevelWarn, "Video",
+        IHS_SessionLog(((IHS_SessionChannel *)channel)->session, IHS_LogLevelWarn, "Video",
                        "%u partial frames was cleared", clearedCount);
     }
     channel->frame.flags = 0;
     channel->frame.expectedSubFrameStart = 0;
 }
 
-static void AppendToFrameBuffer(IHS_SessionChannelVideo *channel, const IHS_Buffer *data,
+static bool AppendToFrameBuffer(IHS_SessionChannelVideo *channel, const IHS_Buffer *data,
                                 const IHS_VideoFrameHeader *header) {
+    if (!data->size || data->size > channel->frame.buffer.maxCapacity)
+        return false;
+    size_t required =
+        (header->flags & VideoFrameFlagNeedEscape) ? data->size * 3 / 2 + 5 : data->size;
+    if (required > channel->frame.buffer.maxCapacity - channel->frame.buffer.size)
+        return false;
     switch (channel->config.codec) {
-        case IHS_StreamVideoCodecH264:
-            IHS_SessionVideoFrameAppendH264(&channel->frame.buffer, IHS_BufferPointer(data), data->size, header);
-            break;
-        case IHS_StreamVideoCodecHEVC:
-            IHS_SessionVideoFrameAppendHEVC(&channel->frame.buffer, IHS_BufferPointer(data), data->size, header);
-            break;
-        default: {
-            IHS_SessionLog(((IHS_SessionChannel *) channel)->session, IHS_LogLevelFatal, "Video",
-                           "Unsupported codec %u", channel->config.codec);
-            abort();
-        }
+    case IHS_StreamVideoCodecH264:
+        IHS_SessionVideoFrameAppendH264(&channel->frame.buffer, IHS_BufferPointer(data), data->size,
+                                        header);
+        break;
+    case IHS_StreamVideoCodecHEVC:
+        IHS_SessionVideoFrameAppendHEVC(&channel->frame.buffer, IHS_BufferPointer(data), data->size,
+                                        header);
+        break;
+    default: {
+        IHS_SessionLog(((IHS_SessionChannel *)channel)->session, IHS_LogLevelFatal, "Video",
+                       "Unsupported codec %u", channel->config.codec);
+        abort();
+    }
     }
     if (header->flags & VideoFrameFlagKeyFrame) {
         channel->frame.flags |= IHS_StreamVideoFrameKeyFrame;
     }
+    return true;
 }
 
 static void SubmitFrame(IHS_SessionChannel *channel, uint16_t frameId, IHS_Buffer *data,
                         IHS_StreamVideoFrameFlag flags) {
     IHS_Session *session = channel->session;
     const IHS_StreamVideoCallbacks *callbacks = session->callbacks.video;
-    if (callbacks == NULL || callbacks->submit == NULL) {
+    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
+    if (callbacks == NULL || (!videoCh->tracked && callbacks->submit == NULL))
         return;
-    }
     void *context = session->callbackContexts.video;
-    IHS_StreamVideoSubmitResult result = callbacks->submit(session, frameId, data, flags, context);
+    IHS_StreamVideoSubmitResult result;
+    if (videoCh->tracked) {
+        bool taken = false;
+        if (videoCh->assembly)
+            IHS_FrameTicketSetSize(videoCh->assembly, data->size);
+        result = callbacks->submitTracked(session, &videoCh->epoch, frameId, videoCh->assembly,
+                                          data, flags, &taken, context);
+        if (!taken && videoCh->assembly) {
+            IHS_FrameOutcome outcome = {.result = IHS_VideoFrameResultDroppedDecodeCorrupt,
+                                        .completionUs = IHS_TimerNow() * 1000};
+            IHS_FrameTicketComplete(videoCh->assembly, &outcome);
+        }
+    } else
+        result = callbacks->submit(session, frameId, data, flags, context);
     if (result == IHS_StreamVideoSubmitReportLost) {
         IHS_SessionLog(session, IHS_LogLevelInfo, "Video", "Decoder reported frame lost.");
         IHS_SessionChannelDataLost(channel);
     } else if (result == IHS_StreamVideoSubmitError) {
-        IHS_SessionLog(session, IHS_LogLevelError, "Video", "Decoder reported unrecoverable error.");
+        IHS_SessionLog(session, IHS_LogLevelError, "Video",
+                       "Decoder reported unrecoverable error.");
         IHS_SessionDisconnect(session);
     }
 }
 
 static uint64_t ReportVideoStats(int runCount, void *data) {
-    (void) runCount;
+    (void)runCount;
     IHS_SessionChannel *channel = data;
-    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *) channel;
+    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
     IHS_Session *session = channel->session;
 
     /* Timer callbacks run under timer locks. Never wait on the receive mutex:
@@ -457,7 +603,7 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
     uint64_t now = IHS_TimerNow();
     uint64_t elapsedMs = now - videoCh->states.lastStatsTime;
     uint64_t frames = atomic_exchange_explicit(&videoCh->frameCounter, 0, memory_order_relaxed);
-    double fps = elapsedMs > 0 ? (frames * 1000.0) / (double) elapsedMs : 0.0;
+    double fps = elapsedMs > 0 ? (frames * 1000.0) / (double)elapsedMs : 0.0;
     IHS_SessionLog(channel->session, IHS_LogLevelVerbose, "Video", "%.2f FPS", fps);
     videoCh->states.lastStatsTime = now;
 
@@ -469,9 +615,13 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
         return 1000;
     }
     IHS_SessionChannel *stats = IHS_SessionChannelFor(session, IHS_SessionChannelIdStats);
-    if (stats == NULL) return 1000;
+    if (stats == NULL)
+        return 1000;
+    if (videoCh->tracked)
+        IHS_FrameStatsSettleTracked(session->frameStats, session->frameTracker, now * 1000);
     const IHS_FrameStatsReport *report = IHS_FrameStatsReportBegin(session->frameStats);
-    if (!report) return 1000;
+    if (!report)
+        return 1000;
     CFrameStatsListMsg message = CFRAME_STATS_LIST_MSG__INIT;
     message.data_type = k_EStreamingVideoData;
     message.latest_frame_id = report->latestFrameId;
@@ -488,10 +638,10 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
         }
         CFrameStatAccumulatedValue *row = &accumRows[rowCount];
         cframe_stat_accumulated_value__init(row);
-        row->stat_type = (EFrameAccumulatedStat) i;
-        row->count = (int32_t) accum->slots[i].count;
+        row->stat_type = (EFrameAccumulatedStat)i;
+        row->count = (int32_t)accum->slots[i].count;
         double average = accum->slots[i].sum / accum->slots[i].count;
-        row->average = (float) average;
+        row->average = (float)average;
         /* Stddev = sqrt(E[X^2] - E[X]^2). Suppress when ≤ 0 (single sample or
          * negative-from-FP-roundoff). Matches Steam's set_stddev guard. */
         if (accum->slots[i].count > 1) {
@@ -499,7 +649,7 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
             double variance = meanSq - average * average;
             if (variance > 0) {
                 row->has_stddev = 1;
-                row->stddev = (float) sqrt(variance);
+                row->stddev = (float)sqrt(variance);
             }
         }
         accumPtrs[rowCount] = row;
@@ -526,8 +676,8 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
             row->frame_id = slot->frameId;
             row->n_events = 0;
             row->events = &eventPtrs[eventCount];
-            row->n_events = IHS_FrameStatsEncodeEvents(slot, clockOffset,
-                &eventRows[eventCount], &eventPtrs[eventCount]);
+            row->n_events = IHS_FrameStatsEncodeEvents(slot, clockOffset, &eventRows[eventCount],
+                                                       &eventPtrs[eventCount]);
             eventCount += row->n_events;
             row->result = slot->result;
             if (slot->inputMark != 0) {
@@ -548,7 +698,7 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
     }
 
     if (IHS_SessionChannelStatsSend(stats, k_EStreamStatsFrameEvents,
-                                   (const ProtobufCMessage *) &message, IHS_PACKET_ID_NEXT)) {
+                                    (const ProtobufCMessage *)&message, IHS_PACKET_ID_NEXT)) {
         IHS_FrameStatsReportCommit(session->frameStats, report->serial);
     }
     return 1000;

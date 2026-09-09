@@ -22,40 +22,50 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  *
  */
-#include "session_pri.h"
-#include "frame_stats.h"
-#include "packet.h"
 #include "channels/ch_data_microphone.h"
+#include "frame_stats.h"
+#include "frame_tracker.h"
+#include "packet.h"
+#include "session_pri.h"
 
-void IHS_SessionSetSessionCallbacks(IHS_Session *session, const IHS_StreamSessionCallbacks *callbacks, void *context) {
+void IHS_SessionSetSessionCallbacks(IHS_Session *session,
+                                    const IHS_StreamSessionCallbacks *callbacks, void *context) {
     IHS_BaseLock(&session->base);
     session->callbacks.session = callbacks;
     session->callbackContexts.session = context;
     IHS_BaseUnlock(&session->base);
 }
 
-void IHS_SessionSetAudioCallbacks(IHS_Session *session, const IHS_StreamAudioCallbacks *callbacks, void *context) {
+void IHS_SessionSetAudioCallbacks(IHS_Session *session, const IHS_StreamAudioCallbacks *callbacks,
+                                  void *context) {
     IHS_BaseLock(&session->base);
     session->callbacks.audio = callbacks;
     session->callbackContexts.audio = context;
     IHS_BaseUnlock(&session->base);
 }
 
-void IHS_SessionSetVideoCallbacks(IHS_Session *session, const IHS_StreamVideoCallbacks *callbacks, void *context) {
+void IHS_SessionSetVideoCallbacks(IHS_Session *session, const IHS_StreamVideoCallbacks *callbacks,
+                                  void *context) {
     IHS_BaseLock(&session->base);
+    unsigned tracked = callbacks ? !!callbacks->startTracked + !!callbacks->submitTracked +
+                                       !!callbacks->stopTracked
+                                 : 0;
+    session->invalidVideoCallbacks = tracked != 0 && tracked != 3;
     session->callbacks.video = callbacks;
     session->callbackContexts.video = context;
     IHS_BaseUnlock(&session->base);
 }
 
-void IHS_SessionSetInputCallbacks(IHS_Session *session, const IHS_StreamInputCallbacks *callbacks, void *context) {
+void IHS_SessionSetInputCallbacks(IHS_Session *session, const IHS_StreamInputCallbacks *callbacks,
+                                  void *context) {
     IHS_BaseLock(&session->base);
     session->callbacks.input = callbacks;
     session->callbackContexts.input = context;
     IHS_BaseUnlock(&session->base);
 }
 
-void IHS_SessionSetMicrophoneCallbacks(IHS_Session *session, const IHS_StreamMicrophoneCallbacks *callbacks,
+void IHS_SessionSetMicrophoneCallbacks(IHS_Session *session,
+                                       const IHS_StreamMicrophoneCallbacks *callbacks,
                                        void *context) {
     IHS_BaseLock(&session->base);
     session->callbacks.microphone = callbacks;
@@ -67,8 +77,10 @@ bool IHS_SessionSendMicrophoneData(IHS_Session *session, const uint8_t *data, si
     // No channel = server hasn't started mic (or already stopped). Caller should drop.
     // Looking it up each call keeps the function safe to invoke from any thread without
     // the caller having to track channel lifetime.
-    IHS_SessionChannel *mic = IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataMicrophone);
-    if (mic == NULL) return false;
+    IHS_SessionChannel *mic =
+        IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataMicrophone);
+    if (mic == NULL)
+        return false;
     return IHS_SessionChannelDataMicrophoneSend(mic, data, len);
 }
 
@@ -95,7 +107,7 @@ void IHS_SessionReportVideoFrameComplete(IHS_Session *session, uint16_t frameId,
     /* Stamp event 18 (Complete) ourselves before delegating, so the aggregator's
      * fold step can compute Client end-to-end and inter-frame interval. */
     IHS_FrameStatsRecordStage(session->frameStats, frameId,
-                              (IHS_VideoFrameStage) 18 /* k_EStreamFrameEventComplete */,
+                              (IHS_VideoFrameStage)18 /* k_EStreamFrameEventComplete */,
                               IHS_SessionPacketTimestamp());
     IHS_FrameStatsRecordComplete(session->frameStats, frameId, result);
 }
@@ -105,4 +117,19 @@ void IHS_SessionStatsSetFullReporting(IHS_Session *session, bool enabled) {
         return;
     }
     IHS_FrameStatsAggregatorSetFullReporting(session->frameStats, enabled);
+}
+
+bool IHS_SessionSetVideoTrackingIdentity(IHS_Session *session, uint64_t identity) {
+    if (!identity)
+        return false;
+    IHS_BaseLock(&session->base);
+    bool ok = !session->videoTrackingId && !session->base.worker && session->numChannels == 3;
+    if (ok) {
+        session->frameTracker = IHS_FrameTrackerCreate(identity);
+        ok = session->frameTracker != NULL;
+        if (ok)
+            session->videoTrackingId = identity;
+    }
+    IHS_BaseUnlock(&session->base);
+    return ok;
 }

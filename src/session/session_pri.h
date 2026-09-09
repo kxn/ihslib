@@ -1,23 +1,23 @@
 /*
- *  _____  _   _  _____  _  _  _     
- * |_   _|| | | |/  ___|| |(_)| |     Steam    
+ *  _____  _   _  _____  _  _  _
+ * |_   _|| | | |/  ___|| |(_)| |     Steam
  *   | |  | |_| |\ `--. | | _ | |__     In-Home
  *   | |  |  _  | `--. \| || || '_ \      Streaming
  *  _| |_ | | | |/\__/ /| || || |_) |       Library
  *  \___/ \_| |_/\____/ |_||_||_.__/
  *
  * Copyright (c) 2022 Mariotaku <https://github.com/mariotaku>.
- * 
+ *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
  * version 3 of the License, or (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * Lesser General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU Lesser General Public License
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  *
@@ -25,17 +25,17 @@
 
 #pragma once
 
-#include "ihslib/session.h"
-#include <stdatomic.h>
 #include "base.h"
+#include "clock.h"
+#include "ihslib/session.h"
 #include "packet.h"
 #include "retransmission.h"
-#include "clock.h"
+#include <stdatomic.h>
 
 #include "channels/channel.h"
 
-#include "protobuf/remoteplay.pb-c.h"
 #include "ihs_queue.h"
+#include "protobuf/remoteplay.pb-c.h"
 
 /**
  * Connection phase. Advances monotonically from Unconnected to Connected; never goes
@@ -47,8 +47,8 @@
  *   Connecting    - Connect packet sent on the discovery channel, waiting for ACK.
  *   Handshaking   - ConnectACK received, ClientHandshake sent, waiting for ServerHandshake.
  *   Authenticating- ServerHandshake received, AuthenticationRequest sent, waiting for response.
- *   Negotiating   - AuthenticationResponse = Succeeded, waiting for NegotiationInit / sending SetConfig.
- *   Connected     - NegotiationComplete sent, the stream is live.
+ *   Negotiating   - AuthenticationResponse = Succeeded, waiting for NegotiationInit / sending
+ * SetConfig. Connected     - NegotiationComplete sent, the stream is live.
  */
 typedef enum IHS_SessionConnectionState {
     IHS_SessionConnectionStateUnconnected,
@@ -104,6 +104,9 @@ struct IHS_Session {
     IHS_StreamClock clock;
     IHS_HIDManager *hidManager;
     struct IHS_FrameStatsAggregator *frameStats;
+    struct IHS_FrameTracker *frameTracker;
+    uint64_t videoTrackingId, nextVideoEpoch;
+    bool invalidVideoCallbacks;
     struct {
         const IHS_StreamSessionCallbacks *session;
         const IHS_StreamAudioCallbacks *audio;
@@ -120,7 +123,8 @@ struct IHS_Session {
     } callbackContexts;
 };
 
-#define IHS_SessionLog(session, level, tag, ...) IHS_BaseLog((IHS_Base*) (session), (level), (tag), __VA_ARGS__)
+#define IHS_SessionLog(session, level, tag, ...)                                                   \
+    IHS_BaseLog((IHS_Base *)(session), (level), (tag), __VA_ARGS__)
 
 void IHS_SessionInterrupt(IHS_Session *session);
 
@@ -135,7 +139,8 @@ bool IHS_SessionSendPacket(IHS_Session *session, IHS_SessionPacket *packet);
  */
 bool IHS_SessionQueuePacket(IHS_Session *session, IHS_SessionPacket *packet, bool retransmit);
 
-bool IHS_SessionSendControlMessage(IHS_Session *session, EStreamControlMessage type, const ProtobufCMessage *message);
+bool IHS_SessionSendControlMessage(IHS_Session *session, EStreamControlMessage type,
+                                   const ProtobufCMessage *message);
 
 /**
  * @return true if the session-state input flag is set. Outbound input/HID send sites should

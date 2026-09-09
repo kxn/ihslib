@@ -19,8 +19,12 @@ struct IHS_Thread {
     IHS_ThreadFunction *function;
     void *context;
 };
-struct IHS_Mutex { pthread_mutex_t mutex; };
-struct IHS_Cond { pthread_cond_t cond; };
+struct IHS_Mutex {
+    pthread_mutex_t mutex;
+};
+struct IHS_Cond {
+    pthread_cond_t cond;
+};
 
 static void *ThreadEntry(void *arg) {
     IHS_Thread *t = arg;
@@ -29,8 +33,10 @@ static void *ThreadEntry(void *arg) {
 }
 
 IHS_Thread *IHS_ThreadCreate(IHS_ThreadFunction *function, const char *name, void *context) {
-    (void) name;
+    (void)name;
     IHS_Thread *t = calloc(1, sizeof(IHS_Thread));
+    if (!t)
+        return NULL;
     t->function = function;
     t->context = context;
     if (pthread_create(&t->tid, NULL, ThreadEntry, t) != 0) {
@@ -41,25 +47,35 @@ IHS_Thread *IHS_ThreadCreate(IHS_ThreadFunction *function, const char *name, voi
 }
 
 void IHS_ThreadJoin(IHS_Thread *thread) {
-    if (thread == NULL) return;
+    if (thread == NULL)
+        return;
     pthread_join(thread->tid, NULL);
     free(thread);
 }
 
 IHS_Mutex *IHS_MutexCreate() {
     IHS_Mutex *m = calloc(1, sizeof(IHS_Mutex));
-    if (!m) return NULL;
+    if (!m)
+        return NULL;
     pthread_mutexattr_t attr;
-    if (pthread_mutexattr_init(&attr) != 0) { free(m); return NULL; }
+    if (pthread_mutexattr_init(&attr) != 0) {
+        free(m);
+        return NULL;
+    }
     int result = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-    if (result == 0) result = pthread_mutex_init(&m->mutex, &attr);
+    if (result == 0)
+        result = pthread_mutex_init(&m->mutex, &attr);
     pthread_mutexattr_destroy(&attr);
-    if (result != 0) { free(m); return NULL; }
+    if (result != 0) {
+        free(m);
+        return NULL;
+    }
     return m;
 }
 
 void IHS_MutexDestroy(IHS_Mutex *mutex) {
-    if (mutex == NULL) return;
+    if (mutex == NULL)
+        return;
     pthread_mutex_destroy(&mutex->mutex);
     free(mutex);
 }
@@ -74,12 +90,18 @@ bool IHS_MutexUnlock(IHS_Mutex *mutex) {
 
 IHS_Cond *IHS_CondCreate() {
     IHS_Cond *c = calloc(1, sizeof(IHS_Cond));
-    pthread_cond_init(&c->cond, NULL);
+    if (!c)
+        return NULL;
+    if (pthread_cond_init(&c->cond, NULL)) {
+        free(c);
+        return NULL;
+    }
     return c;
 }
 
 void IHS_CondDestroy(IHS_Cond *cond) {
-    if (cond == NULL) return;
+    if (cond == NULL)
+        return;
     pthread_cond_destroy(&cond->cond);
     free(cond);
 }

@@ -11,10 +11,15 @@ ihs_add_test(video_control test_video_control.c)
 target_link_libraries(ihstest_video_control PRIVATE ihs-test-session)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    ihs_add_test(video_tracked test_video_tracked.c)
+    target_link_libraries(ihstest_video_tracked PRIVATE ihs-test-session)
+    target_link_options(ihstest_video_tracked PRIVATE -Wl,--wrap=IHS_SessionSendControlMessage)
+    set_tests_properties(video_tracked PROPERTIES TIMEOUT 20)
     ihs_add_test(video_start_lifetime test_video_start_lifetime.c)
     target_link_libraries(ihstest_video_start_lifetime PRIVATE ihs-test-session)
     target_link_options(ihstest_video_start_lifetime PRIVATE
         -Wl,--wrap=calloc
+        -Wl,--wrap=malloc
         -Wl,--wrap=IHS_SessionSendControlMessage
         -Wl,--wrap=IHS_TimerTaskStart
         -Wl,--wrap=IHS_TimerTaskStopImmediate)

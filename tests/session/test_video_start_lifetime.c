@@ -1,13 +1,13 @@
 /* Exercise the real video worker and timer registration, including failures
  * after application start. Link wrappers affect only this test executable. */
+#include "ihs_timer.h"
+#include "ihslib.h"
+#include "session/channels/channel.h"
+#include "session/channels/video/ch_data_video.h"
+#include "session/session_pri.h"
+#include "test_session.h"
 #include <assert.h>
 #include <stdlib.h>
-#include "test_session.h"
-#include "ihslib.h"
-#include "ihs_timer.h"
-#include "session/session_pri.h"
-#include "session/channels/video/ch_data_video.h"
-#include "session/channels/channel.h"
 
 enum mode { SUCCESS, APP_FAIL, SCRATCH_FAIL, TIMER_FAIL, SEND_FAIL, NO_START };
 typedef struct {
@@ -16,21 +16,38 @@ typedef struct {
     IHS_TimerTask *timer;
 } fixture;
 static _Thread_local fixture *starting;
+static _Thread_local unsigned allocation, fail_allocation;
+static _Thread_local bool allocation_failed;
+static bool fail_creation(void) {
+    if (fail_allocation && ++allocation == fail_allocation) {
+        allocation_failed = true;
+        return true;
+    }
+    return false;
+}
+void *__real_malloc(size_t);
+void *__wrap_malloc(size_t bytes) {
+    return fail_creation() ? NULL : __real_malloc(bytes);
+}
 
 void *__real_calloc(size_t, size_t);
 void *__wrap_calloc(size_t count, size_t size) {
-    if (starting && starting->mode == SCRATCH_FAIL) return NULL;
+    if (fail_creation() || (starting && starting->mode == SCRATCH_FAIL))
+        return NULL;
     return __real_calloc(count, size);
 }
 
 IHS_TimerTask *__real_IHS_TimerTaskStart(IHS_Timer *, IHS_TimerRunFunction *,
-                                        IHS_TimerEndFunction *, uint64_t, void *);
+                                         IHS_TimerEndFunction *, uint64_t, void *);
 void __real_IHS_TimerTaskStopImmediate(IHS_TimerTask *);
-bool __real_IHS_SessionSendControlMessage(IHS_Session *, EStreamControlMessage, const ProtobufCMessage *);
+bool __real_IHS_SessionSendControlMessage(IHS_Session *, EStreamControlMessage,
+                                          const ProtobufCMessage *);
 IHS_TimerTask *__wrap_IHS_TimerTaskStart(IHS_Timer *timer, IHS_TimerRunFunction *run,
-                                        IHS_TimerEndFunction *end, uint64_t timeout, void *context) {
+                                         IHS_TimerEndFunction *end, uint64_t timeout,
+                                         void *context) {
     if (starting && timeout == 1000) {
-        if (starting->mode == TIMER_FAIL) return NULL;
+        if (starting->mode == TIMER_FAIL)
+            return NULL;
         IHS_TimerTask *task = __real_IHS_TimerTaskStart(timer, run, end, timeout, context);
         assert(task);
         starting->timer = task;
@@ -48,7 +65,7 @@ void __wrap_IHS_TimerTaskStopImmediate(IHS_TimerTask *task) {
     }
 }
 bool __wrap_IHS_SessionSendControlMessage(IHS_Session *session, EStreamControlMessage type,
-                                         const ProtobufCMessage *message) {
+                                          const ProtobufCMessage *message) {
     if (type == k_EStreamControlVideoDecoderInfo) {
         assert(starting);
         ++starting->sends;
@@ -75,7 +92,8 @@ static void check(enum mode mode) {
     fixture f = {.mode = mode};
     IHS_Session *session = IHS_TestSessionCreate();
     assert(session);
-    IHS_StreamVideoCallbacks callbacks = {.start = mode == NO_START ? NULL : on_start, .stop = on_stop};
+    IHS_StreamVideoCallbacks callbacks = {.start = mode == NO_START ? NULL : on_start,
+                                          .stop = on_stop};
     IHS_SessionSetVideoCallbacks(session, &callbacks, &f);
     CStartVideoDataMsg msg = CSTART_VIDEO_DATA_MSG__INIT;
     msg.channel = 3;
@@ -96,9 +114,42 @@ static void check(enum mode mode) {
     assert(f.sends == (mode == SUCCESS || mode == SEND_FAIL));
     IHS_SessionDestroy(session);
 }
+static void construction_failures(void) {
+    unsigned failures = 0;
+    for (unsigned point = 1; point <= 12; ++point) {
+        IHS_Session *session = IHS_TestSessionCreate();
+        assert(session);
+        CStartVideoDataMsg msg = CSTART_VIDEO_DATA_MSG__INIT;
+        msg.channel = 3;
+        msg.width = 1280;
+        msg.height = 720;
+        msg.codec = k_EStreamVideoCodecH264;
+        unsigned char extra[4] = {0, 0, 0, 1};
+        msg.has_codec_data = true;
+        msg.codec_data.data = extra;
+        msg.codec_data.len = sizeof(extra);
+        allocation = 0;
+        allocation_failed = false;
+        fail_allocation = point;
+        IHS_SessionChannel *channel = IHS_SessionChannelDataVideoCreate(session, &msg);
+        fail_allocation = 0;
+        if (allocation_failed) {
+            assert(!channel);
+            ++failures;
+        }
+        if (channel) {
+            IHS_SessionChannelStop(channel);
+            IHS_SessionChannelDestroy(channel);
+        }
+        IHS_SessionDestroy(session);
+    }
+    assert(failures >= 8); /* backing, locks, condition, window, worker allocation */
+}
 int main(void) {
     IHS_Init();
-    for (int i = SUCCESS; i <= NO_START; ++i) check((enum mode)i);
+    construction_failures();
+    for (int i = SUCCESS; i <= NO_START; ++i)
+        check((enum mode)i);
     IHS_Quit();
     return 0;
 }
