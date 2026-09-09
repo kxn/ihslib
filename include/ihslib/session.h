@@ -125,6 +125,10 @@ void IHS_SessionInterrupt(IHS_Session *session);
  */
 void IHS_SessionDisconnect(IHS_Session *session);
 
+/* Explicit user action only. Queues reliable StopRequest(129) while connected;
+ * success means queued, not that the host game has finished. */
+bool IHS_SessionStopGame(IHS_Session *session);
+
 /* True only after an explicit host StopRequest or transport Disconnect.
  * Local teardown, authentication failures and silence do not set this flag. */
 bool IHS_SessionHostRequestedStop(IHS_Session *session);

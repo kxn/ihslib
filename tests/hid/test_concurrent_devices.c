@@ -54,7 +54,13 @@ static void DeviceClose(IHS_HIDDevice *device);
 static int DeviceWrite(IHS_HIDDevice *device, const uint8_t *data, size_t dataLen);
 static int DeviceRead(IHS_HIDDevice *device, IHS_Buffer *dest, size_t length, uint32_t timeoutMs);
 
+static void DeviceOpened(IHS_HIDDevice *device) {
+    assert(device->managed);
+    /* A partially initialized output buffer must never be visible to readers. */
+    assert(IHS_HIDManagerFindDeviceByID(device->managed->manager, device->managed->id) == NULL);
+}
 static const IHS_HIDDeviceClass DeviceClass = {
+        .opened = DeviceOpened,
         .alloc = DeviceAlloc,
         .free = DeviceFree,
         .close = DeviceClose,

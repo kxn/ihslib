@@ -420,8 +420,29 @@ static void audio_reconfiguration(void) {
     }
     IHS_SessionDestroy(s);
 }
+static void explicit_stop_game(void) {
+    IHS_Session *s = session_new();
+    assert(!IHS_SessionStopGame(NULL));
+    assert(!IHS_SessionStopGame(s));
+    assert(IHS_QueuePoll(s->sendQueue) == NULL);
+    s->state.connectionState = IHS_SessionConnectionStateConnected;
+    assert(IHS_SessionStopGame(s));
+    IHS_QueueItem *q = IHS_QueuePoll(s->sendQueue);
+    assert(q && q->reliable && q->packet.header.channelId == 1);
+    assert(*IHS_BufferPointer(&q->packet.body) == 129);
+    IHS_SessionPacketClear(&q->packet, true); IHS_QueueItemFree(q);
+    assert(IHS_QueuePoll(s->sendQueue) == NULL);
+    IHS_SessionDisconnect(s);
+    while ((q = IHS_QueuePoll(s->sendQueue))) {
+        assert(q->packet.header.channelId != 1 ||
+               *IHS_BufferPointer(&q->packet.body) != 129);
+        IHS_SessionPacketClear(&q->packet, true); IHS_QueueItemFree(q);
+    }
+    IHS_SessionDestroy(s);
+}
 int main(void) {
     IHS_Init();
+    explicit_stop_game();
     gaps_and_wrap(); nack_layout(); decrypt_attempts(); clock_and_events();
     reliable_window_growth();
     lost_nack_recovery();

@@ -121,6 +121,20 @@ void IHS_SessionDisconnect(IHS_Session *session) {
     IHS_SessionChannelDiscoveryDisconnect(IHS_SessionChannelFor(session, IHS_SessionChannelIdDiscovery));
 }
 
+bool IHS_SessionStopGame(IHS_Session *session) {
+    if (!session) return false;
+    IHS_BaseLock(&session->base);
+    bool connected = session->state.connectionState == IHS_SessionConnectionStateConnected;
+    bool sent = false;
+    if (connected) {
+        CStopRequest request = CSTOP_REQUEST__INIT;
+        sent = IHS_SessionSendControlMessage(session, k_EStreamControlStopRequest,
+                                           (const ProtobufCMessage *) &request);
+    }
+    IHS_BaseUnlock(&session->base);
+    return sent;
+}
+
 void IHS_SessionThreadedJoin(IHS_Session *session) {
     IHS_BaseWaitWorker(&session->base);
 }

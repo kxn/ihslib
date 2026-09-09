@@ -93,7 +93,7 @@ void IHS_HIDManagerCloseAll(IHS_HIDManager *manager) {
 
 IHS_HIDManagedDevice *IHS_HIDManagerOpenDevice(IHS_HIDManager *manager, const char *path) {
     // Provider open callbacks can block on OS calls, so they run without devicesLock held;
-    // only the list append at the end is locked.
+    // only ID allocation and final list publication are locked.
     IHS_HIDDevice *device = NULL;
     for (size_t i = 0, j = manager->providers.size; i < j; ++i) {
         IHS_HIDProvider *provider = *((IHS_HIDProvider **) IHS_ArrayListGet(&manager->providers, i));
@@ -106,21 +106,24 @@ IHS_HIDManagedDevice *IHS_HIDManagerOpenDevice(IHS_HIDManager *manager, const ch
     managed->manager = manager;
     managed->device = device;
     managed->lock = IHS_MutexCreate();
+    /* Publish the back-pointer before poll snapshots can see this device. */
+    device->managed = managed;
     IHS_MutexLock(manager->devicesLock);
     managed->id = ++manager->lastDeviceId;
+    IHS_MutexUnlock(manager->devicesLock);
     IHS_HIDReportHolderInit(&managed->reportHolder, managed->id);
+    /* SDL's opened callback initializes state and the pending output buffer.
+     * Finish it before either poll or media snapshots can access the device. */
+    IHS_HIDManagedDeviceOpened(managed);
+    IHS_MutexLock(manager->devicesLock);
     IHS_ArrayListAppend(&manager->devices, &managed);
     IHS_MutexUnlock(manager->devicesLock);
-    device->managed = managed;
-    IHS_HIDManagedDeviceOpened(managed);
     return managed;
 }
 
 IHS_HIDManagedDevice *IHS_HIDManagerFindDeviceByID(IHS_HIDManager *manager, uint32_t id) {
-    // IDs are assigned monotonically under devicesLock, so the list stays sorted — but
-    // the closed flag means we can't use a plain binary search (a closed slot with the
-    // right ID would match and we'd hand back a dead pointer). Linear scan from the end
-    // finds recent devices fastest and naturally skips closed entries.
+    // Concurrent open callbacks can publish out of ID order. Scan newest first
+    // and skip closed slots; allocations remain alive until manager teardown.
     IHS_MutexLock(manager->devicesLock);
     IHS_HIDManagedDevice *result = NULL;
     for (int i = (int) manager->devices.size - 1; i >= 0; --i) {
