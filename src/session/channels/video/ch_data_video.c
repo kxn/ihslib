@@ -25,6 +25,7 @@
 
 #include <stdlib.h>
 #include <math.h>
+#include <stdatomic.h>
 
 #include "session/channels/ch_data.h"
 #include "ch_data_video.h"
@@ -49,7 +50,6 @@ typedef struct IHS_SessionChannelVideo {
     struct {
         uint16_t expectedSequence;
         uint16_t lastFrameId;
-        uint16_t frameCounter;
         uint64_t waitingKeyFrame;
         uint64_t lastStatsTime;
         bool frameStarted;
@@ -62,6 +62,8 @@ typedef struct IHS_SessionChannelVideo {
         IHS_StreamVideoFrameFlag flags;
     } frame;
     IHS_TimerTask *statsTimer;
+    atomic_uint_fast64_t frameCounter;
+    bool appStarted;
     IHS_Mutex *stateMutex;
 } IHS_SessionChannelVideo;
 
@@ -152,11 +154,14 @@ static void ChannelVideoInit(IHS_SessionChannel *channel, const void *config) {
     videoCh->stateMutex = IHS_MutexCreate();
     IHS_BufferInit(&videoCh->frame.buffer, 128 * 1024/*128KB*/, 2048 * 1024/*2MB*/);
     IHS_VideoPartialFramesInit(&videoCh->frame.partial);
+    atomic_init(&videoCh->frameCounter, 0);
     IHS_SessionChannelDataInit(channel, 2048);
 }
 
 static void ChannelVideoDeinit(IHS_SessionChannel *channel) {
     IHS_SessionChannelDataDeinit(channel);
+    /* The worker is joined; shared rollback is now safe and idempotent. */
+    DataStop(channel);
     IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *) channel;
     IHS_MutexDestroy(videoCh->stateMutex);
     if (videoCh->config.codecData) {
@@ -174,6 +179,7 @@ static bool DataStart(IHS_SessionChannel *channel) {
     if (callbacks->start(session, &videoCh->config, session->callbackContexts.video) != 0) {
         return false;
     }
+    videoCh->appStarted = true;
     CVideoDecoderInfoMsg message = CVIDEO_DECODER_INFO_MSG__INIT;
     message.info = "Marvell hardware decoding";
     PROTOBUF_C_SET_VALUE(message, threads, 1);
@@ -181,8 +187,15 @@ static bool DataStart(IHS_SessionChannel *channel) {
     videoCh->states.lastStatsTime = IHS_TimerNow();
     videoCh->statsTimer = IHS_TimerTaskStart(session->timers, ReportVideoStats, NULL, 1000, videoCh);
 
-    return IHS_SessionSendControlMessage(session, k_EStreamControlVideoDecoderInfo,
-                                         (const ProtobufCMessage *) &message);
+    if (!videoCh->statsTimer ||
+        !IHS_SessionSendControlMessage(session, k_EStreamControlVideoDecoderInfo,
+                                      (const ProtobufCMessage *) &message)) {
+        /* DataThreadWorker skips stop when start fails. Undo every successful
+         * stage here, before channel/session destruction can begin. */
+        DataStop(channel);
+        return false;
+    }
+    return true;
 }
 
 static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrameHeader *header, IHS_Buffer *body) {
@@ -266,7 +279,7 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
         videoCh->frame.flags = 0;
         videoCh->states.frameFinished = false;
         videoCh->states.frameStarted = false;
-        videoCh->states.frameCounter++;
+        atomic_fetch_add_explicit(&videoCh->frameCounter, 1, memory_order_relaxed);
     }
     CheckPartialOverflow(channel);
     unlock:
@@ -281,6 +294,8 @@ static void DataStop(IHS_SessionChannel *channel) {
         videoCh->statsTimer = NULL;
     }
     const IHS_StreamVideoCallbacks *callbacks = session->callbacks.video;
+    if (!videoCh->appStarted) return;
+    videoCh->appStarted = false;
     if (!callbacks || !callbacks->stop) return;
     callbacks->stop(session, session->callbackContexts.video);
 }
@@ -419,16 +434,15 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
     IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *) channel;
     IHS_Session *session = channel->session;
 
-    /* FPS log lives entirely under videoCh's lock since it touches frameCounter
-     * which is incremented inside the receive critical section. */
-    IHS_MutexLock(videoCh->stateMutex);
+    /* Timer callbacks run under timer locks. Never wait on the receive mutex:
+     * submit may wait for decoding/GPU work while holding that mutex.
+     * lastStatsTime belongs to this timer after DataStart publishes it. */
     uint64_t now = IHS_TimerNow();
     uint64_t elapsedMs = now - videoCh->states.lastStatsTime;
-    double fps = elapsedMs > 0 ? (videoCh->states.frameCounter * 1000.0) / (double) elapsedMs : 0.0;
+    uint64_t frames = atomic_exchange_explicit(&videoCh->frameCounter, 0, memory_order_relaxed);
+    double fps = elapsedMs > 0 ? (frames * 1000.0) / (double) elapsedMs : 0.0;
     IHS_SessionLog(channel->session, IHS_LogLevelVerbose, "Video", "%.2f FPS", fps);
-    videoCh->states.frameCounter = 0;
     videoCh->states.lastStatsTime = now;
-    IHS_MutexUnlock(videoCh->stateMutex);
 
     /* Drain the per-frame stats aggregator into the accumulator and ship one
      * CFrameStatsListMsg over the stats channel. Matches Steam's

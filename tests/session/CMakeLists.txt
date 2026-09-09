@@ -10,6 +10,16 @@ target_link_libraries(ihstest_disconnect_destroy PRIVATE ihs-test-session)
 ihs_add_test(video_control test_video_control.c)
 target_link_libraries(ihstest_video_control PRIVATE ihs-test-session)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    ihs_add_test(video_start_lifetime test_video_start_lifetime.c)
+    target_link_libraries(ihstest_video_start_lifetime PRIVATE ihs-test-session)
+    target_link_options(ihstest_video_start_lifetime PRIVATE
+        -Wl,--wrap=IHS_SessionSendControlMessage
+        -Wl,--wrap=IHS_TimerTaskStart
+        -Wl,--wrap=IHS_TimerTaskStopImmediate)
+    set_tests_properties(video_start_lifetime PROPERTIES TIMEOUT 20)
+endif()
+
 ihs_add_test(control_keyboard test_control_keyboard.c)
 target_link_libraries(ihstest_control_keyboard PRIVATE ihs-test-session)
 
