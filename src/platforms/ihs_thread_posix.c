@@ -48,11 +48,13 @@ void IHS_ThreadJoin(IHS_Thread *thread) {
 
 IHS_Mutex *IHS_MutexCreate() {
     IHS_Mutex *m = calloc(1, sizeof(IHS_Mutex));
+    if (!m) return NULL;
     pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-    pthread_mutex_init(&m->mutex, &attr);
+    if (pthread_mutexattr_init(&attr) != 0) { free(m); return NULL; }
+    int result = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    if (result == 0) result = pthread_mutex_init(&m->mutex, &attr);
     pthread_mutexattr_destroy(&attr);
+    if (result != 0) { free(m); return NULL; }
     return m;
 }
 

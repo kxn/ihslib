@@ -1,6 +1,7 @@
 /* Exercise the real video worker and timer registration, including failures
  * after application start. Link wrappers affect only this test executable. */
 #include <assert.h>
+#include <stdlib.h>
 #include "test_session.h"
 #include "ihslib.h"
 #include "ihs_timer.h"
@@ -8,13 +9,19 @@
 #include "session/channels/video/ch_data_video.h"
 #include "session/channels/channel.h"
 
-enum mode { SUCCESS, APP_FAIL, TIMER_FAIL, SEND_FAIL, NO_START };
+enum mode { SUCCESS, APP_FAIL, SCRATCH_FAIL, TIMER_FAIL, SEND_FAIL, NO_START };
 typedef struct {
     enum mode mode;
     int starts, stops, timers, cancels, sends;
     IHS_TimerTask *timer;
 } fixture;
 static _Thread_local fixture *starting;
+
+void *__real_calloc(size_t, size_t);
+void *__wrap_calloc(size_t count, size_t size) {
+    if (starting && starting->mode == SCRATCH_FAIL) return NULL;
+    return __real_calloc(count, size);
+}
 
 IHS_TimerTask *__real_IHS_TimerTaskStart(IHS_Timer *, IHS_TimerRunFunction *,
                                         IHS_TimerEndFunction *, uint64_t, void *);

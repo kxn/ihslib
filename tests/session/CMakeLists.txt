@@ -14,6 +14,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     ihs_add_test(video_start_lifetime test_video_start_lifetime.c)
     target_link_libraries(ihstest_video_start_lifetime PRIVATE ihs-test-session)
     target_link_options(ihstest_video_start_lifetime PRIVATE
+        -Wl,--wrap=calloc
         -Wl,--wrap=IHS_SessionSendControlMessage
         -Wl,--wrap=IHS_TimerTaskStart
         -Wl,--wrap=IHS_TimerTaskStopImmediate)
@@ -44,3 +45,20 @@ target_link_libraries(ihstest_game_activity PRIVATE ihs-test-session)
 
 ihs_add_test(launch_transactions test_launch_transactions.c)
 target_link_libraries(ihstest_launch_transactions PRIVATE ihs-test-session)
+
+ihs_add_test(frame_tracker test_frame_tracker.c)
+set_tests_properties(frame_tracker PROPERTIES TIMEOUT 20)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(ihstest_frame_tracker PRIVATE IHS_TEST_ALLOC_FAILURE)
+    target_link_options(ihstest_frame_tracker PRIVATE -Wl,--wrap=calloc)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    ihs_add_test(video_report test_video_report.c)
+    target_link_libraries(ihstest_video_report PRIVATE ihs-test-session)
+    target_link_options(ihstest_video_report PRIVATE
+        -Wl,--wrap=IHS_SessionSendControlMessage
+        -Wl,--wrap=IHS_TimerTaskStart
+        -Wl,--wrap=IHS_SessionChannelStatsSend)
+    set_tests_properties(video_report PROPERTIES TIMEOUT 20)
+endif()

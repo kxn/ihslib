@@ -44,6 +44,14 @@
 #include "frame_h264.h"
 #include "frame_hevc.h"
 
+/* Reserved once per channel, before registering the report timer. */
+typedef struct VideoReportScratch {
+    CFrameStats frames[IHS_FRAME_STATS_RING_SIZE];
+    CFrameStats *framePointers[IHS_FRAME_STATS_RING_SIZE];
+    CFrameEvent events[IHS_FRAME_STATS_RING_SIZE * IHS_FRAME_STATS_EVENT_COUNT];
+    CFrameEvent *eventPointers[IHS_FRAME_STATS_RING_SIZE * IHS_FRAME_STATS_EVENT_COUNT];
+} VideoReportScratch;
+
 typedef struct IHS_SessionChannelVideo {
     IHS_SessionChannelData base;
     IHS_StreamVideoConfig config;
@@ -64,6 +72,7 @@ typedef struct IHS_SessionChannelVideo {
     IHS_TimerTask *statsTimer;
     atomic_uint_fast64_t frameCounter;
     bool appStarted;
+    VideoReportScratch *reportScratch;
     IHS_Mutex *stateMutex;
 } IHS_SessionChannelVideo;
 
@@ -184,6 +193,11 @@ static bool DataStart(IHS_SessionChannel *channel) {
     message.info = "Marvell hardware decoding";
     PROTOBUF_C_SET_VALUE(message, threads, 1);
 
+    videoCh->reportScratch = calloc(1, sizeof(*videoCh->reportScratch));
+    if (!videoCh->reportScratch) {
+        DataStop(channel);
+        return false;
+    }
     videoCh->states.lastStatsTime = IHS_TimerNow();
     videoCh->statsTimer = IHS_TimerTaskStart(session->timers, ReportVideoStats, NULL, 1000, videoCh);
 
@@ -294,8 +308,11 @@ static void DataStop(IHS_SessionChannel *channel) {
         videoCh->statsTimer = NULL;
     }
     const IHS_StreamVideoCallbacks *callbacks = session->callbacks.video;
+    free(videoCh->reportScratch);
+    videoCh->reportScratch = NULL;
     if (!videoCh->appStarted) return;
     videoCh->appStarted = false;
+    if (session->frameStats) IHS_FrameStatsReportAbandon(session->frameStats);
     if (!callbacks || !callbacks->stop) return;
     callbacks->stop(session, session->callbackContexts.video);
 }
@@ -451,29 +468,17 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
     if (session->frameStats == NULL) {
         return 1000;
     }
-    uint16_t latest = 0;
-    IHS_FrameStatsSlot drained[IHS_FRAME_STATS_RING_SIZE];
-    size_t folded = IHS_FrameStatsAggregatorDrainSlots(session->frameStats, drained,
-                                                       IHS_FRAME_STATS_RING_SIZE, &latest);
-    if (folded == 0) {
-        return 1000;
-    }
     IHS_SessionChannel *stats = IHS_SessionChannelFor(session, IHS_SessionChannelIdStats);
-    if (stats == NULL) {
-        return 1000;
-    }
-
+    if (stats == NULL) return 1000;
+    const IHS_FrameStatsReport *report = IHS_FrameStatsReportBegin(session->frameStats);
+    if (!report) return 1000;
     CFrameStatsListMsg message = CFRAME_STATS_LIST_MSG__INIT;
     message.data_type = k_EStreamingVideoData;
-    message.latest_frame_id = latest;
-
-    /* The drain populated the accumulator; snapshot it and the RX-controlled
-     * reporting flag under their lock before building protobuf rows. */
-    IHS_MutexLock(session->frameStats->lock);
-    IHS_FrameStatsAccumulator accumSnapshot = session->frameStats->accumulator;
-    bool fullReporting = session->frameStats->fullReporting;
-    IHS_MutexUnlock(session->frameStats->lock);
-    IHS_FrameStatsAccumulator *accum = &accumSnapshot;
+    message.latest_frame_id = report->latestFrameId;
+    bool fullReporting = report->fullReporting;
+    size_t folded = report->count;
+    const IHS_FrameStatsSlot *drained = report->frames;
+    const IHS_FrameStatsAccumulator *accum = &report->accumulator;
     CFrameStatAccumulatedValue accumRows[IHS_FRAME_STATS_ACCUM_SLOTS];
     CFrameStatAccumulatedValue *accumPtrs[IHS_FRAME_STATS_ACCUM_SLOTS];
     size_t rowCount = 0;
@@ -506,14 +511,11 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
     /* Save(stats, true, clockOffset), 0x7a8470: first event translated to
      * peer time, subsequent events delta-coded against the last emitted event. */
     int32_t clockOffset = IHS_StreamClockOffset(&session->clock);
-    CFrameStats *frameRows = calloc(IHS_FRAME_STATS_RING_SIZE, sizeof(*frameRows));
-    CFrameEvent *eventRows = calloc(IHS_FRAME_STATS_RING_SIZE * IHS_FRAME_STATS_EVENT_COUNT, sizeof(*eventRows));
-    CFrameEvent **eventPtrs = calloc(IHS_FRAME_STATS_RING_SIZE * IHS_FRAME_STATS_EVENT_COUNT, sizeof(*eventPtrs));
-    CFrameStats **framePtrs = calloc(IHS_FRAME_STATS_RING_SIZE, sizeof(*framePtrs));
-    if (!frameRows || !eventRows || !eventPtrs || !framePtrs) {
-        free(frameRows); free(eventRows); free(eventPtrs); free(framePtrs);
-        return 1000;
-    }
+    VideoReportScratch *scratch = videoCh->reportScratch;
+    CFrameStats *frameRows = scratch->frames;
+    CFrameEvent *eventRows = scratch->events;
+    CFrameEvent **eventPtrs = scratch->eventPointers;
+    CFrameStats **framePtrs = scratch->framePointers;
     size_t frameCount = 0;
     size_t eventCount = 0;
     if (fullReporting) {
@@ -545,11 +547,9 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
         message.stats = framePtrs;
     }
 
-    IHS_SessionChannelStatsSend(stats, k_EStreamStatsFrameEvents, (const ProtobufCMessage *) &message,
-                                IHS_PACKET_ID_NEXT);
-    free(frameRows); free(eventRows); free(eventPtrs); free(framePtrs);
-    IHS_MutexLock(session->frameStats->lock);
-    IHS_FrameStatsAccumulatorReset(&session->frameStats->accumulator);
-    IHS_MutexUnlock(session->frameStats->lock);
+    if (IHS_SessionChannelStatsSend(stats, k_EStreamStatsFrameEvents,
+                                   (const ProtobufCMessage *) &message, IHS_PACKET_ID_NEXT)) {
+        IHS_FrameStatsReportCommit(session->frameStats, report->serial);
+    }
     return 1000;
 }

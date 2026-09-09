@@ -234,10 +234,9 @@ static void fold_slot(IHS_FrameStatsAggregator *agg, IHS_FrameStatsSlot *slot) {
      * left out of this MVP; when those signals land they can fold in here. */
 }
 
-static size_t FrameStatsDrainCore(IHS_FrameStatsAggregator *agg, IHS_FrameStatsSlot *out,
+static size_t FrameStatsDrainLocked(IHS_FrameStatsAggregator *agg, IHS_FrameStatsSlot *out,
                                   size_t max, uint16_t *outLatestFrameId) {
     size_t folded = 0;
-    IHS_MutexLock(agg->lock);
 
     uint16_t lastSent = agg->lastSentFrameId;
     uint16_t lastDisplayed = agg->lastDisplayedFrameId;
@@ -265,8 +264,56 @@ static size_t FrameStatsDrainCore(IHS_FrameStatsAggregator *agg, IHS_FrameStatsS
     if (outLatestFrameId != NULL) {
         *outLatestFrameId = lastSent;
     }
-    IHS_MutexUnlock(agg->lock);
     return folded;
+}
+
+static size_t FrameStatsDrainCore(IHS_FrameStatsAggregator *agg, IHS_FrameStatsSlot *out,
+                                  size_t max, uint16_t *latest) {
+    IHS_MutexLock(agg->lock);
+    size_t count = FrameStatsDrainLocked(agg, out, max, latest);
+    IHS_MutexUnlock(agg->lock);
+    return count;
+}
+
+const IHS_FrameStatsReport *IHS_FrameStatsReportBegin(IHS_FrameStatsAggregator *agg) {
+    IHS_MutexLock(agg->lock);
+    IHS_FrameStatsReport *report = &agg->pendingReport;
+    if (!agg->reportPending && agg->reportSerial != UINT64_MAX) {
+        report->count = FrameStatsDrainLocked(agg, report->frames,
+            IHS_FRAME_STATS_RING_SIZE, &report->latestFrameId);
+        if (report->count) {
+            report->serial = ++agg->reportSerial;
+            report->accumulator = agg->accumulator;
+            report->fullReporting = agg->fullReporting;
+            IHS_FrameStatsAccumulatorReset(&agg->accumulator);
+            agg->reportPending = true;
+        }
+    }
+    bool pending = agg->reportPending;
+    IHS_MutexUnlock(agg->lock);
+    return pending ? report : NULL;
+}
+
+bool IHS_FrameStatsReportCommit(IHS_FrameStatsAggregator *agg, uint64_t serial) {
+    IHS_MutexLock(agg->lock);
+    bool ok = agg->reportPending && agg->pendingReport.serial == serial;
+    if (ok) {
+        agg->lastQueuedFrameId = agg->pendingReport.latestFrameId;
+        agg->reportPending = false;
+    }
+    IHS_MutexUnlock(agg->lock);
+    return ok;
+}
+
+void IHS_FrameStatsReportAbandon(IHS_FrameStatsAggregator *agg) {
+    IHS_MutexLock(agg->lock);
+    if (agg->reportPending) {
+        uint64_t count = agg->pendingReport.count;
+        agg->closedUnsentFrames = UINT64_MAX - agg->closedUnsentFrames < count ?
+            UINT64_MAX : agg->closedUnsentFrames + count;
+        agg->reportPending = false;
+    }
+    IHS_MutexUnlock(agg->lock);
 }
 
 size_t IHS_FrameStatsAggregatorDrain(IHS_FrameStatsAggregator *agg, uint16_t *outLatestFrameId) {

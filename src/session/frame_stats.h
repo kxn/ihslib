@@ -81,6 +81,15 @@ typedef struct IHS_FrameStatsAccumulator {
  */
 #define IHS_FRAME_STATS_RING_SIZE 128
 
+typedef struct IHS_FrameStatsReport {
+    uint64_t serial;
+    IHS_FrameStatsAccumulator accumulator;
+    IHS_FrameStatsSlot frames[IHS_FRAME_STATS_RING_SIZE];
+    size_t count;
+    uint16_t latestFrameId;
+    bool fullReporting;
+} IHS_FrameStatsReport;
+
 typedef struct IHS_FrameStatsAggregator {
     IHS_Mutex *lock;
     IHS_FrameStatsSlot ring[IHS_FRAME_STATS_RING_SIZE];
@@ -89,6 +98,12 @@ typedef struct IHS_FrameStatsAggregator {
     uint16_t lastDisplayedFrameId;
     uint32_t lastFrameTimestamp;    /* event 18 of the previous *completed* frame */
     bool fullReporting;             /* mirrors CStreamClient::sendFullFrameStats */
+
+    IHS_FrameStatsReport pendingReport;
+    uint64_t reportSerial;
+    bool reportPending;
+    uint16_t lastQueuedFrameId;     /* queue acceptance, separate from ring drain */
+    uint64_t closedUnsentFrames;
 
 } IHS_FrameStatsAggregator;
 
@@ -154,3 +169,13 @@ void IHS_FrameStatsRecordReceived(IHS_FrameStatsAggregator *agg, uint16_t frameI
 size_t IHS_FrameStatsAggregatorDrain(IHS_FrameStatsAggregator *agg, uint16_t *outLatestFrameId);
 
 void IHS_FrameStatsAccumulatorReset(IHS_FrameStatsAccumulator *accum);
+
+/* One report consumer, excluded from destruction. The borrowed snapshot stays
+ * immutable until that consumer commits it; failed enqueue retries the same
+ * serial. Receive/settle continue accumulating in the next interval. Do not mix
+ * legacy Drain/Reset with this transactional reporting API. */
+const IHS_FrameStatsReport *IHS_FrameStatsReportBegin(IHS_FrameStatsAggregator *);
+bool IHS_FrameStatsReportCommit(IHS_FrameStatsAggregator *, uint64_t serial);
+/* Exclude the report consumer first (stop its timer); never replay an old
+ * channel's failed report from a replacement channel. */
+void IHS_FrameStatsReportAbandon(IHS_FrameStatsAggregator *);
