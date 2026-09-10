@@ -375,9 +375,18 @@ static void diagnostic_and_header_bounds(void) {
     IHS_BufferClear(&b, true);
     IHS_SessionDestroy(s);
 }
-static void negotiation_capabilities(void) {
+static void configure_quality(IHS_Session *s, IHS_SessionConfig *c, void *context) {
+    (void)s;
+    *c = *(IHS_SessionConfig *)context;
+}
+static void negotiation_capabilities(int preference, unsigned bitrate, int expected) {
     IHS_Session *s = session_new();
     s->state.connectionState = IHS_SessionConnectionStateNegotiating;
+    IHS_SessionConfig requested = {.enableAudio = true, .maxWidth = 1280, .maxHeight = 720,
+        .maxFps = 60, .maxBitrateKbps = bitrate, .quality = (IHS_StreamQuality)preference};
+    IHS_StreamSessionCallbacks callbacks = {.configuring = configure_quality};
+    s->callbacks.session = &callbacks;
+    s->callbackContexts.session = &requested;
     CNegotiationInitMsg message = CNEGOTIATION_INIT_MSG__INIT;
     message.has_reliable_data = true; message.reliable_data = true;
     message.has_supports_remote_hid = true; message.supports_remote_hid = true;
@@ -399,6 +408,12 @@ static void negotiation_capabilities(void) {
     assert(config->config->has_reliable_data && !config->config->reliable_data);
     assert(config->config->enable_remote_hid && !config->config->enable_touch_input);
     assert(config->config->selected_video_codec == k_EStreamVideoCodecH264);
+    CStreamingClientConfig *client = config->streaming_client_config;
+    assert(client && client->has_quality && (int)client->quality == expected);
+    assert(client->has_desired_bitrate_kbps && client->desired_bitrate_kbps == (int)bitrate);
+    assert(client->desired_resolution_x == 1280 && client->desired_resolution_y == 720);
+    assert(client->desired_framerate_numerator == 60 && client->desired_framerate_denominator == 1);
+    assert(!client->enable_video_hevc);
     cnegotiation_set_config_msg__free_unpacked(config, NULL);
     IHS_BufferClear(&plain, true); IHS_BufferClear(&body, true);
     IHS_SessionPacketClear(&q->packet, true); IHS_QueueItemFree(q);
@@ -450,7 +465,13 @@ int main(void) {
     handshake_unconnected_probe();
     session_feedback_and_early_data();
     diagnostic_and_header_bounds();
-    negotiation_capabilities(); audio_reconfiguration();
+    const int preferences[] = {0, 1, 2, 3, -1, 99};
+    const int expected[] = {2, 1, 2, 3, 2, 2}; /* Protocol values, independent of public enum. */
+    for (unsigned i = 0; i < sizeof(preferences)/sizeof(preferences[0]); ++i) {
+        negotiation_capabilities(preferences[i], 6000, expected[i]);
+        negotiation_capabilities(preferences[i], 20000, expected[i]);
+    }
+    audio_reconfiguration();
     IHS_Quit();
     puts("assembly-derived protocol regressions OK");
 }

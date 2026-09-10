@@ -40,6 +40,14 @@ typedef struct IHS_SessionInfo {
     uint64_t steamId;
 } IHS_SessionInfo;
 
+/** Encoding preference, independent of bitrate/resolution limits. Zero uses Balanced. */
+typedef enum IHS_StreamQuality {
+    IHS_StreamQualityDefault = 0,
+    IHS_StreamQualityFast = 1,
+    IHS_StreamQualityBalanced = 2,
+    IHS_StreamQualityBeautiful = 3,
+} IHS_StreamQuality;
+
 typedef struct IHS_SessionConfig {
     bool enableAudio;
     bool enableHevc;
@@ -48,6 +56,7 @@ typedef struct IHS_SessionConfig {
     uint32_t maxHeight;
     uint32_t maxFps;
     uint32_t maxBitrateKbps;
+    IHS_StreamQuality quality;
 } IHS_SessionConfig;
 
 /** Monotonic counters and current occupancy for the reliable transport and the

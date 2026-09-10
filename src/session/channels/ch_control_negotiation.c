@@ -99,6 +99,13 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
     if (ihsConf.maxBitrateKbps == 0) {
         ihsConf.maxBitrateKbps = 15000;
     }
+    EStreamQualityPreference quality = k_EStreamQualityBalanced;
+    switch (ihsConf.quality) {
+        case IHS_StreamQualityFast: quality = k_EStreamQualityFast; break;
+        case IHS_StreamQualityBeautiful: quality = k_EStreamQualityBeautiful; break;
+        default: break; /* Default, Balanced and invalid caller values. */
+    }
+    IHS_SessionLog(session, IHS_LogLevelInfo, "Negotiation", "Encoding quality preference=%d", quality);
     IHS_SessionLog(session, IHS_LogLevelInfo, "Negotiation", "Requesting at most %ux%u @ %u fps, %u kbps%s%s",
                    ihsConf.maxWidth, ihsConf.maxHeight, ihsConf.maxFps, ihsConf.maxBitrateKbps,
                    ihsConf.enableHevc ? ", HEVC" : "", ihsConf.enableAudio ? ", audio" : "");
@@ -207,7 +214,7 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
     PROTOBUF_C_SET_VALUE(clientConfig, enable_video_streaming, true);
     PROTOBUF_C_SET_VALUE(clientConfig, desired_framerate_numerator, ihsConf.maxFps);
     PROTOBUF_C_SET_VALUE(clientConfig, desired_framerate_denominator, 1);
-    PROTOBUF_C_SET_VALUE(clientConfig, quality, k_EStreamQualityBalanced);
+    PROTOBUF_C_SET_VALUE(clientConfig, quality, quality);
     PROTOBUF_C_SET_VALUE(clientConfig, desired_bitrate_kbps, ihsConf.maxBitrateKbps);
     if (ihsConf.enableHevc) {
         PROTOBUF_C_SET_VALUE(clientConfig, enable_video_hevc, true);
