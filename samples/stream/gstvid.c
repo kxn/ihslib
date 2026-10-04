@@ -40,14 +40,15 @@ static void Stop(IHS_Session *session, void *context) {
     gst_object_unref(pipeline);
 }
 
-static int Submit(IHS_Session *session, IHS_Buffer *data, IHS_StreamVideoFrameFlag flags, void *context) {
+static IHS_StreamVideoSubmitResult Submit(IHS_Session *session, uint16_t frameId, IHS_Buffer *data,
+                                          IHS_StreamVideoFrameFlag flags, void *context) {
     g_assert(data->data != NULL);
     GstBuffer *buf = gst_buffer_new_wrapped_full(0, data->data, data->capacity, data->offset,
                                                  data->size, data->data, g_free);
     IHS_BufferReleaseOwnership(data);
     GstFlowReturn ret = gst_app_src_push_buffer(source, buf);
     g_assert(ret == GST_FLOW_OK);
-    return 0;
+    return IHS_StreamVideoSubmitOK;
 }
 
 
