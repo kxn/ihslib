@@ -127,3 +127,10 @@ static void AddressToSDL(const IHS_SocketAddress *ihs, IPaddress *sdl) {
     SDL_memcpy(&sdl->host, ihs->ip.v4.data, 4);
     sdl->port = SDL_SwapBE16(ihs->port);
 }
+
+size_t IHS_UDPBroadcastAddresses(IHS_IPAddress *out, size_t max) {
+    /* SDL_net can't enumerate interfaces; discovery uses 255.255.255.255 only. */
+    (void) out;
+    (void) max;
+    return 0;
+}

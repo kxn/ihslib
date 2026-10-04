@@ -36,6 +36,13 @@
 #include <fcntl.h>
 #include <errno.h>
 
+#ifdef __SWITCH__
+#include <switch.h>
+#else
+#include <ifaddrs.h>
+#include <net/if.h>
+#endif
+
 #include <assert.h>
 
 struct IHS_UDPSocket {
@@ -186,4 +193,51 @@ static size_t AddressToSys(const IHS_SocketAddress *ihs, struct sockaddr_storage
             return -1;
         }
     }
+}
+
+static size_t AddBroadcastAddress(IHS_IPAddress *out, size_t n, size_t max, uint32_t addressNetOrder) {
+    if (n >= max || addressNetOrder == 0 || addressNetOrder == 0xFFFFFFFFu) {
+        return n;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (memcmp(out[i].v4.data, &addressNetOrder, 4) == 0) {
+            return n;
+        }
+    }
+    out[n].v4.family = IHS_IPAddressFamilyIPv4;
+    memcpy(out[n].v4.data, &addressNetOrder, 4);
+    return n + 1;
+}
+
+size_t IHS_UDPBroadcastAddresses(IHS_IPAddress *out, size_t max) {
+    size_t n = 0;
+#ifdef __SWITCH__
+    /* No getifaddrs() on Horizon; nifm knows the current connection. nifm's
+     * service is reference counted, so this doesn't disturb the application. */
+    if (max == 0 || R_FAILED(nifmInitialize(NifmServiceType_User))) {
+        return 0;
+    }
+    u32 address = 0, mask = 0, gateway = 0, dns1 = 0, dns2 = 0;
+    if (R_SUCCEEDED(nifmGetCurrentIpConfigInfo(&address, &mask, &gateway, &dns1, &dns2)) &&
+        address != 0) {
+        /* Both in network byte order. */
+        n = AddBroadcastAddress(out, n, max, address | ~mask);
+    }
+    nifmExit();
+#else
+    struct ifaddrs *list = NULL;
+    if (getifaddrs(&list) != 0) {
+        return 0;
+    }
+    for (struct ifaddrs *ifa = list; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_INET ||
+            !(ifa->ifa_flags & IFF_UP) || !(ifa->ifa_flags & IFF_BROADCAST) ||
+            ifa->ifa_broadaddr == NULL) {
+            continue;
+        }
+        n = AddBroadcastAddress(out, n, max, ((const struct sockaddr_in *) ifa->ifa_broadaddr)->sin_addr.s_addr);
+    }
+    freeifaddrs(list);
+#endif
+    return n;
 }
