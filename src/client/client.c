@@ -35,6 +35,7 @@
 #include "endianness.h"
 #include "ihs_buffer.h"
 #include "ihs_buffer_ext.h"
+#include "ihs_udp.h"
 #include "protobuf/discovery.pb-c.h"
 #include "protobuf/pb_utils.h"
 
@@ -86,6 +87,14 @@ IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config) {
 
 void IHS_ClientSetLogFunction(IHS_Client *client, IHS_LogFunction *logFunction) {
     IHS_BaseSetLogFunction(&client->base, logFunction);
+}
+
+void IHS_ClientGetSecretKey(IHS_Client *client, uint8_t *secretKey) {
+    IHS_BaseGetSecretKey(&client->base, secretKey);
+}
+
+void IHS_ClientSetSecretKey(IHS_Client *client, const uint8_t *secretKey) {
+    IHS_BaseSetSecretKey(&client->base, secretKey);
 }
 
 void IHS_ClientStop(IHS_Client *client) {
@@ -161,9 +170,19 @@ bool IHS_ClientSend(IHS_Client *client, IHS_SocketAddress address, ERemoteClient
 
 bool IHS_ClientBroadcast(IHS_Client *client, ERemoteClientBroadcastMsg type,
                          ProtobufCMessage *message) {
-    static const IHS_SocketAddress address = {
+    IHS_SocketAddress address = {
         {.v4 = {IHS_IPAddressFamilyIPv4, {0xFF, 0xFF, 0xFF, 0xFF}}}, 27036};
-    return IHS_ClientSend(client, address, type, message);
+    bool sent = IHS_ClientSend(client, address, type, message);
+    /* 255.255.255.255 alone doesn't reach Steam hosts from every device and
+     * network; send to each local subnet's broadcast address as well. Hosts
+     * answer every copy, discovery already handles repeated status. */
+    IHS_IPAddress directed[8];
+    size_t count = IHS_UDPBroadcastAddresses(directed, sizeof(directed) / sizeof(directed[0]));
+    for (size_t i = 0; i < count; i++) {
+        address.ip = directed[i];
+        sent = IHS_ClientSend(client, address, type, message) || sent;
+    }
+    return sent;
 }
 
 static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data) {

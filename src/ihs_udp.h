@@ -25,6 +25,8 @@
 
 #pragma once
 
+#include <stddef.h>
+
 #include "ihslib/common.h"
 #include "ihslib/buffer.h"
 
@@ -52,3 +54,13 @@ bool IHS_UDPSocketSend(IHS_UDPSocket *s, const IHS_UDPPacket *packet);
 bool IHS_UDPSocketSetBlocking(IHS_UDPSocket *s, bool blocking);
 
 bool IHS_UDPSocketSetRecvTimeout(IHS_UDPSocket *s, uint32_t timeoutUs);
+
+/**
+ * Directed broadcast addresses (e.g. 192.168.1.255) of the local IPv4 networks.
+ *
+ * Discovery sent to 255.255.255.255 alone doesn't reach Steam hosts from every device and
+ * network: from a Nintendo Switch only the subnet broadcast was answered.
+ *
+ * @return number of addresses written to out
+ */
+size_t IHS_UDPBroadcastAddresses(IHS_IPAddress *out, size_t max);

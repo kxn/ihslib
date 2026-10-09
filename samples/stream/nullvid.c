@@ -8,9 +8,10 @@ static int Start(IHS_Session *session, const IHS_StreamVideoConfig *config, void
 static void Stop(IHS_Session *session, void *context) {
 }
 
-static int Submit(IHS_Session *session, IHS_Buffer *data, IHS_StreamVideoFrameFlag flags, void *context) {
+static IHS_StreamVideoSubmitResult Submit(IHS_Session *session, uint16_t frameId, IHS_Buffer *data,
+                                          IHS_StreamVideoFrameFlag flags, void *context) {
 
-    return 0;
+    return IHS_StreamVideoSubmitOK;
 }
 
 
