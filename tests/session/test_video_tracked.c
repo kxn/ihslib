@@ -15,7 +15,8 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ready = PTHREAD_COND_INITIALIZER;
 static bool initialized;
 static unsigned starts, stops, submits;
-static IHS_FrameTicket *held[4];
+static IHS_FrameTicket *held[8];
+static IHS_StreamVideoSubmitResult nextResult = IHS_StreamVideoSubmitOK;
 static IHS_VideoEpochInfo active;
 static int start(IHS_Session *s, const IHS_VideoEpochInfo *epoch, const IHS_StreamVideoConfig *c,
                  void *ctx) {
@@ -33,6 +34,8 @@ bool __wrap_IHS_SessionSendControlMessage(IHS_Session *s, EStreamControlMessage 
     if (type != k_EStreamControlVideoDecoderInfo)
         return __real_IHS_SessionSendControlMessage(s, type, m);
     pthread_mutex_lock(&lock);
+    const CVideoDecoderInfoMsg *decoder = (const CVideoDecoderInfoMsg *)m;
+    assert(!decoder->info && !decoder->has_threads); /* generic defaults are unknown */
     initialized = true;
     pthread_cond_signal(&ready);
     pthread_mutex_unlock(&lock);
@@ -50,11 +53,15 @@ static IHS_StreamVideoSubmitResult submit(IHS_Session *s, const IHS_VideoEpochIn
     if (!submits)
         assert(id == 65535 && b->size == 3 && !memcmp(IHS_BufferPointer(b), "abc", 3));
     else
-        assert(id == 1 && b->size == 1 && *IHS_BufferPointer(b) == 'z');
-    assert(submits < 4 && IHS_FrameTicketRetain(ticket));
+        assert(b->size == 1 && *IHS_BufferPointer(b) == 'z');
+    static const uint16_t expectedIds[] = {65535, 1, 2, 4, 1};
+    assert(submits < sizeof(expectedIds) / sizeof(expectedIds[0]) && id == expectedIds[submits]);
+    assert(submits < 8 && IHS_FrameTicketRetain(ticket));
     held[submits++] = ticket;
     *taken = true;
-    return IHS_StreamVideoSubmitOK;
+    IHS_StreamVideoSubmitResult result = nextResult;
+    nextResult = IHS_StreamVideoSubmitOK;
+    return result;
 }
 static void stop(IHS_Session *s, const IHS_VideoEpochInfo *epoch, void *ctx) {
     (void)s;
@@ -109,6 +116,13 @@ int main(void) {
     assert(submits == 1);
     fragment(ch, 1, 5, VideoFrameFlagKeyFrame | VideoFrameFlagFrameFinish, 'z');
     assert(submits == 2);
+    nextResult = IHS_StreamVideoSubmitReportLost;
+    fragment(ch, 2, 6, VideoFrameFlagFrameFinish, 'z');
+    assert(submits == 3);
+    fragment(ch, 3, 7, VideoFrameFlagFrameFinish, 'z');
+    assert(submits == 3); /* intact sequence still waits for a keyframe */
+    fragment(ch, 4, 8, VideoFrameFlagKeyFrame | VideoFrameFlagFrameFinish, 'z');
+    assert(submits == 4 && IHS_FrameTicketIdentity(held[3]).frameId == 4);
     IHS_SessionChannelStop(ch);
     IHS_SessionChannelDestroy(ch);
     ch = create(session);
@@ -116,7 +130,7 @@ int main(void) {
     fragment(ch, 1, 0, VideoFrameFlagKeyFrame | VideoFrameFlagFrameFinish, 'z');
     IHS_SessionChannelStop(ch);
     IHS_SessionChannelDestroy(ch);
-    assert(starts == 2 && stops == 2 && submits == 3);
+    assert(starts == 2 && stops == 2 && submits == 5);
     IHS_SessionDestroy(session);
     IHS_Quit();
     /* Late GPU-style completion is independent of the destroyed session. */

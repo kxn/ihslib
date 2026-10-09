@@ -224,24 +224,16 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
 
     CStreamingClientCaps clientCaps = CSTREAMING_CLIENT_CAPS__INIT;
 
-    /* Real Nintendo Switch hardware, filling the official 13-field VDF
-     * template (libmain 0x3a1741, filled in CStreamPlayer::Init 0x7b4d60):
-     * Tegra X1 (T210), 4x Cortex-A57 @ 1.02 GHz, 4 GB LPDDR4 (~3.2 GB usable
-     * in application mode), GM20B Maxwell iGPU (256 CUDA, platform device —
-     * no PCI ID, so VideoDeviceID/Revision stay 0), handheld display 1280x720.
-     * OSType -197 is the official Android value; no Switch-specific value is
-     * known. */
-    clientCaps.system_info = "\"SystemInfo\"\n{\n\t\"OSType\"\t\t\"-197\"\n"
-                             "\t\"CPUID\"\t\t\"NVIDIA Tegra X1 (4x ARM Cortex-A57)\"\n"
-                             "\t\"CPUGhz\"\t\t\"1.020000\"\n\t\"PhysicalCPUCount\"\t\"4\"\n"
-                             "\t\"LogicalCPUCount\"\t\"4\"\n\t\"SystemRAM\"\t\t\"3072\"\n"
-                             "\t\"VideoVendorID\"\t\"4318\"\n\t\"VideoDeviceID\"\t\"0\"\n"
-                             "\t\"VideoRevision\"\t\"0\"\n\t\"VideoRAM\"\t\t\"0\"\n"
-                             "\t\"VideoDisplayX\"\t\"1280\"\n\t\"VideoDisplayY\"\t\"720\"\n"
-                             "\t\"VideoDisplayNameID\"\t\"Nintendo Switch Internal Display\"\n}\n";
-    PROTOBUF_C_SET_VALUE(clientCaps, system_can_suspend, true);
-    PROTOBUF_C_SET_VALUE(clientCaps, maximum_decode_bitrate_kbps, 30000);
-    PROTOBUF_C_SET_VALUE(clientCaps, maximum_burst_bitrate_kbps, 90000);
+    const IHS_StreamClientCapabilities *caps = &session->clientCapabilities;
+    clientCaps.system_info = (char *)caps->systemInfo;
+    if (caps->hasSystemCanSuspend)
+        PROTOBUF_C_SET_VALUE(clientCaps, system_can_suspend, caps->systemCanSuspend);
+    if (caps->maximumDecodeBitrateKbps)
+        PROTOBUF_C_SET_VALUE(clientCaps, maximum_decode_bitrate_kbps, caps->maximumDecodeBitrateKbps);
+    if (caps->maximumBurstBitrateKbps)
+        PROTOBUF_C_SET_VALUE(clientCaps, maximum_burst_bitrate_kbps, caps->maximumBurstBitrateKbps);
+    if (caps->formFactor != IHS_StreamDeviceFormFactorUnknown)
+        PROTOBUF_C_SET_VALUE(clientCaps, form_factor, (EStreamDeviceFormFactor)caps->formFactor);
     /* Current Steam reads the codec list; supports_video_hevc is obsoleted but still
      * the only thing older hosts look at, so send both. */
     EStreamVideoCodec supportedCodecs[] = {k_EStreamVideoCodecHEVC, k_EStreamVideoCodecH264};
@@ -255,7 +247,6 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
     if (ihsConf.enableHevc) {
         PROTOBUF_C_SET_VALUE(clientCaps, supports_video_hevc_obsolete, true);
     }
-    PROTOBUF_C_SET_VALUE(clientCaps, form_factor, k_EStreamDeviceFormFactorTV);
 
     CNegotiationSetConfigMsg response = CNEGOTIATION_SET_CONFIG_MSG__INIT;
     response.config = &config;

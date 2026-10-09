@@ -107,6 +107,7 @@ struct IHS_Session {
     struct IHS_FrameTracker *frameTracker;
     uint64_t videoTrackingId, nextVideoEpoch;
     bool invalidVideoCallbacks;
+    IHS_StreamClientCapabilities clientCapabilities; /* session-owned strings */
     struct {
         const IHS_StreamSessionCallbacks *session;
         const IHS_StreamAudioCallbacks *audio;

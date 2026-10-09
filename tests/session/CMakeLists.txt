@@ -67,3 +67,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         -Wl,--wrap=IHS_SessionChannelStatsSend)
     set_tests_properties(video_report PROPERTIES TIMEOUT 20)
 endif()
+
+ihs_add_test(client_capabilities test_client_capabilities.c)
+target_link_libraries(ihstest_client_capabilities PRIVATE ihs-test-session)

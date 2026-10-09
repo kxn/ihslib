@@ -1,1 +1,7 @@
 ihs_add_test(partial_frames test_partial_frames.c)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    ihs_add_test(decoder_loss test_decoder_loss.c)
+    target_link_libraries(ihstest_decoder_loss PRIVATE ihs-test-session)
+    target_link_options(ihstest_decoder_loss PRIVATE -Wl,--wrap=IHS_SessionSendControlMessage)
+    set_tests_properties(decoder_loss PROPERTIES TIMEOUT 20)
+endif()

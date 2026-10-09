@@ -173,6 +173,8 @@ void IHS_SessionDestroy(IHS_Session *session) {
     IHS_QueueDestroy(session->sendQueue, QueuedPacketDestroy, NULL);
     IHS_QueueDestroy(session->pendingData, QueuedPacketDestroy, NULL);
     IHS_SessionLog(session, IHS_LogLevelInfo, "Session", "Destroying session, bye!");
+    free((void *)session->clientCapabilities.systemInfo);
+    free((void *)session->clientCapabilities.decoderInfo);
     IHS_BaseDestroy(&session->base);
     free(session);
 }

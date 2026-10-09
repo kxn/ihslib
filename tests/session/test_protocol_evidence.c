@@ -414,6 +414,10 @@ static void negotiation_capabilities(int preference, unsigned bitrate, int expec
     assert(client->desired_resolution_x == 1280 && client->desired_resolution_y == 720);
     assert(client->desired_framerate_numerator == 60 && client->desired_framerate_denominator == 1);
     assert(!client->enable_video_hevc);
+    CStreamingClientCaps *caps = config->streaming_client_caps;
+    assert(caps && !caps->system_info && !caps->has_form_factor);
+    assert(!caps->has_system_can_suspend && !caps->has_maximum_decode_bitrate_kbps);
+    assert(!caps->has_maximum_burst_bitrate_kbps);
     cnegotiation_set_config_msg__free_unpacked(config, NULL);
     IHS_BufferClear(&plain, true); IHS_BufferClear(&body, true);
     IHS_SessionPacketClear(&q->packet, true); IHS_QueueItemFree(q);

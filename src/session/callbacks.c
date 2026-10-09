@@ -27,6 +27,56 @@
 #include "frame_tracker.h"
 #include "packet.h"
 #include "session_pri.h"
+#include <limits.h>
+#include <stdlib.h>
+#include <string.h>
+
+static char *CopyCapabilityString(const char *text) {
+    if (!text)
+        return NULL;
+    size_t size = strlen(text) + 1;
+    char *copy = malloc(size);
+    if (copy)
+        memcpy(copy, text, size);
+    return copy;
+}
+
+bool IHS_SessionSetClientCapabilities(IHS_Session *session,
+                                      const IHS_StreamClientCapabilities *capabilities) {
+    if (!session)
+        return false;
+    IHS_StreamClientCapabilities copy = {0};
+    if (capabilities) {
+        copy = *capabilities;
+        if (copy.decoderThreads > INT_MAX || copy.maximumDecodeBitrateKbps > INT_MAX ||
+            copy.maximumBurstBitrateKbps > INT_MAX ||
+            copy.formFactor < IHS_StreamDeviceFormFactorUnknown ||
+            copy.formFactor > IHS_StreamDeviceFormFactorVRHeadset)
+            return false;
+        copy.systemInfo = CopyCapabilityString(capabilities->systemInfo);
+        copy.decoderInfo = CopyCapabilityString(capabilities->decoderInfo);
+        if ((capabilities->systemInfo && !copy.systemInfo) ||
+            (capabilities->decoderInfo && !copy.decoderInfo)) {
+            free((void *)copy.systemInfo);
+            free((void *)copy.decoderInfo);
+            return false;
+        }
+    }
+    IHS_BaseLock(&session->base);
+    bool ok = !session->base.worker && session->numChannels == 3 &&
+              session->state.connectionState == IHS_SessionConnectionStateUnconnected;
+    if (ok) {
+        free((void *)session->clientCapabilities.systemInfo);
+        free((void *)session->clientCapabilities.decoderInfo);
+        session->clientCapabilities = copy;
+    }
+    IHS_BaseUnlock(&session->base);
+    if (!ok) {
+        free((void *)copy.systemInfo);
+        free((void *)copy.decoderInfo);
+    }
+    return ok;
+}
 
 void IHS_SessionSetSessionCallbacks(IHS_Session *session,
                                     const IHS_StreamSessionCallbacks *callbacks, void *context) {

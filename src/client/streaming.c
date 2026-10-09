@@ -139,8 +139,9 @@ static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
         CMsgRemoteDeviceProofRequest *request = (CMsgRemoteDeviceProofRequest *)message;
         CMsgRemoteDeviceProofResponse response = CMSG_REMOTE_DEVICE_PROOF_RESPONSE__INIT;
         response.has_request_id = request->has_request_id;
-        /* This KeyEscrow client uses an installation secret shared across hosts.
-         * Explicitly decline per-host rotation rather than corrupting that secret. */
+        /* The caller selects the host's negotiated secret or its legacy installation
+         * secret before streaming. Rotation is not implemented: acknowledge only
+         * proof, without claiming to have persisted a replacement host secret. */
         response.has_updated_secret = true;
         response.updated_secret = false;
         response.request_id = request->request_id;

@@ -59,6 +59,35 @@ typedef struct IHS_SessionConfig {
     IHS_StreamQuality quality;
 } IHS_SessionConfig;
 
+/** Optional platform/decoder facts. Unknown fields are omitted from the wire.
+ * Bitrates are capability limits, separate from the requested encode bitrate. */
+typedef enum IHS_StreamDeviceFormFactor {
+    IHS_StreamDeviceFormFactorUnknown = 0,
+    IHS_StreamDeviceFormFactorPhone = 1,
+    IHS_StreamDeviceFormFactorTablet = 2,
+    IHS_StreamDeviceFormFactorComputer = 3,
+    IHS_StreamDeviceFormFactorTV = 4,
+    IHS_StreamDeviceFormFactorVRHeadset = 5,
+} IHS_StreamDeviceFormFactor;
+
+typedef struct IHS_StreamClientCapabilities {
+    const char *systemInfo; /* VDF SystemInfo, NULL = unknown */
+    const char *decoderInfo; /* Descriptive decoder name, NULL = unknown */
+    uint32_t decoderThreads; /* 0 = unknown */
+    uint32_t maximumDecodeBitrateKbps; /* 0 = unknown */
+    uint32_t maximumBurstBitrateKbps; /* 0 = unknown */
+    IHS_StreamDeviceFormFactor formFactor;
+    bool hasSystemCanSuspend;
+    bool systemCanSuspend;
+} IHS_StreamClientCapabilities;
+
+/** Set before Connect or creation of data channels. Strings are copied; the
+ * caller may release them immediately. NULL resets to unknown capabilities.
+ * Returns false for invalid fields, allocation failure, or a started session;
+ * on failure the previous capabilities remain intact. */
+bool IHS_SessionSetClientCapabilities(IHS_Session *session,
+                                      const IHS_StreamClientCapabilities *capabilities);
+
 /** Monotonic counters and current occupancy for the reliable transport and the
  * HID transport packets (confirmation does not imply host input application). Safe to sample from a diagnostics thread. */
 typedef struct IHS_SessionReliabilityStats {
