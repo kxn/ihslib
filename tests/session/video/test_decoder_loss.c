@@ -15,8 +15,8 @@
  */
 
 /**
- * A decoder that rejects a frame must put the channel into keyframe wait, exactly as a sequence gap
- * does — otherwise the inter-frames that depend on the rejected one keep being handed to it.
+ * Rollback contract: decoder-reported loss requests one keyframe without resetting assembly or
+ * gating subsequent intact-sequence frames. Sequence-gap recovery remains separate.
  *
  * Frames go straight to the channel class's dataFrame hook, so this covers ch_data_video.c's
  * recovery logic without a socket. Two observables: submitted frames arrive through the video
@@ -181,11 +181,7 @@ static void TearDown(void) {
 
 /* ------------------------------------------------------------------ cases */
 
-/**
- * The reference reaches this through a deferred reset: CMarvellAccel::BDecodeFrame @ 0x408adc asks
- * for ResetVideoDecoder @ 0x1fbe78, and HandlePendingResets @ 0x1fbed4 lands it on
- * CStreamDecoderVideo::StopDecoding @ 0x205574, which flushes pending data and sets the wait.
- */
+/* Keep the pre-merge decoder-loss policy while testing the reported device regression. */
 static void test_decoder_reported_loss_requests_keyframe(void) {
     Reset();
     const uint8_t payload[] = {0x55, 0x66};
@@ -200,20 +196,19 @@ static void test_decoder_reported_loss_requests_keyframe(void) {
     nextSubmitResult = IHS_StreamVideoSubmitReportLost;
     Feed(2, 2000, 1, VideoFrameFlagSubFrameAdvance | VideoFrameFlagFrameFinish, 0, 3, after, sizeof(after));
     assert(submittedCount == 2 && "the failing frame itself still reaches the decoder");
-    // Two requests: the immediate one from SubmitFrame, mirroring FinalDecode @ 0x203844, and the
-    // one HandlePendingResets sends once the reset has been applied.
-    assert(TakeKeyframeRequests() == 2);
+    assert(TakeKeyframeRequests() == 1);
 
-    // The wait is now armed, so the next in-sequence frame must be dropped rather than decoded.
+    // Rollback keeps intact-sequence frames flowing after the loss report.
     Feed(3, 3000, 2, VideoFrameFlagSubFrameAdvance | VideoFrameFlagFrameFinish, 0, 3, after, sizeof(after));
-    assert(submittedCount == 2 && "frame after a decoder-reported loss must be dropped");
+    assert(submittedCount == 3 && "rollback must not gate the next intact-sequence frame");
+    assert(TakeKeyframeRequests() == 0);
 
-    // A keyframe clears the wait and streaming resumes.
+    // A subsequent keyframe still reaches the decoder.
     const uint8_t recovered[] = {0x99};
     Feed(4, 4000, 3, VideoFrameFlagKeyFrame | VideoFrameFlagSubFrameAdvance | VideoFrameFlagFrameFinish,
          0, 3, recovered, sizeof(recovered));
-    assert(submittedCount == 3);
-    assert(submitted[2].data[0] == 0x99);
+    assert(submittedCount == 4);
+    assert(submitted[3].data[0] == 0x99);
 }
 
 int main(void) {

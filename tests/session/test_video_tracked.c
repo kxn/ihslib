@@ -54,7 +54,7 @@ static IHS_StreamVideoSubmitResult submit(IHS_Session *s, const IHS_VideoEpochIn
         assert(id == 65535 && b->size == 3 && !memcmp(IHS_BufferPointer(b), "abc", 3));
     else
         assert(b->size == 1 && *IHS_BufferPointer(b) == 'z');
-    static const uint16_t expectedIds[] = {65535, 1, 2, 4, 1};
+    static const uint16_t expectedIds[] = {65535, 1, 2, 3, 4, 1};
     assert(submits < sizeof(expectedIds) / sizeof(expectedIds[0]) && id == expectedIds[submits]);
     assert(submits < 8 && IHS_FrameTicketRetain(ticket));
     held[submits++] = ticket;
@@ -120,9 +120,9 @@ int main(void) {
     fragment(ch, 2, 6, VideoFrameFlagFrameFinish, 'z');
     assert(submits == 3);
     fragment(ch, 3, 7, VideoFrameFlagFrameFinish, 'z');
-    assert(submits == 3); /* intact sequence still waits for a keyframe */
+    assert(submits == 4); /* rollback keeps intact-sequence frames flowing */
     fragment(ch, 4, 8, VideoFrameFlagKeyFrame | VideoFrameFlagFrameFinish, 'z');
-    assert(submits == 4 && IHS_FrameTicketIdentity(held[3]).frameId == 4);
+    assert(submits == 5 && IHS_FrameTicketIdentity(held[4]).frameId == 4);
     IHS_SessionChannelStop(ch);
     IHS_SessionChannelDestroy(ch);
     ch = create(session);
@@ -130,7 +130,7 @@ int main(void) {
     fragment(ch, 1, 0, VideoFrameFlagKeyFrame | VideoFrameFlagFrameFinish, 'z');
     IHS_SessionChannelStop(ch);
     IHS_SessionChannelDestroy(ch);
-    assert(starts == 2 && stops == 2 && submits == 5);
+    assert(starts == 2 && stops == 2 && submits == 6);
     IHS_SessionDestroy(session);
     IHS_Quit();
     /* Late GPU-style completion is independent of the destroyed session. */
