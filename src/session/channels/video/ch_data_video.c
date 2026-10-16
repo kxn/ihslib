@@ -59,7 +59,9 @@ typedef struct IHS_SessionChannelVideo {
     struct {
         uint16_t expectedSequence;
         uint16_t lastFrameId;
-        uint64_t waitingKeyFrame;
+        uint64_t lastRecoveryRequest;
+        bool waitingKeyFrame, syncingBacklog;
+        uint32_t overflowReportedSpan;
         uint64_t lastStatsTime;
         bool frameStarted;
         bool frameFinished;
@@ -119,8 +121,8 @@ static void AddPartialFrame(IHS_SessionChannelVideo *channel, uint16_t frameId, 
                             const IHS_VideoFrameHeader *header, IHS_Buffer *data);
 
 /**
- * If the oldest pending fragment is older than ~150 ms of stream time, drop the assembly state and
- * request a keyframe. Mirrors CStreamDecoderVideo::CheckOverflow.
+ * Report pending frame IDs; >150ms requests synchronization but still accepts
+ * sequence-continuous data (Android ARM64 CheckOverflow 0x7b2854).
  * @param channel Channel instance
  */
 static void CheckPartialOverflow(IHS_SessionChannel *channel);
@@ -130,13 +132,6 @@ static void CheckPartialOverflow(IHS_SessionChannel *channel);
  * @param channel
  */
 static void DiscardPending(IHS_SessionChannelVideo *channel);
-
-/**
- * Drop the assembly state and wait for a keyframe after the decoder rejected a frame, mirroring
- * CStreamDecoderVideo::StopDecoding @ 0x205574. Must be called with stateMutex held.
- * @param channel Channel instance
- */
-static void ApplyDecoderReset(IHS_SessionChannel *channel);
 
 static const IHS_SessionChannelDataClass ChannelClass = {
     {.init = ChannelVideoInit,
@@ -306,31 +301,26 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
 
     if (vhead.flags & VideoFrameFlagKeyFrame) {
         DiscardPending(videoCh);
-        videoCh->states.waitingKeyFrame = 0;
+        videoCh->states.waitingKeyFrame = false;
+        videoCh->states.syncingBacklog = false;
+        videoCh->states.overflowReportedSpan = 0;
         videoCh->states.expectedSequence = vhead.sequence;
         IHS_SessionLog(channel->session, IHS_LogLevelDebug, "Video", "Coming keyframe");
     }
-    if (videoCh->states.waitingKeyFrame > 0) {
-        // Wait for 200ms after requesting keyframe. Then request again.
-        uint64_t now = IHS_TimerNow();
-        if (now - videoCh->states.waitingKeyFrame >= 200) {
-            IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Video",
-                           "Keyframe wait timeout, re-request keyframe");
-            IHS_SessionChannelDataLost(channel);
-            videoCh->states.waitingKeyFrame = IHS_TimerNow();
-        }
-    } else if (vhead.sequence != videoCh->states.expectedSequence) {
-        if (videoCh->states.waitingKeyFrame == 0) {
-            IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Video",
-                           "Unexpected video frame sequence %u (expect %u), request keyframe",
-                           vhead.sequence, videoCh->states.expectedSequence);
-            IHS_SessionChannelDataLost(channel);
-            videoCh->states.waitingKeyFrame = IHS_TimerNow();
-        }
+    uint64_t now = IHS_TimerNow();
+    if ((videoCh->states.waitingKeyFrame || videoCh->states.syncingBacklog) &&
+        now - videoCh->states.lastRecoveryRequest > 100) {
+        IHS_SessionChannelDataLost(channel);
+        videoCh->states.lastRecoveryRequest = now;
+    }
+    if (!videoCh->states.waitingKeyFrame && vhead.sequence != videoCh->states.expectedSequence) {
+        IHS_SessionChannelDataLost(channel);
+        videoCh->states.waitingKeyFrame = true;
+        videoCh->states.lastRecoveryRequest = now;
     }
     videoCh->states.expectedSequence = vhead.sequence + 1;
     videoCh->states.lastFrameId = header->id;
-    if (videoCh->states.waitingKeyFrame > 0) {
+    if (videoCh->states.waitingKeyFrame) {
         goto unlock;
     }
     if (vhead.flags & VideoFrameFlagEncrypted) {
@@ -347,7 +337,8 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
                            "Failed to decrypt video frame: %d, request keyframe", decryptRet);
             IHS_BufferClear(&plain, true);
             IHS_SessionChannelDataLost(channel);
-            videoCh->states.waitingKeyFrame = IHS_TimerNow();
+            videoCh->states.waitingKeyFrame = true;
+            videoCh->states.lastRecoveryRequest = IHS_TimerNow();
             goto unlock;
         }
         plain.size = outLen;
@@ -358,8 +349,7 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
     }
 
     if (AssembleFrame(channel)) {
-        IHS_StreamVideoSubmitResult result = SubmitFrame(
-            channel, videoCh->assemblyId, &videoCh->frame.buffer, videoCh->frame.flags);
+        SubmitFrame(channel, videoCh->assemblyId, &videoCh->frame.buffer, videoCh->frame.flags);
         if (videoCh->assembly) {
             IHS_FrameTicketRelease(videoCh->assembly);
             videoCh->assembly = NULL;
@@ -369,8 +359,6 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
         videoCh->states.frameFinished = false;
         videoCh->states.frameStarted = false;
         atomic_fetch_add_explicit(&videoCh->frameCounter, 1, memory_order_relaxed);
-        if (result == IHS_StreamVideoSubmitReportLost)
-            ApplyDecoderReset(channel);
     }
     CheckPartialOverflow(channel);
 unlock:
@@ -446,6 +434,8 @@ static bool AssembleFrame(IHS_SessionChannel *channel) {
         } else if (partial->frameId != videoCh->assemblyId ||
                    (videoCh->tracked && partial->ticket != videoCh->assembly)) {
             DiscardPending(videoCh);
+            videoCh->states.waitingKeyFrame = true;
+            videoCh->states.lastRecoveryRequest = IHS_TimerNow();
             IHS_SessionChannelDataLost(channel);
             return false;
         }
@@ -467,7 +457,22 @@ static bool AssembleFrame(IHS_SessionChannel *channel) {
 
 static void AddPartialFrame(IHS_SessionChannelVideo *channel, uint16_t frameId, uint32_t timestamp,
                             const IHS_VideoFrameHeader *header, IHS_Buffer *data) {
-    // Find reset matching cur frame
+    /* Soft synchronization may last arbitrarily long if the host never sends
+     * a keyframe. Bound pending storage independently of host cooperation. */
+    size_t bytes = channel->frame.buffer.size;
+    unsigned count = 0;
+    for (IHS_VideoPartialFrame *part = channel->frame.partial.head; part; part = part->next) {
+        bytes += part->data.size;
+        count++;
+    }
+    if (count >= 256 || data->size > channel->frame.buffer.maxCapacity ||
+        bytes > channel->frame.buffer.maxCapacity - data->size) {
+        DiscardPending(channel);
+        channel->states.waitingKeyFrame = true;
+        channel->states.lastRecoveryRequest = IHS_TimerNow();
+        IHS_SessionChannelDataLost(&channel->base.base);
+        return;
+    }
     IHS_VideoPartialFrame *cur = NULL;
     IHS_VideoPartialFramesForEach(cur, &channel->frame.partial) {
         if (frameId == cur->frameId && header->subFrameEnd < cur->header.subFrameStart) {
@@ -498,41 +503,28 @@ static void AddPartialFrame(IHS_SessionChannelVideo *channel, uint16_t frameId, 
 
 static void CheckPartialOverflow(IHS_SessionChannel *channel) {
     IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
-    if (videoCh->states.waitingKeyFrame > 0) {
+    if (videoCh->states.waitingKeyFrame || videoCh->states.syncingBacklog)
         return;
-    }
     IHS_VideoPartialFrame *head = videoCh->frame.partial.head;
     IHS_VideoPartialFrame *tail = videoCh->frame.partial.tail;
-    if (head == NULL || head == tail) {
+    if (!head || head == tail)
         return;
-    }
-    // 150 ms in 1/65536-second units. Span between oldest and newest pending fragment.
-    const uint32_t overflowSpan = (uint32_t)(150 * 65536 / 1000);
-    uint32_t span = tail->timestamp - head->timestamp;
-    if (span <= overflowSpan) {
+    int32_t span = (int32_t)(tail->timestamp - head->timestamp);
+    if (span < 0)
         return;
+    if (span > 9830) {
+        IHS_SessionChannelDataLost(channel);
+        videoCh->states.syncingBacklog = true;
+        videoCh->states.lastRecoveryRequest = IHS_TimerNow();
     }
-    IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Video",
-                   "Partial frames stalled for %u ms, request keyframe", span * 1000 / 65536);
-    IHS_SessionChannelDataLost(channel);
-    videoCh->states.waitingKeyFrame = IHS_TimerNow();
-}
-
-static void ApplyDecoderReset(IHS_SessionChannel *channel) {
-    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
-    // A reset lands on CStreamDecoderVideo::StopDecoding @ 0x205574, which flushes every queued
-    // fragment and the half-assembled frame (FlushPendingData @ 0x206134), clears the assembly
-    // state and waits for a keyframe. expectedSequence is deliberately untouched — the reference
-    // does not reset it across a decoder reset.
-    IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Video", "Decoder reset, request keyframe");
-    DiscardPending(videoCh);
-    videoCh->states.frameFinished = false;
-    videoCh->states.frameStarted = false;
-    videoCh->states.waitingKeyFrame = IHS_TimerNow();
-    // Second request of the pair. HandlePendingResets sends one once the reset completes, on top of
-    // the one FinalDecode @ 0x203844 already sent from the decoder thread; this is the one that
-    // arms the retry window above, so it must come after waitingKeyFrame is set.
-    IHS_SessionChannelDataLost(channel);
+    if ((uint32_t)span >= videoCh->states.overflowReportedSpan + 412) {
+        CStreamVideoOverflowMsg message = CSTREAM_VIDEO_OVERFLOW_MSG__INIT;
+        PROTOBUF_C_SET_VALUE(message, first_frame_id, head->frameId);
+        PROTOBUF_C_SET_VALUE(message, last_frame_id, tail->frameId);
+        IHS_SessionSendControlMessage(channel->session, k_EStreamControlVideoOverflow,
+                                      (const ProtobufCMessage *)&message);
+        videoCh->states.overflowReportedSpan = span;
+    }
 }
 
 static void DiscardPending(IHS_SessionChannelVideo *channel) {
@@ -610,9 +602,9 @@ static IHS_StreamVideoSubmitResult SubmitFrame(IHS_SessionChannel *channel, uint
     } else
         result = callbacks->submit(session, frameId, data, flags, context);
     if (result == IHS_StreamVideoSubmitReportLost) {
-        // The immediate request of the pair, as FinalDecode sends one at 0x203844 before the reset
-        // it asked for has run. The caller applies the reset, which sends the second.
-        IHS_SessionLog(session, IHS_LogLevelInfo, "Video", "Decoder reported frame lost.");
+        /* FinalDecode 0x7b1158..68 requests recovery without an unconditional
+         * backend reset or strict keyframe wait. The backend may still decode
+         * subsequent frames; damaged output is rejected by the application. */
         IHS_SessionChannelDataLost(channel);
     } else if (result == IHS_StreamVideoSubmitError) {
         IHS_SessionLog(session, IHS_LogLevelError, "Video",

@@ -70,3 +70,7 @@ endif()
 
 ihs_add_test(client_capabilities test_client_capabilities.c)
 target_link_libraries(ihstest_client_capabilities PRIVATE ihs-test-session)
+
+ihs_add_test(media_recovery test_media_recovery.c)
+target_link_libraries(ihstest_media_recovery PRIVATE ihs-test-session)
+set_tests_properties(media_recovery PROPERTIES TIMEOUT 10)

@@ -57,6 +57,8 @@ typedef struct IHS_StreamVideoConfig {
 
 typedef enum IHS_StreamVideoSubmitResult {
     IHS_StreamVideoSubmitOK = 0,
+    /* Request a replacement keyframe; the backend remains active. This is not
+     * a notification that decoder state has been destroyed or recreated. */
     IHS_StreamVideoSubmitReportLost = 1,
     IHS_StreamVideoSubmitError = -1,
 } IHS_StreamVideoSubmitResult;

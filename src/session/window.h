@@ -53,9 +53,8 @@ bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionF
 uint16_t IHS_SessionPacketsWindowDiscard(IHS_SessionPacketsWindow *window, uint32_t diff);
 
 /**
- * Recycle every pending packet and reset head/tail. Unlike Discard(), this can't
- * fail to free anything: Discard() only advances past frame-head packets, so a
- * window holding nothing but orphaned fragments (frame head lost) is immovable.
+ * Recycle every pending packet and reset head/tail, regardless of its age or
+ * whether it contains a complete frame. Used for bounded-capacity recovery.
  */
 void IHS_SessionPacketsWindowReleaseAll(IHS_SessionPacketsWindow *window);
 
@@ -83,3 +82,16 @@ size_t IHS_SessionPacketsWindowHoleBitmap(const IHS_SessionPacketsWindow *window
 /* Reliable streams start at a known ID and never discard orphan fragments. */
 IHS_SessionPacketsWindow *IHS_SessionPacketsWindowCreateReliable(uint16_t capacity, uint16_t firstId);
 uint16_t IHS_SessionPacketsWindowContiguousId(const IHS_SessionPacketsWindow *window);
+
+/* UnreliableNack uses the first PRESENT successor as bitmap base, while the
+ * watermark stops before the first hole. Snapshot while holding windowLock. */
+typedef struct IHS_MediaFeedback {
+    uint16_t base, confirmed;
+    uint8_t bitmap[40];
+    uint32_t receiveTimestamp;
+    uint8_t retransmitCount;
+} IHS_MediaFeedback;
+bool IHS_SessionPacketsWindowMediaFeedback(const IHS_SessionPacketsWindow *, IHS_MediaFeedback *);
+
+/* Fresh media channels, like reliable channels, start at packet ID zero. */
+IHS_SessionPacketsWindow *IHS_SessionPacketsWindowCreateMedia(uint16_t capacity);

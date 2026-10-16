@@ -50,7 +50,12 @@ typedef struct IHS_SessionChannelData {
     atomic_bool interrupted;
     IHS_Mutex *lock;
 
-    uint32_t lastPacketTimestamp;
+    /* Feedback never waits for the decoder. Both workers are stopped/joined
+     * before the window, condition variables or session dependencies die. */
+    IHS_Thread *feedbackWorker;
+    IHS_Cond *feedbackCond;
+    uint32_t lastPacketTimestamp, feedbackDeadline;
+    bool haveFeedbackDeadline;
 } IHS_SessionChannelData;
 
 typedef struct IHS_SessionChannelDataClass {

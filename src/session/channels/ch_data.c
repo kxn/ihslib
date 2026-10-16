@@ -31,7 +31,7 @@
 
 #include "ihs_buffer_ext.h"
 
-#define DISCARD_DIFF IHS_SESSION_PACKET_TIMESTAMP_FROM_MILLIS(200)
+static void FeedbackThreadWorker(IHS_SessionChannelData *channel);
 
 static void DataThreadWorker(IHS_SessionChannelData *channel);
 
@@ -53,16 +53,23 @@ bool IHS_SessionChannelDataInit(IHS_SessionChannel *channel, uint16_t windowCapa
     dataCh->lock = IHS_MutexCreate();
     dataCh->windowLock = IHS_MutexCreate();
     dataCh->windowCond = IHS_CondCreate();
-    dataCh->window = IHS_SessionPacketsWindowCreate(windowCapacity);
+    dataCh->feedbackCond = IHS_CondCreate();
+    dataCh->window = IHS_SessionPacketsWindowCreateMedia(windowCapacity);
     atomic_init(&dataCh->interrupted, false);
-    if (!dataCh->lock || !dataCh->windowLock || !dataCh->windowCond || !dataCh->window) {
+    if (!dataCh->lock || !dataCh->windowLock || !dataCh->windowCond || !dataCh->feedbackCond ||
+        !dataCh->window) {
         channel->initFailed = true;
         return false;
     }
     char threadName[16];
     snprintf(threadName, 16, "IHS%s", DataChannelName(channel->type));
     dataCh->worker = IHS_ThreadCreate((IHS_ThreadFunction *)DataThreadWorker, threadName, dataCh);
-    channel->initFailed = dataCh->worker == NULL;
+    if (dataCh->worker)
+        dataCh->feedbackWorker =
+            IHS_ThreadCreate((IHS_ThreadFunction *)FeedbackThreadWorker, "IHSFeedback", dataCh);
+    channel->initFailed = !dataCh->worker || !dataCh->feedbackWorker;
+    if (channel->initFailed)
+        DataThreadInterrupt(dataCh);
     return !channel->initFailed;
 }
 
@@ -71,11 +78,13 @@ void IHS_SessionChannelDataDeinit(IHS_SessionChannel *channel) {
 
     assert(!dataCh->worker || dataCh->interrupted);
 
+    IHS_ThreadJoin(dataCh->feedbackWorker);
     IHS_ThreadJoin(dataCh->worker);
     if (dataCh->window)
         IHS_SessionPacketsWindowDestroy(dataCh->window);
     IHS_MutexDestroy(dataCh->windowLock);
     IHS_CondDestroy(dataCh->windowCond);
+    IHS_CondDestroy(dataCh->feedbackCond);
     dataCh->window = NULL;
     IHS_MutexDestroy(dataCh->lock);
 }
@@ -91,17 +100,17 @@ void IHS_SessionChannelDataReceived(IHS_SessionChannel *channel, IHS_SessionPack
         IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Data",
                        "%s channel items overflow! Available: %u", DataChannelName(channel->type),
                        IHS_SessionPacketsWindowAvailable(dataCh->window));
-        /* Drop everything, not just whole frames: Discard() walks forward to the
-         * next frame-head packet, so once the head of the oldest frame is lost the
-         * window is stuck full and every later packet overflows too. */
+        /* Capacity recovery is independent of packet age: release incomplete
+         * frames and holes too, then start a fresh receive window. */
         IHS_SessionPacketsWindowReleaseAll(dataCh->window);
         IHS_SessionChannelDataLost(channel);
         IHS_SessionPacketsWindowAdd(dataCh->window,
                                     packet); /* now fits; caller clears on failure */
     }
-    IHS_CondSignal(dataCh->windowCond);
-    IHS_MutexUnlock(dataCh->windowLock);
     dataCh->lastPacketTimestamp = packet->header.sendTimestamp;
+    IHS_CondSignal(dataCh->windowCond);
+    IHS_CondSignal(dataCh->feedbackCond);
+    IHS_MutexUnlock(dataCh->windowLock);
 }
 
 void IHS_SessionChannelDataLost(IHS_SessionChannel *channel) {
@@ -154,7 +163,10 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
             /* Retry the age-based discard on every wakeup, not just once per
              * delivered frame: a packet lost at the head makes Poll fail forever,
              * and the discard that would step over it is the only way out. */
-            uint16_t discarded = IHS_SessionPacketsWindowDiscard(channel->window, DISCARD_DIFF);
+            if ((hasFrame = IHS_SessionPacketsWindowPoll(channel->window, &frame)))
+                break;
+            uint16_t discarded = IHS_SessionPacketsWindowDiscard(
+                channel->window, IHS_StreamClockMediaDelayTicks(&channel->base.session->clock));
             if (discarded > 0) {
                 IHS_SessionLog(channel->base.session, IHS_LogLevelDebug, channelName,
                                "Discarded %u packets", discarded);
@@ -192,6 +204,7 @@ static void DataThreadInterrupt(IHS_SessionChannelData *channel) {
 
     IHS_MutexLock(channel->windowLock);
     IHS_CondSignal(channel->windowCond);
+    IHS_CondSignal(channel->feedbackCond);
     IHS_MutexUnlock(channel->windowLock);
 }
 
@@ -227,4 +240,43 @@ static const char *DataChannelName(IHS_SessionChannelType type) {
     default:
         return "Data";
     }
+}
+
+static void FeedbackThreadWorker(IHS_SessionChannelData *channel) {
+    IHS_MutexLock(channel->windowLock);
+    while (!channel->interrupted) {
+        IHS_MediaFeedback feedback;
+        if (!IHS_SessionPacketsWindowMediaFeedback(channel->window, &feedback)) {
+            IHS_CondWait(channel->feedbackCond, channel->windowLock);
+            continue;
+        }
+        uint32_t now = IHS_SessionPacketTimestamp();
+        int32_t wait = 0;
+        /* UpdateUnreliableState: original transmissions get a 65-tick grace;
+         * retransmitted successors can trigger feedback immediately. */
+        if (!feedback.retransmitCount)
+            wait = (int32_t)(feedback.receiveTimestamp + 65 - now);
+        if (channel->haveFeedbackDeadline) {
+            int32_t deadline = (int32_t)(channel->feedbackDeadline - now);
+            if (deadline > wait)
+                wait = deadline;
+        }
+        if (wait > 0) {
+            uint32_t ms = ((uint64_t)(uint32_t)wait * 1000 + 65535) / 65536;
+            IHS_CondWaitTimeout(channel->feedbackCond, channel->windowLock, ms);
+            continue;
+        }
+        IHS_SessionPacket packet;
+        IHS_SessionChannelInitializePacket(
+            &channel->base, &packet, IHS_SessionPacketTypeUnreliableNack, false, feedback.base);
+        IHS_BufferAppendUInt32LE(&packet.body, channel->lastPacketTimestamp);
+        IHS_BufferAppendUInt16LE(&packet.body, feedback.confirmed);
+        IHS_BufferAppendMem(&packet.body, feedback.bitmap, sizeof(feedback.bitmap));
+        IHS_SessionChannelQueuePacket(&channel->base, &packet, false);
+        IHS_SessionPacketClear(&packet, true);
+        channel->feedbackDeadline =
+            now + IHS_StreamClockMediaFeedbackTicks(&channel->base.session->clock);
+        channel->haveFeedbackDeadline = true;
+    }
+    IHS_MutexUnlock(channel->windowLock);
 }

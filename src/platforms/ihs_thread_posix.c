@@ -113,3 +113,15 @@ void IHS_CondSignal(IHS_Cond *cond) {
 bool IHS_CondWait(IHS_Cond *cond, IHS_Mutex *mutex) {
     return pthread_cond_wait(&cond->cond, &mutex->mutex) == 0;
 }
+
+bool IHS_CondWaitTimeout(IHS_Cond *cond, IHS_Mutex *mutex, uint32_t milliseconds) {
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_sec += milliseconds / 1000;
+    until.tv_nsec += (long)(milliseconds % 1000) * 1000000;
+    if (until.tv_nsec >= 1000000000) {
+        until.tv_nsec -= 1000000000;
+        until.tv_sec++;
+    }
+    return pthread_cond_timedwait(&cond->cond, &mutex->mutex, &until) == 0;
+}

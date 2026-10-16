@@ -27,3 +27,6 @@ int32_t IHS_StreamClockOffset(IHS_StreamClock *clock);
 
 uint32_t IHS_StreamClockRetryTicks(IHS_StreamClock *clock);
 uint32_t IHS_StreamClockNackAgeTicks(IHS_StreamClock *clock);
+
+uint32_t IHS_StreamClockMediaDelayTicks(IHS_StreamClock *clock);
+uint32_t IHS_StreamClockMediaFeedbackTicks(IHS_StreamClock *clock);

@@ -1,8 +1,5 @@
-/*
- * Regression: a window holding only orphaned fragments (the frame-head packet was
- * lost) can't be advanced by Discard(), which only stops at frame heads. Without
- * ReleaseAll() the window stays full forever and every later packet overflows.
- */
+/* Orphaned fragments can expire independently of frame heads; ReleaseAll
+ * still recovers every slot immediately when the capacity is exhausted. */
 
 #include <assert.h>
 #include <string.h>
@@ -35,9 +32,9 @@ int main() {
     }
     assert(IHS_SessionPacketsWindowAvailable(window) == 0);
 
-    /* No frame head anywhere, so Discard can't advance past anything. */
-    assert(IHS_SessionPacketsWindowDiscard(window, 0) == 0);
-    assert(IHS_SessionPacketsWindowAvailable(window) == 0);
+    /* Expiry advances orphan slots, retaining the newest at equality. */
+    assert(IHS_SessionPacketsWindowDiscard(window, 0) == CAPACITY - 1);
+    assert(IHS_SessionPacketsWindowAvailable(window) == CAPACITY - 1);
 
     IHS_SessionPacketsWindowReleaseAll(window);
     assert(IHS_SessionPacketsWindowAvailable(window) == CAPACITY);

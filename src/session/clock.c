@@ -105,3 +105,22 @@ uint32_t IHS_StreamClockNackAgeTicks(IHS_StreamClock *clock) {
     uint32_t ticks = (uint32_t)((uint64_t)ageMs * 65536 / 1000);
     return ticks < 3276 ? ticks : 3276;
 }
+
+uint32_t IHS_StreamClockMediaDelayTicks(IHS_StreamClock *clock) {
+    IHS_MutexLock(clock->lock);
+    float meanMs =
+        clock->rttSamples ? (float)clock->rttSum / clock->rttSamples * (1000.0f / 65536.0f) : 0;
+    IHS_MutexUnlock(clock->lock);
+    /* UpdateUnreliableState 0x7fa504: active channel delay + trunc((RTTms+2)/2). */
+    uint32_t extraMs = (uint32_t)((meanMs + 2.0f) * 0.5f);
+    return 6553 + (uint32_t)((uint64_t)extraMs * 65536 / 1000);
+}
+uint32_t IHS_StreamClockMediaFeedbackTicks(IHS_StreamClock *clock) {
+    IHS_MutexLock(clock->lock);
+    uint32_t ticks = clock->smoothedRTT;
+    IHS_MutexUnlock(clock->lock);
+    if (ticks > 3276)
+        ticks = 3276;
+    ticks /= 4;
+    return ticks < 65 ? 65 : ticks;
+}
