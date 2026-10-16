@@ -220,6 +220,9 @@ static bool ControlSendLocked(IHS_SessionChannelControl *control, EStreamControl
     IHS_SessionFrame frame;
     IHS_SessionChannelInitializeFrame(channel, &frame, IHS_SessionPacketTypeReliable, true,
                                       packetId);
+    /* Complete configs can exceed one packet; channel fragmentation applies
+     * MTU after encryption. Keep packet buffers bounded, allow a larger frame. */
+    frame.body.maxCapacity = 0;
     frame.header.hidReport = type == k_EStreamControlRemoteHID;
     if (assignedPacketId != NULL) {
         *assignedPacketId = frame.header.packetId;
@@ -572,6 +575,9 @@ void IHS_SessionChannelControlOnMessageReceived(IHS_SessionChannel *channel,
         break;
     }
     case k_EStreamControlSetStreamingClientConfig: {
+        // Original queued dispatcher handles 99 only in client state 6.
+        if (channel->session->state.connectionState != IHS_SessionConnectionStateConnected)
+            break;
         CSetStreamingClientConfig *message =
             IHS_UNPACK_BUFFER(cset_streaming_client_config__unpack, payload);
         if (message == NULL) {
@@ -835,30 +841,10 @@ static void OnSetClientConfig(IHS_SessionChannel *channel,
         return;
     }
     IHS_Session *session = channel->session;
-    // Mirror Steam's BStreamingInput/Audio/Video reading from the negotiated client config.
-    // Each flag is only updated if the server actually included it; absent fields keep the
-    // current value (which started at true at session creation).
-    if (config->has_enable_input_streaming) {
-        session->state.streamingInput = config->enable_input_streaming;
-    }
-    if (config->has_enable_audio_streaming) {
-        session->state.streamingAudio = config->enable_audio_streaming;
-    }
-    if (config->has_enable_video_streaming) {
-        session->state.streamingVideo = config->enable_video_streaming;
-    }
-    IHS_SessionLog(session, IHS_LogLevelDebug, "Control",
-                   "Set client config. input=%u audio=%u video=%u enable_video_hevc=%u",
-                   session->state.streamingInput, session->state.streamingAudio,
-                   session->state.streamingVideo, config->enable_video_hevc);
+    IHS_SessionClientConfigApply(session, config, true);
 }
 
 bool IHS_SessionInputEnabled(IHS_Session *session) {
-    /* Host-issued temporary disable (scene transitions etc.) suppresses ALL
-     * input reports, matching the official client's OnSetInputTemporarily
-     * Disabled handling. The delta chain stays intact: while disabled no
-     * deltas are submitted and `previous` does not advance, so the first
-     * delta after re-enable carries the full accumulated change. */
     /* OnSetInputTemporarilyDisabled opens an informational dialog. Its
      * controller handlers return false (0x766cb8/0x766cc0), so it does not
      * suppress HID reports. Only negotiated enable_input_streaming gates input. */

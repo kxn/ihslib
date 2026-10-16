@@ -136,6 +136,15 @@ typedef struct IHS_StreamSessionCallbacks {
      * @param context Callback context
      */
     void (*finalized)(IHS_Session *session, void *context);
+
+    /** Complete CStreamingClientConfig protobuf, borrowed during this call.
+     * localOnly suppresses message 99; incoming notifications use true.
+     * May reenter the config API. Do not block the receive worker. */
+    void (*clientConfigChanged)(IHS_Session *session, const uint8_t *wire, size_t size,
+                                 bool localOnly, void *context);
+    /** Runs after the delegate, before an optional outgoing message 99.
+     * Queue persistence here; bytes are borrowed during the call. */
+    void (*saveClientConfig)(IHS_Session *session, const uint8_t *wire, size_t size, void *context);
 } IHS_StreamSessionCallbacks;
 
 /*
@@ -161,6 +170,17 @@ bool IHS_SessionConnect(IHS_Session *session);
  * for network/decoder locks. Repeated values are idempotent. The session
  * worker applies Pause/Resume and the connection clock in event order. */
 void IHS_SessionSetForeground(IHS_Session *session, bool foreground);
+
+/** Replace the complete serialized CStreamingClientConfig. Empty means defaults;
+ * absent fields reset, and unknown/nested/repeated fields are retained. Invalid
+ * protobuf leaves state unchanged. This is not a loss-rate/FEC policy.
+ * localOnly suppresses transmission; otherwise 99 is sent only while streaming.
+ * A send failure does not roll back the local replacement. */
+bool IHS_SessionSetStreamingClientConfig(IHS_Session *session, const uint8_t *wire, size_t size,
+                                         bool localOnly);
+/** Return required serialized size. Write only when capacity is sufficient;
+ * zero is a valid empty/default config. Caller owns the destination. */
+size_t IHS_SessionGetStreamingClientConfig(IHS_Session *session, uint8_t *wire, size_t capacity);
 
 /** Wake and stop the session worker thread. Safe to call before
  * IHS_SessionThreadedJoin to guarantee the join completes. */

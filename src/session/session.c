@@ -99,11 +99,10 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig,
     atomic_init(&session->hostRequestedStop, false);
     atomic_init(&session->hostVideoStopped, false);
 
-    // Default the negotiated-streaming flags to true; OnSetClientConfig will reflect the
-    // server's actual answer once the SetStreamingClientConfig control message arrives.
-    session->state.streamingInput = true;
-    session->state.streamingAudio = true;
-    session->state.streamingVideo = true;
+    // Protocol defaults until replaced by a complete config.
+    atomic_init(&session->state.streamingInput, true);
+    atomic_init(&session->state.streamingAudio, true);
+    atomic_init(&session->state.streamingVideo, true);
 
     session->numChannels = 3;
 
@@ -176,6 +175,8 @@ void IHS_SessionDestroy(IHS_Session *session) {
     IHS_TimerDestroy(session->timers);
     IHS_RetransmissionDeinit(&session->retransmission);
     IHS_StreamClockDeinit(&session->clock);
+    if (session->clientConfig)
+        cstreaming_client_config__free_unpacked(session->clientConfig, NULL);
     IHS_CondDestroy(session->sendQueueCond);
     IHS_MutexDestroy(session->sendQueueMutex);
     IHS_QueueDestroy(session->sendQueue, QueuedPacketDestroy, NULL);

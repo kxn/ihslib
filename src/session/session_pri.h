@@ -66,15 +66,13 @@ typedef struct IHS_SessionState {
     atomic_uchar hostConnectionId;
     atomic_bool crcRequired;
     /**
-     * Negotiated stream-enable flags from CSetStreamingClientConfig. Default true at
-     * session creation since the streaming request asked for all three; the server
-     * confirms (or vetoes) via OnSetClientConfig. Mirrors Steam's BStreamingInput /
-     * BStreamingAudio / BStreamingVideo accessors reading from
-     * clientConfig.enable_*_streaming.
+     * Effective stream-enable values from the complete client config, including
+     * its true defaults. Updated for initial config and incoming/local replacement;
+     * receiving 99 is not an obligatory acknowledgement of a prior request.
      */
     atomic_bool streamingInput;
-    bool streamingAudio;
-    bool streamingVideo;
+    atomic_bool streamingAudio;
+    atomic_bool streamingVideo;
     /* Host notification for UI/diagnostics; not an outbound HID gate. */
     atomic_bool inputTemporarilyDisabled;
 } IHS_SessionState;
@@ -85,6 +83,7 @@ struct IHS_Session {
     IHS_Base base;
     IHS_SessionInfo info;
     IHS_SessionState state;
+    CStreamingClientConfig *clientConfig; /* Base lock; owned complete value. */
     /* RX-worker-owned connection clock and lifecycle state. The application
      * publishes foreground transitions through lifecycleGeneration only. */
     struct {
@@ -139,6 +138,10 @@ void IHS_SessionInterrupt(IHS_Session *session);
 
 /* Worker steps, also used by the protocol oracle with a controlled clock. */
 void IHS_SessionTransportBegin(IHS_Session *session, uint32_t now);
+CStreamingClientConfig *IHS_SessionClientConfigCopy(IHS_Session *session);
+bool IHS_SessionClientConfigStore(IHS_Session *session, const CStreamingClientConfig *config);
+bool IHS_SessionClientConfigApply(IHS_Session *session, const CStreamingClientConfig *config,
+                                  bool localOnly);
 void IHS_SessionTransportUpdate(IHS_Session *session, uint32_t now);
 
 bool IHS_SessionSendPacket(IHS_Session *session, IHS_SessionPacket *packet);

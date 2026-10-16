@@ -76,16 +76,30 @@ void IHS_SessionChannelControlOnNegotiation(IHS_SessionChannel *channel, EStream
 }
 
 static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationInitMsg *message, uint16_t packetId) {
-    IHS_SessionConfig ihsConf = {
-            .enableAudio = true,
-            .enableHevc = false,
-            .maxWidth = 1920,
-            .maxHeight = 1080,
-            .maxFps = 60,
-            .maxBitrateKbps = 15000,
-    };
-
     IHS_Session *session = channel->session;
+    CStreamingClientConfig *retained = IHS_SessionClientConfigCopy(session);
+    if (!retained) {
+        IHS_SessionDisconnect(session);
+        return;
+    }
+    CStreamingClientConfig clientConfig = *retained;
+    uint32_t denominator = clientConfig.desired_framerate_denominator;
+    uint32_t fps = clientConfig.desired_framerate_numerator;
+    if (fps && denominator)
+        fps = ((uint64_t)fps + denominator / 2) / denominator;
+    IHS_SessionConfig ihsConf = {
+            .enableAudio = clientConfig.enable_audio_streaming,
+            .enableHevc = clientConfig.enable_video_hevc,
+            .enableUnreliableFec = clientConfig.enable_unreliable_fec,
+            .maxWidth = clientConfig.desired_resolution_x ? clientConfig.desired_resolution_x : 1920,
+            .maxHeight = clientConfig.desired_resolution_y ? clientConfig.desired_resolution_y : 1080,
+            .maxFps = fps ? fps : 60,
+            .maxBitrateKbps = clientConfig.desired_bitrate_kbps > 0 ?
+                (uint32_t)clientConfig.desired_bitrate_kbps : 15000,
+            .quality = (IHS_StreamQuality)clientConfig.quality,
+    };
+    const IHS_SessionConfig before = ihsConf;
+
     if (session->callbacks.session && session->callbacks.session->configuring) {
         session->callbacks.session->configuring(session, &ihsConf, session->callbackContexts.session);
     }
@@ -192,23 +206,29 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
         PROTOBUF_C_SET_VALUE(config, enable_touch_input, 1);
     }
 
-    CStreamingClientConfig clientConfig = CSTREAMING_CLIENT_CONFIG__INIT;
     /* Official Default omits field 25 (false). Explicit enabled settings and
      * presets request true before the video channel starts; never infer this
      * choice from quality alone or the local ability to receive FEC. */
-    if (ihsConf.enableUnreliableFec) {
-        PROTOBUF_C_SET_VALUE(clientConfig, enable_unreliable_fec, true);
+    if (ihsConf.enableUnreliableFec != clientConfig.enable_unreliable_fec) {
+        PROTOBUF_C_SET_VALUE(clientConfig, enable_unreliable_fec, ihsConf.enableUnreliableFec);
     }
 
-    PROTOBUF_C_SET_VALUE(clientConfig, desired_resolution_x, (int32_t) ihsConf.maxWidth);
-    PROTOBUF_C_SET_VALUE(clientConfig, desired_resolution_y, (int32_t) ihsConf.maxHeight);
-    PROTOBUF_C_SET_VALUE(clientConfig, enable_input_streaming, true);
-    PROTOBUF_C_SET_VALUE(clientConfig, enable_hardware_decoding, true);
-    PROTOBUF_C_SET_VALUE(clientConfig, enable_performance_overlay, true);
+    if (!clientConfig.has_desired_resolution_x || ihsConf.maxWidth != before.maxWidth)
+        PROTOBUF_C_SET_VALUE(clientConfig, desired_resolution_x, ihsConf.maxWidth);
+    if (!clientConfig.has_desired_resolution_y || ihsConf.maxHeight != before.maxHeight)
+        PROTOBUF_C_SET_VALUE(clientConfig, desired_resolution_y, ihsConf.maxHeight);
+    if (!clientConfig.has_enable_input_streaming)
+        PROTOBUF_C_SET_VALUE(clientConfig, enable_input_streaming, true);
+    if (!clientConfig.has_enable_hardware_decoding)
+        PROTOBUF_C_SET_VALUE(clientConfig, enable_hardware_decoding, true);
+    if (!clientConfig.has_enable_performance_overlay)
+        PROTOBUF_C_SET_VALUE(clientConfig, enable_performance_overlay, true);
     if (ihsConf.enableAudio) {
-        PROTOBUF_C_SET_VALUE(clientConfig, audio_channels, 2);
-        PROTOBUF_C_SET_VALUE(clientConfig, enable_audio_streaming, true);
+        if (!clientConfig.has_audio_channels)
+            PROTOBUF_C_SET_VALUE(clientConfig, audio_channels, 2);
     }
+    if (!clientConfig.has_enable_audio_streaming || ihsConf.enableAudio != before.enableAudio)
+        PROTOBUF_C_SET_VALUE(clientConfig, enable_audio_streaming, ihsConf.enableAudio);
     // Mic streaming is opt-in: only advertise when the user has registered mic callbacks.
     // Steam's server keys off this flag — without it the server never issues Start, so
     // there's no point in advertising mic support we can't actually fulfil. Matches the
@@ -217,16 +237,22 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
     if (session->callbacks.microphone != NULL) {
         PROTOBUF_C_SET_VALUE(clientConfig, enable_microphone_streaming, true);
     }
-    PROTOBUF_C_SET_VALUE(clientConfig, enable_video_streaming, true);
-    PROTOBUF_C_SET_VALUE(clientConfig, desired_framerate_numerator, ihsConf.maxFps);
-    PROTOBUF_C_SET_VALUE(clientConfig, desired_framerate_denominator, 1);
-    PROTOBUF_C_SET_VALUE(clientConfig, quality, quality);
-    PROTOBUF_C_SET_VALUE(clientConfig, desired_bitrate_kbps, ihsConf.maxBitrateKbps);
-    if (ihsConf.enableHevc) {
-        PROTOBUF_C_SET_VALUE(clientConfig, enable_video_hevc, true);
+    if (!clientConfig.has_enable_video_streaming)
+        PROTOBUF_C_SET_VALUE(clientConfig, enable_video_streaming, true);
+    if (!clientConfig.has_desired_framerate_numerator || ihsConf.maxFps != before.maxFps) {
+        PROTOBUF_C_SET_VALUE(clientConfig, desired_framerate_numerator, ihsConf.maxFps);
+        PROTOBUF_C_SET_VALUE(clientConfig, desired_framerate_denominator, 1);
+    }
+    if (!clientConfig.has_quality || ihsConf.quality != before.quality)
+        PROTOBUF_C_SET_VALUE(clientConfig, quality, quality);
+    if (!clientConfig.has_desired_bitrate_kbps || ihsConf.maxBitrateKbps != before.maxBitrateKbps)
+        PROTOBUF_C_SET_VALUE(clientConfig, desired_bitrate_kbps, ihsConf.maxBitrateKbps);
+    if (ihsConf.enableHevc != clientConfig.enable_video_hevc) {
+        PROTOBUF_C_SET_VALUE(clientConfig, enable_video_hevc, ihsConf.enableHevc);
     }
 
-    clientConfig.controller_overlay_hotkey = "auto";
+    if (!clientConfig.controller_overlay_hotkey)
+        clientConfig.controller_overlay_hotkey = "auto";
 
     CStreamingClientCaps clientCaps = CSTREAMING_CLIENT_CAPS__INIT;
 
@@ -256,11 +282,17 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
 
     CNegotiationSetConfigMsg response = CNEGOTIATION_SET_CONFIG_MSG__INIT;
     response.config = &config;
+    if (!IHS_SessionClientConfigStore(session, &clientConfig)) {
+        cstreaming_client_config__free_unpacked(retained, NULL);
+        IHS_SessionDisconnect(session);
+        return;
+    }
     response.streaming_client_config = &clientConfig;
     response.streaming_client_caps = &clientCaps;
 
     IHS_SessionChannelControlSend(channel, k_EStreamControlNegotiationSetConfig,
                                   (const ProtobufCMessage *) &response, IHS_PACKET_ID_NEXT);
+    cstreaming_client_config__free_unpacked(retained, NULL);
 }
 
 static void OnNegotiationSetConfig(IHS_SessionChannel *channel, const CNegotiationSetConfigMsg *message,
