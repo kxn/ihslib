@@ -50,12 +50,15 @@ void IHS_SessionChannelControlOnMicrophone(IHS_SessionChannel *channel, EStreamC
             }
             mic = IHS_SessionChannelDataMicrophoneCreate(session, message);
             IHS_SessionChannelAdd(session, mic);
+            if (mic && IHS_SessionChannelFor(session, message->channel) == mic)
+                IHS_OutgoingPriority(session, message->channel, 1);
             cstart_audio_data_msg__free_unpacked(message, NULL);
             break;
         }
         case k_EStreamControlStopMicrophoneData: {
             IHS_SessionChannel *mic = IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataMicrophone);
             if (!mic) break;
+            IHS_OutgoingPriority(session, mic->id, 0);
             IHS_SessionChannelRemove(session, mic->id);
             break;
         }

@@ -11,5 +11,7 @@ target_sources(ihslib PRIVATE
         frame_tracker.c
         clock.c
         callbacks.c
-        retransmission.c)
+        retransmission.c
+        outgoing.c
+        outgoing_sort.c)
 add_subdirectory(channels)

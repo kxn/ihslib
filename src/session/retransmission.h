@@ -103,3 +103,7 @@ size_t IHS_RetransmissionNackBefore(IHS_SessionRetransmission *r, IHS_SessionCha
  * entry remains for standalone legacy test callers without a session clock. */
 size_t IHS_RetransmissionProcessTicks(IHS_SessionRetransmission *, uint64_t nowMs,
                                       uint32_t nowTicks, IHS_RetransmissionSendFunction, void *);
+
+size_t IHS_RetransmissionProcessChannel(IHS_SessionRetransmission *, uint64_t nowMs,
+                                        uint32_t nowTicks, uint8_t channel,
+                                        IHS_RetransmissionSendFunction, void *);

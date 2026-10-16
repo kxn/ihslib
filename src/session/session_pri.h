@@ -29,6 +29,7 @@
 #include "clock.h"
 #include "ihslib/session.h"
 #include "packet.h"
+#include "outgoing.h"
 #include "retransmission.h"
 #include <stdatomic.h>
 
@@ -108,6 +109,7 @@ struct IHS_Session {
     unsigned pendingDataCount;
     IHS_Timer *timers;
     IHS_SessionRetransmission retransmission;
+    IHS_Outgoing outgoing;
     IHS_StreamClock clock;
     IHS_HIDManager *hidManager;
     struct IHS_FrameStatsAggregator *frameStats;

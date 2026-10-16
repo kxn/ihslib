@@ -74,6 +74,7 @@ typedef struct IHS_SessionPacketHeader {
     int16_t fragmentId;
     uint16_t packetId;
     uint32_t sendTimestamp;
+    bool autoPacketId; /* Reserve IDs atomically when queued; never serialized. */
     bool hidReport; /* local classification, inherited by fragments; never serialized */
     uint32_t receiveTimestamp; /* local metadata, never serialized */
 } IHS_SessionPacketHeader;

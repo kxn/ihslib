@@ -118,9 +118,9 @@ bool IHS_SessionChannelDataMicrophoneSend(IHS_SessionChannel *channel, const uin
     IHS_BufferAppendUInt32LE(&frame.body, 0); // inputRecvTimestamp
     IHS_BufferAppendMem(&frame.body, data, len);
 
-    // Mic frames are unreliable: voice is time-sensitive and a retransmitted stale
-    // frame is worse than a dropped fresh one. Matches Steam's IsReliableData defaulting
-    // to false unless the negotiated config explicitly enables reliable data.
+    // Ordinary unreliable delivery includes the official bounded NACK resend
+    // window; it is not reliable delivery until ACK. Never describe this path
+    // as having no retransmission merely because reliable_data is false.
     bool ret = IHS_SessionChannelQueueFrame(channel, &frame, false);
     IHS_BufferClear(&frame.body, true);
     return ret;

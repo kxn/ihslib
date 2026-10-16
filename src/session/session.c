@@ -54,6 +54,7 @@
 typedef struct IHS_QueueItem {
     IHS_SessionPacket packet;
     bool reliable;
+    uint32_t queuedAt;
 } QueuedPacket;
 
 static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data);
@@ -93,6 +94,7 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig,
     session->pendingData = IHS_QueueCreate(sizeof(QueuedPacket));
     session->timers = IHS_TimerCreate();
     IHS_StreamClockInit(&session->clock);
+    IHS_OutgoingInit(session, IHS_SessionPacketTimestamp());
     IHS_RetransmissionInit(&session->retransmission, session);
     session->hidManager = IHS_HIDManagerCreate();
     session->frameStats = IHS_FrameStatsAggregatorCreate();
@@ -174,6 +176,7 @@ void IHS_SessionDestroy(IHS_Session *session) {
     IHS_FrameStatsAggregatorDestroy(session->frameStats);
     IHS_TimerDestroy(session->timers);
     IHS_RetransmissionDeinit(&session->retransmission);
+    IHS_OutgoingDeinit(session);
     IHS_StreamClockDeinit(&session->clock);
     if (session->clientConfig)
         cstreaming_client_config__free_unpacked(session->clientConfig, NULL);
@@ -203,9 +206,18 @@ void IHS_SessionInterrupt(IHS_Session *session) {
 }
 
 bool IHS_SessionSendPacket(IHS_Session *session, IHS_SessionPacket *packet) {
+    return IHS_SessionSendPacketResult(session, packet) == 0;
+}
+int IHS_SessionSendPacketResult(IHS_Session *session, IHS_SessionPacket *packet) {
+    IHS_BaseLock(&session->base);
     const IHS_SessionInfo *config = &session->info;
     /* Transport clock is stamped at the actual send attempt, including retries. */
     packet->header.sendTimestamp = IHS_SessionPacketTimestamp();
+    if (!IHS_OutgoingCanSend(session, packet->header.type, packet->header.sendTimestamp)) {
+        IHS_BaseUnlock(&session->base);
+        return 1;
+    }
+    uint32_t charged = IHS_PACKET_HEADER_SIZE + packet->body.size;
     if (session->state.crcRequired && !packet->header.hasCrc) {
         packet->header.hasCrc = true;
         IHS_BufferSetSuffixLength(&packet->body, 4);
@@ -222,26 +234,38 @@ bool IHS_SessionSendPacket(IHS_Session *session, IHS_SessionPacket *packet) {
                        packet->header.channelId, packet->header.packetId, packet->header.fragmentId,
                        packet->header.retransmitCount);
     }
-    return IHS_BaseSend(&session->base, config->address, &serialized);
+    bool sent = IHS_BaseSend(&session->base, config->address, &serialized);
+    int result = sent ? 0 : errno == EAGAIN || errno == EWOULDBLOCK ? 1 : 2;
+    if (sent) IHS_OutgoingSent(session, packet->header.type, packet->header.sendTimestamp, charged);
+    IHS_BaseUnlock(&session->base);
+    return result;
 }
 
 bool IHS_SessionQueuePacket(IHS_Session *session, IHS_SessionPacket *packet, bool retransmit) {
     assert(packet->body.offset == IHS_PACKET_HEADER_SIZE);
     // If the packet has CRC, require 4 bytes extra space at the end of body
     assert(!packet->header.hasCrc || packet->body.suffix == 4);
+    IHS_MutexLock(session->sendQueueMutex);
+    if (packet->header.autoPacketId) {
+        bool reliable = packet->header.type == IHS_SessionPacketTypeReliable ||
+                        packet->header.type == IHS_SessionPacketTypeReliableFrag;
+        packet->header.packetId = IHS_OutgoingNextId(session, packet->header.channelId, reliable);
+        packet->header.autoPacketId = false;
+    }
     /* Register before exposing the initial send to the worker. Otherwise a fast
      * ACK can arrive between sendto() and registration and be lost forever. */
     if (retransmit && !IHS_RetransmissionTrack(&session->retransmission, packet, IHS_TimerNow())) {
+        IHS_MutexUnlock(session->sendQueueMutex);
         IHS_SessionLog(session, IHS_LogLevelError, "Retransmission",
                        "Failed to track reliable Packet(channelId=%u, packetId=%u, fragmentId=%d)",
                        packet->header.channelId, packet->header.packetId,
                        packet->header.fragmentId);
         return false;
     }
-    IHS_MutexLock(session->sendQueueMutex);
     // Move buffer ownership from packet to QueuedPacket
     QueuedPacket *item = QueuedPacketCreate(session, packet);
     item->reliable = retransmit;
+    item->queuedAt = IHS_SessionPacketTimestamp();
 
     IHS_QueueAppend(session->sendQueue, item);
 
@@ -375,12 +399,22 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
      * channel's payload validation. Discovery probes do not keep it alive. */
     if (packetType != IHS_SessionPacketTypeUnconnected)
         session->transport.lastReceive = packet.header.receiveTimestamp;
+    /* Connection::HandlePacket calls GetChannel after CRC/ID/admission and
+     * before the channel ignores unknown types (0x7fb164..c0). */
+    if (!special && session->state.connectionState >= IHS_SessionConnectionStateHandshaking)
+        IHS_OutgoingRegister(session, channelId);
     if (packetType >= IHS_SessionPacketTypeMax) {
         IHS_SessionPacketClear(&packet, true);
         return;
     }
     if (packetType == IHS_SessionPacketTypeConnectACK) {
         IHS_SessionChannelReceivedPacket(session->channels[IHS_SessionChannelIdDiscovery], &packet);
+        IHS_SessionPacketClear(&packet, true);
+        return;
+    }
+    if (packetType == IHS_SessionPacketTypeUnreliableNack) {
+        if (session->state.connectionState >= IHS_SessionConnectionStateHandshaking)
+            IHS_OutgoingNack(session, &packet);
         IHS_SessionPacketClear(&packet, true);
         return;
     }
@@ -511,36 +545,56 @@ static void SessionUpdate(IHS_Base *base, void *context) {
     IHS_SessionTransportUpdate((IHS_Session *)base, IHS_SessionPacketTimestamp());
 }
 
+void IHS_SessionWakeSend(IHS_Session *session) {
+    IHS_MutexLock(session->sendQueueMutex);
+    IHS_CondSignal(session->sendQueueCond);
+    IHS_MutexUnlock(session->sendQueueMutex);
+}
+static bool legacy_send(IHS_SessionPacket *packet, void *ctx) {
+    return IHS_SessionSendPacket(ctx, packet);
+}
 static void SessionSendWorker(void *context) {
-    IHS_Session *session = (IHS_Session *)context;
+    IHS_Session *session = context;
+    uint32_t lastUpdate = IHS_SessionPacketTimestamp();
     while (!session->base.interrupted) {
         IHS_MutexLock(session->sendQueueMutex);
-        QueuedPacket *queued;
-        // Poll the first item in the queue
-        while ((queued = IHS_QueuePoll(session->sendQueue)) == NULL) {
-            // Wait till someone add item into the queue
-            IHS_CondWait(session->sendQueueCond, session->sendQueueMutex);
-            if (session->base.interrupted) {
-                IHS_MutexUnlock(session->sendQueueMutex);
-                return;
-            }
+        QueuedPacket *queued = (void *)IHS_QueuePoll(session->sendQueue);
+        if (!queued && !session->base.interrupted) {
+            IHS_CondWaitTimeout(session->sendQueueCond, session->sendQueueMutex, 1);
+            queued = (void *)IHS_QueuePoll(session->sendQueue);
         }
         IHS_MutexUnlock(session->sendQueueMutex);
-
-        bool sent = IHS_SessionSendPacket(session, &queued->packet);
-        if (!sent) {
-            IHS_SessionLog(session, IHS_LogLevelWarn, "Session",
-                           "Failed to send Packet(channelId=%u, packetId=%u, fragmentId=%u): %s",
-                           queued->packet.header.channelId, queued->packet.header.packetId,
-                           queued->packet.header.fragmentId, strerror(errno));
+        if (session->base.interrupted) {
+            if (queued) { QueuedPacketDestroy(queued, NULL); IHS_QueueItemFree((void *)queued); }
+            break;
         }
-
-        if (queued->reliable) {
-            IHS_RetransmissionNoteInitialSend(&session->retransmission, &queued->packet.header,
-                                              sent, IHS_TimerNow());
+        bool hadQueued = queued != NULL;
+        if (queued) {
+            unsigned type = queued->packet.header.type;
+            if (type == IHS_SessionPacketTypeUnreliable || type == IHS_SessionPacketTypeUnreliableFrag) {
+                uint8_t ch = queued->packet.header.channelId;
+                if (IHS_OutgoingRetain(session, &queued->packet, queued->queuedAt))
+                    IHS_OutgoingSendUnreliable(session, ch, false);
+                else
+                    IHS_SessionLog(session, IHS_LogLevelError, "Send", "Cannot retain outgoing channel %u packet", ch);
+            } else {
+                bool sent = IHS_SessionSendPacket(session, &queued->packet);
+                if (queued->reliable)
+                    IHS_RetransmissionNoteInitialSend(&session->retransmission, &queued->packet.header,
+                                                      sent, IHS_TimerNow());
+            }
+            QueuedPacketDestroy(queued, NULL);
+            IHS_QueueItemFree((void *)queued);
         }
-        QueuedPacketDestroy(queued, NULL);
-        IHS_QueueItemFree(queued);
+        uint32_t now = IHS_SessionPacketTimestamp();
+        if (!hadQueued || (uint32_t)(now - lastUpdate) >= 65) {
+            if (session->state.connectionState >= IHS_SessionConnectionStateHandshaking)
+                IHS_OutgoingUpdate(session, now);
+            else
+                IHS_RetransmissionProcessChannel(&session->retransmission, IHS_TimerNow(), now, 0,
+                                                  legacy_send, session);
+            lastUpdate = now;
+        }
     }
 }
 

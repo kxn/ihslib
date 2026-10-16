@@ -52,6 +52,7 @@ IHS_SessionChannel *IHS_SessionChannelCreate(const IHS_SessionChannelClass *cls,
     channel->type = type;
     channel->id = id;
     channel->session = session;
+    IHS_OutgoingRegister(session, id);
     if (cls->init) {
         cls->init(channel, config);
     }
@@ -158,7 +159,9 @@ void IHS_SessionChannelReceivedPacketNoop(IHS_SessionChannel *channel, IHS_Sessi
 }
 
 uint16_t IHS_SessionChannelNextPacketId(IHS_SessionChannel *channel) {
-    return channel->nextPacketId++;
+    uint16_t id = IHS_OutgoingNextId(channel->session, channel->id, true);
+    channel->nextPacketId = id + 1;
+    return id;
 }
 
 void IHS_SessionChannelInitializePacketHeader(IHS_SessionChannel *channel,
@@ -177,7 +180,7 @@ void IHS_SessionChannelInitializePacketHeader(IHS_SessionChannel *channel,
 
     header->channelId = channel->id;
     if (packetId == IHS_PACKET_ID_NEXT) {
-        header->packetId = IHS_SessionChannelNextPacketId(channel);
+        header->autoPacketId = true;
     } else {
         header->packetId = packetId;
     }
@@ -217,6 +220,15 @@ bool IHS_SessionChannelQueueFrame(IHS_SessionChannel *channel, IHS_SessionFrame 
     }
     assert(packetBodySizeLimit > 0);
 
+    /* The original AddToOutgoingPacketWindow assigns IDs at send admission.
+     * Reserve the complete fragment run under queue lock before publishing any
+     * fragment; producer threads must not allocate interleaved frame IDs. */
+    IHS_MutexLock(channel->session->sendQueueMutex);
+    if (frame->header.autoPacketId) {
+        frame->header.packetId = frame->header.type == IHS_SessionPacketTypeUnreliable ?
+            IHS_OutgoingNextId(channel->session, channel->id, false) : IHS_SessionChannelNextPacketId(channel);
+        frame->header.autoPacketId = false;
+    }
     bool ret;
     if (frame->body.size < packetBodySizeLimit) {
         // Frame can fit in single packet
@@ -229,6 +241,7 @@ bool IHS_SessionChannelQueueFrame(IHS_SessionChannel *channel, IHS_SessionFrame 
         ret =
             SessionChannelQueueFramePackets(channel, frame, packetBodySizeLimit, enableRetransmit);
     }
+    IHS_MutexUnlock(channel->session->sendQueueMutex);
     return ret;
 }
 
@@ -263,7 +276,8 @@ static bool SessionChannelQueueFramePackets(IHS_SessionChannel *channel, IHS_Ses
             /* Fragments sit in consecutive window slots, which are keyed by packet id —
              * reusing the head's id would land every fragment on the same slot, and the
              * window drops a slot that is already taken. */
-            packet.header.packetId = IHS_SessionChannelNextPacketId(channel);
+            packet.header.packetId = frame->header.type == IHS_SessionPacketTypeUnreliable ?
+                IHS_OutgoingNextId(channel->session, channel->id, false) : IHS_SessionChannelNextPacketId(channel);
             packet.header.fragmentId = fragmentId;
             packet.header.type = FragmentedPacketType(packet.header.type);
         }

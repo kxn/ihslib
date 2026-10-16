@@ -69,15 +69,10 @@ static uint64_t RetryDelayMs(IHS_SessionRetransmission *retransmission) {
     return ((uint64_t) ticks * 1000 + 65535) / 65536;
 }
 
-static bool SendRetry(IHS_SessionPacket *packet, void *context) {
-    return IHS_SessionSendPacket(context, packet);
-}
-
 static uint64_t RetransmissionTimerRun(int runCount, void *context) {
     (void) runCount;
     IHS_SessionRetransmission *retransmission = context;
-    IHS_RetransmissionProcessTicks(retransmission, IHS_TimerNow(),
-                                   IHS_SessionPacketTimestamp(), SendRetry, retransmission->session);
+    IHS_SessionWakeSend(retransmission->session);
     return RETRANSMISSION_TICK_MS;
 }
 
@@ -264,7 +259,8 @@ bool IHS_RetransmissionIsTracked(const IHS_SessionRetransmission *retransmission
 }
 
 static bool PendingDue(IHS_RetransmissionPending *p, uint64_t nowMs, bool ticks,
-                        uint32_t nowTicks, uint32_t delay) {
+                        uint32_t nowTicks, uint32_t delay, int channel) {
+    if (channel >= 0 && p->packet.header.channelId != channel) return false;
     if (!p->initialSent) return false;
     /* Connect has a different official scheduler; preserve its existing path
      * until connection-level connect retries are moved out of this window. */
@@ -275,7 +271,7 @@ static bool PendingDue(IHS_RetransmissionPending *p, uint64_t nowMs, bool ticks,
            (int32_t)(p->lastSendTimestamp + delay - nowTicks) < 0;
 }
 static size_t Process(IHS_SessionRetransmission *retransmission, uint64_t nowMs,
-                       bool ticks, uint32_t nowTicks,
+                       bool ticks, uint32_t nowTicks, int channel,
                        IHS_RetransmissionSendFunction send, void *context) {
     typedef struct {
         IHS_RetransmissionPending *pending;
@@ -290,7 +286,7 @@ static size_t Process(IHS_SessionRetransmission *retransmission, uint64_t nowMs,
     IHS_MutexLock(retransmission->lock);
     size_t dueCount = 0;
     for (IHS_RetransmissionPending *p = retransmission->head; p; p = p->next)
-        if (PendingDue(p, nowMs, ticks, nowTicks, delay)) dueCount++;
+        if (PendingDue(p, nowMs, ticks, nowTicks, delay, channel)) dueCount++;
     Attempt *due = dueCount ? calloc(dueCount, sizeof(*due)) : NULL;
     if (!due) {
         IHS_MutexUnlock(retransmission->lock);
@@ -299,7 +295,7 @@ static size_t Process(IHS_SessionRetransmission *retransmission, uint64_t nowMs,
     }
     size_t index = 0;
     for (IHS_RetransmissionPending *p = retransmission->head; p; p = p->next) {
-        if (!PendingDue(p, nowMs, ticks, nowTicks, delay)) continue;
+        if (!PendingDue(p, nowMs, ticks, nowTicks, delay, channel)) continue;
         Attempt *a = &due[index++];
         a->pending = p;
         atomic_fetch_add(&p->references, 1);
@@ -357,12 +353,12 @@ static size_t Process(IHS_SessionRetransmission *retransmission, uint64_t nowMs,
 
 size_t IHS_RetransmissionProcessAt(IHS_SessionRetransmission *r, uint64_t nowMs,
                                    IHS_RetransmissionSendFunction send, void *context) {
-    return Process(r, nowMs, false, 0, send, context);
+    return Process(r, nowMs, false, 0, -1, send, context);
 }
 size_t IHS_RetransmissionProcessTicks(IHS_SessionRetransmission *r, uint64_t nowMs,
                                       uint32_t nowTicks, IHS_RetransmissionSendFunction send,
                                       void *context) {
-    return Process(r, nowMs, true, nowTicks, send, context);
+    return Process(r, nowMs, true, nowTicks, -1, send, context);
 }
 
 void IHS_RetransmissionGetStats(IHS_SessionRetransmission *retransmission,
@@ -480,4 +476,10 @@ size_t IHS_RetransmissionNackBefore(IHS_SessionRetransmission *r, IHS_SessionCha
     }
     IHS_MutexUnlock(r->lock);
     return count;
+}
+
+size_t IHS_RetransmissionProcessChannel(IHS_SessionRetransmission *r, uint64_t nowMs,
+                                        uint32_t nowTicks, uint8_t channel,
+                                        IHS_RetransmissionSendFunction send, void *ctx) {
+    return Process(r, nowMs, true, nowTicks, channel, send, ctx);
 }

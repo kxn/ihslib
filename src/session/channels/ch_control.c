@@ -224,11 +224,6 @@ static bool ControlSendLocked(IHS_SessionChannelControl *control, EStreamControl
      * MTU after encryption. Keep packet buffers bounded, allow a larger frame. */
     frame.body.maxCapacity = 0;
     frame.header.hidReport = type == k_EStreamControlRemoteHID;
-    if (assignedPacketId != NULL) {
-        *assignedPacketId = frame.header.packetId;
-    }
-    IHS_SessionLog(channel->session, logLevel, "Control", "Send control message: %s, id=%u",
-                   value->name, frame.header.packetId);
     IHS_BufferAppendUInt8(&frame.body, type);
     if (IsMessageEncrypted(type)) {
         size_t cipherSize = EncryptedMessageCapacity(messageCapacity);
@@ -253,6 +248,9 @@ static bool ControlSendLocked(IHS_SessionChannelControl *control, EStreamControl
         IHS_BufferAppendMessage(&frame.body, message);
     }
     bool ret = IHS_SessionChannelQueueFrame(channel, &frame, true);
+    if (assignedPacketId != NULL) *assignedPacketId = frame.header.packetId;
+    IHS_SessionLog(channel->session, logLevel, "Control", "Send control message: %s, id=%u",
+                   value->name, frame.header.packetId);
     IHS_SessionFrameClear(&frame, true);
     return ret;
 }

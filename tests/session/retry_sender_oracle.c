@@ -44,6 +44,7 @@ int main(int argc, char **argv) {
     s->state.connectionId = s->state.hostConnectionId = 0;
     s->state.crcRequired = true;
     s->clock.smoothedRTT = rtt;
+    s->outgoing.rate[0] = s->outgoing.rate[1] = 0;
     for (unsigned i = 0; i < packets; ++i) {
         IHS_SessionPacket p = {0};
         p.header.type = IHS_SessionPacketTypeReliable;
