@@ -154,7 +154,7 @@ static void expect_feedback(IHS_Session *s, uint16_t base, uint16_t confirmed, u
         assert(q->packet.header.type == IHS_SessionPacketTypeUnreliableNack && !q->retransmit);
         IHS_SessionPacketPopulateBuffer(&q->packet);
         const uint8_t *wire = q->packet.body.data;
-        assert(wire[0] == 10 && q->packet.body.size == 46);
+        assert(wire[0] == 10 && q->packet.body.size == 7);
         uint16_t b, h;
         uint32_t t;
         IHS_ReadUInt16LE(wire + 7, &b);
@@ -184,7 +184,7 @@ int main(void) {
     deliver(c, 4, 1200);
     expect_feedback(s, 2, 0, 5, 1200);
     deliver(c, 1, 1000); // retransmission fills first hole
-    expect_feedback(s, 4, 2, 1, 1000);
+    expect_feedback(s, 4, 2, 1, 1200);
     pthread_mutex_lock(&lock);
     releaseDecode = true;
     pthread_cond_signal(&ready);

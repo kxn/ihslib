@@ -55,7 +55,7 @@ typedef struct IHS_SessionChannelData {
     IHS_Thread *feedbackWorker;
     IHS_Cond *feedbackCond;
     uint32_t lastPacketTimestamp, feedbackDeadline;
-    bool haveFeedbackDeadline;
+    bool haveFeedbackDeadline, feedbackDirty;
 } IHS_SessionChannelData;
 
 typedef struct IHS_SessionChannelDataClass {
@@ -87,3 +87,8 @@ void IHS_SessionChannelDataStopped(IHS_SessionChannel *channel);
 
 size_t IHS_SessionChannelDataFrameHeaderParse(IHS_SessionDataFrameHeader *header,
                                               const IHS_Buffer *data);
+
+/* Internal protocol step, serialized by windowLock. UINT32_MAX means wait for
+ * more input; otherwise retry after waitTicks. Ready packets transfer to caller. */
+bool IHS_SessionChannelDataBuildFeedback(IHS_SessionChannelData *, uint32_t now,
+                                         IHS_SessionPacket *, uint32_t *waitTicks);

@@ -59,9 +59,9 @@ typedef struct IHS_SessionChannelVideo {
     struct {
         uint16_t expectedSequence;
         uint16_t lastFrameId;
-        uint64_t lastRecoveryRequest;
+        uint32_t lastRecoveryRequest;
         bool waitingKeyFrame, syncingBacklog;
-        uint32_t overflowReportedSpan;
+        int32_t overflowFrameSpan;
         uint64_t lastStatsTime;
         bool frameStarted;
         bool frameFinished;
@@ -303,20 +303,22 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
         DiscardPending(videoCh);
         videoCh->states.waitingKeyFrame = false;
         videoCh->states.syncingBacklog = false;
-        videoCh->states.overflowReportedSpan = 0;
+        videoCh->states.overflowFrameSpan = 0;
         videoCh->states.expectedSequence = vhead.sequence;
         IHS_SessionLog(channel->session, IHS_LogLevelDebug, "Video", "Coming keyframe");
     }
-    uint64_t now = IHS_TimerNow();
+    uint32_t now = IHS_SessionPacketTimestamp();
     if ((videoCh->states.waitingKeyFrame || videoCh->states.syncingBacklog) &&
-        now - videoCh->states.lastRecoveryRequest > 100) {
+        (int32_t)(now - videoCh->states.lastRecoveryRequest) > 6553) {
         IHS_SessionChannelDataLost(channel);
         videoCh->states.lastRecoveryRequest = now;
     }
     if (!videoCh->states.waitingKeyFrame && vhead.sequence != videoCh->states.expectedSequence) {
-        IHS_SessionChannelDataLost(channel);
+        if (!videoCh->states.syncingBacklog) {
+            IHS_SessionChannelDataLost(channel);
+            videoCh->states.lastRecoveryRequest = now;
+        }
         videoCh->states.waitingKeyFrame = true;
-        videoCh->states.lastRecoveryRequest = now;
     }
     videoCh->states.expectedSequence = vhead.sequence + 1;
     videoCh->states.lastFrameId = header->id;
@@ -338,7 +340,7 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
             IHS_BufferClear(&plain, true);
             IHS_SessionChannelDataLost(channel);
             videoCh->states.waitingKeyFrame = true;
-            videoCh->states.lastRecoveryRequest = IHS_TimerNow();
+            videoCh->states.lastRecoveryRequest = IHS_SessionPacketTimestamp();
             goto unlock;
         }
         plain.size = outLen;
@@ -348,8 +350,9 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
         AddPartialFrame(videoCh, header->id, header->timestamp, &vhead, body);
     }
 
-    if (AssembleFrame(channel)) {
-        SubmitFrame(channel, videoCh->assemblyId, &videoCh->frame.buffer, videoCh->frame.flags);
+    while (!videoCh->base.interrupted && AssembleFrame(channel)) {
+        IHS_StreamVideoSubmitResult result =
+            SubmitFrame(channel, videoCh->assemblyId, &videoCh->frame.buffer, videoCh->frame.flags);
         if (videoCh->assembly) {
             IHS_FrameTicketRelease(videoCh->assembly);
             videoCh->assembly = NULL;
@@ -359,6 +362,8 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
         videoCh->states.frameFinished = false;
         videoCh->states.frameStarted = false;
         atomic_fetch_add_explicit(&videoCh->frameCounter, 1, memory_order_relaxed);
+        if (result == IHS_StreamVideoSubmitError)
+            break;
     }
     CheckPartialOverflow(channel);
 unlock:
@@ -435,7 +440,7 @@ static bool AssembleFrame(IHS_SessionChannel *channel) {
                    (videoCh->tracked && partial->ticket != videoCh->assembly)) {
             DiscardPending(videoCh);
             videoCh->states.waitingKeyFrame = true;
-            videoCh->states.lastRecoveryRequest = IHS_TimerNow();
+            videoCh->states.lastRecoveryRequest = IHS_SessionPacketTimestamp();
             IHS_SessionChannelDataLost(channel);
             return false;
         }
@@ -469,7 +474,7 @@ static void AddPartialFrame(IHS_SessionChannelVideo *channel, uint16_t frameId, 
         bytes > channel->frame.buffer.maxCapacity - data->size) {
         DiscardPending(channel);
         channel->states.waitingKeyFrame = true;
-        channel->states.lastRecoveryRequest = IHS_TimerNow();
+        channel->states.lastRecoveryRequest = IHS_SessionPacketTimestamp();
         IHS_SessionChannelDataLost(&channel->base.base);
         return;
     }
@@ -510,21 +515,24 @@ static void CheckPartialOverflow(IHS_SessionChannel *channel) {
     if (!head || head == tail)
         return;
     int32_t span = (int32_t)(tail->timestamp - head->timestamp);
-    if (span < 0)
-        return;
     if (span > 9830) {
         IHS_SessionChannelDataLost(channel);
         videoCh->states.syncingBacklog = true;
-        videoCh->states.lastRecoveryRequest = IHS_TimerNow();
+        videoCh->states.lastRecoveryRequest = IHS_SessionPacketTimestamp();
     }
-    if ((uint32_t)span >= videoCh->states.overflowReportedSpan + 412) {
+    /* CheckOverflow 0x7b2988..b8 compares an inclusive frame-ID range.
+     * +412 is the member offset, not a timestamp increment. Keep the signed
+     * 32-bit subtraction used by the reference, including at ID wrap. */
+    int32_t frameSpan = (int32_t)tail->frameId - (int32_t)head->frameId + 1;
+    if (frameSpan >= videoCh->states.overflowFrameSpan) {
         CStreamVideoOverflowMsg message = CSTREAM_VIDEO_OVERFLOW_MSG__INIT;
         PROTOBUF_C_SET_VALUE(message, first_frame_id, head->frameId);
         PROTOBUF_C_SET_VALUE(message, last_frame_id, tail->frameId);
         IHS_SessionSendControlMessage(channel->session, k_EStreamControlVideoOverflow,
                                       (const ProtobufCMessage *)&message);
-        videoCh->states.overflowReportedSpan = span;
     }
+    /* Even a suppressed, smaller range becomes the next comparison point. */
+    videoCh->states.overflowFrameSpan = frameSpan;
 }
 
 static void DiscardPending(IHS_SessionChannelVideo *channel) {
@@ -548,6 +556,7 @@ static void DiscardPending(IHS_SessionChannelVideo *channel) {
     }
     channel->frame.flags = 0;
     channel->frame.expectedSubFrameStart = 0;
+    channel->states.overflowFrameSpan = 0;
 }
 
 static bool AppendToFrameBuffer(IHS_SessionChannelVideo *channel, const IHS_Buffer *data,

@@ -28,8 +28,15 @@
 #include <memory.h>
 #include <stdlib.h>
 
+/* Packet metadata and the window's propagated age have different meanings. */
+typedef struct WindowItem {
+    IHS_SessionPacketHeader header;
+    IHS_Buffer body;
+    uint32_t senderTimestamp;
+} WindowItem;
+
 struct IHS_SessionPacketsWindow {
-    IHS_SessionWindowItem *data;
+    WindowItem *data;
     uint16_t capacity;
     bool reliable;
     /*
@@ -49,20 +56,20 @@ struct IHS_SessionPacketsWindow {
     } tail;
 };
 
-static inline bool FrameItemIsHead(const IHS_SessionWindowItem *item);
+static inline bool FrameItemIsHead(const WindowItem *item);
 
-static inline bool FrameItemIsUsed(const IHS_SessionWindowItem *item);
+static inline bool FrameItemIsUsed(const WindowItem *item);
 
-static inline void FrameItemUsePacket(IHS_SessionWindowItem *item, IHS_SessionPacket *packet);
+static inline void FrameItemUsePacket(WindowItem *item, IHS_SessionPacket *packet);
 
-static inline void FrameItemRecycle(IHS_SessionWindowItem *item);
+static inline void FrameItemRecycle(WindowItem *item);
 
 IHS_SessionPacketsWindow *IHS_SessionPacketsWindowCreate(uint16_t capacity) {
     IHS_SessionPacketsWindow *window = calloc(1, sizeof(IHS_SessionPacketsWindow));
     if (!window)
         return NULL;
     window->capacity = capacity;
-    window->data = calloc(capacity, sizeof(IHS_SessionWindowItem));
+    window->data = calloc(capacity, sizeof(WindowItem));
     if (!window->data) {
         free(window);
         return NULL;
@@ -131,7 +138,7 @@ bool IHS_SessionPacketsWindowAdd(IHS_SessionPacketsWindow *window, IHS_SessionPa
             unsigned capacity = window->capacity;
             while (capacity < required)
                 capacity = capacity > 8192 ? 16384 : capacity * 2;
-            IHS_SessionWindowItem *data = calloc(capacity, sizeof(*data));
+            WindowItem *data = calloc(capacity, sizeof(*data));
             if (!data)
                 return false;
             for (unsigned i = 0; i < size; i++)
@@ -153,23 +160,26 @@ bool IHS_SessionPacketsWindowAdd(IHS_SessionPacketsWindow *window, IHS_SessionPa
         return false;
     }
     const int writePos = (window->tail.pos + tailOffset + window->capacity) % window->capacity;
-    IHS_SessionWindowItem *tailPkt = &window->data[writePos];
+    WindowItem *tailPkt = &window->data[writePos];
     /* Ignore if the slot is used */
     if (FrameItemIsUsed(tailPkt)) {
         return true;
     }
     FrameItemUsePacket(tailPkt, packet);
-    if (!window->reliable) {
-        /* BInsertPacket 0x7f7388: propagate the successor's timestamp backwards
-         * into preceding holes so a lost frame head can also expire. */
+    /* BInsertPacket 0x7f73d0..7430: max at this slot, then propagate a
+     * smaller timestamp backwards even through occupied slots. Never modify
+     * the packet's actual transport timestamp, which is used by frame stats. */
+    uint32_t stamp = packet->header.sendTimestamp;
+    if (!tailPkt->senderTimestamp || (int32_t)(tailPkt->senderTimestamp - stamp) < 0) {
+        tailPkt->senderTimestamp = stamp;
         unsigned size = IHS_SessionPacketsWindowSize(window);
         unsigned preceding = (unsigned)((int)size + tailOffset - 1);
         for (unsigned n = 1; n <= preceding; ++n) {
-            IHS_SessionWindowItem *hole =
+            WindowItem *previous =
                 &window->data[(writePos + window->capacity - n) % window->capacity];
-            if (FrameItemIsUsed(hole))
+            if (previous->senderTimestamp && (int32_t)(stamp - previous->senderTimestamp) >= 0)
                 break;
-            hole->header.sendTimestamp = packet->header.sendTimestamp;
+            previous->senderTimestamp = stamp;
         }
     }
 
@@ -187,7 +197,7 @@ bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionF
         return false;
     }
     assert(window->head.pos >= 0);
-    IHS_SessionWindowItem *head = &window->data[window->head.pos % window->capacity];
+    WindowItem *head = &window->data[window->head.pos % window->capacity];
 
     /* Joining a session already in progress lands us mid-message: the first packet
      * we see is a fragment whose head we will never get, because Add() drops
@@ -216,7 +226,7 @@ bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionF
     size_t frameBodyLen = 0;
     for (int i = window->head.pos, j = window->head.pos + packetsCount; i < j; i++) {
         /* The array is sparse, must collect all fragments */
-        const IHS_SessionWindowItem *item = &window->data[i % window->capacity];
+        const WindowItem *item = &window->data[i % window->capacity];
         if (!FrameItemIsUsed(item)) {
             return false;
         }
@@ -230,7 +240,7 @@ bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionF
     IHS_BufferEnsureMaxSize(&frame->body, frameBodyLen);
 
     for (int i = window->head.pos, j = window->head.pos + packetsCount; i < j; i++) {
-        IHS_SessionWindowItem *item = &window->data[i % window->capacity];
+        WindowItem *item = &window->data[i % window->capacity];
         IHS_BufferAppend(&frame->body, &item->body);
         if ((int32_t)(item->header.receiveTimestamp - frame->header.receiveTimestamp) > 0) {
             frame->header.receiveTimestamp = item->header.receiveTimestamp;
@@ -252,11 +262,11 @@ uint16_t IHS_SessionPacketsWindowDiscard(IHS_SessionPacketsWindow *window, uint3
     uint16_t size = IHS_SessionPacketsWindowSize(window);
     if (!size)
         return 0;
-    uint32_t newest = window->data[window->tail.pos].header.sendTimestamp;
+    uint32_t newest = window->data[window->tail.pos].senderTimestamp;
     uint16_t discarded = 0;
     while (discarded < size) {
-        IHS_SessionWindowItem *item = &window->data[window->head.pos % window->capacity];
-        if ((int32_t)(newest - item->header.sendTimestamp) <= (int32_t)diff)
+        WindowItem *item = &window->data[window->head.pos % window->capacity];
+        if ((int32_t)(newest - item->senderTimestamp) <= (int32_t)diff)
             break;
         FrameItemRecycle(item);
         window->head.pos = (window->head.pos + 1) % window->capacity;
@@ -304,23 +314,23 @@ uint16_t IHS_SessionPacketsWindowSize(const IHS_SessionPacketsWindow *window) {
     }
 }
 
-static inline bool FrameItemIsHead(const IHS_SessionWindowItem *item) {
+static inline bool FrameItemIsHead(const WindowItem *item) {
     return item->header.type == IHS_SessionPacketTypeReliable ||
            item->header.type == IHS_SessionPacketTypeUnreliable;
 }
 
-static inline bool FrameItemIsUsed(const IHS_SessionWindowItem *item) {
+static inline bool FrameItemIsUsed(const WindowItem *item) {
     return !IHS_BufferIsNull(&item->body);
 }
 
-static inline void FrameItemUsePacket(IHS_SessionWindowItem *item, IHS_SessionPacket *packet) {
+static inline void FrameItemUsePacket(WindowItem *item, IHS_SessionPacket *packet) {
     item->header = packet->header;
     IHS_BufferTransferOwnership(&packet->body, &item->body);
 }
 
-static inline void FrameItemRecycle(IHS_SessionWindowItem *item) {
+static inline void FrameItemRecycle(WindowItem *item) {
     IHS_BufferClear(&item->body, true);
-    memset(item, 0, sizeof(IHS_SessionWindowItem));
+    memset(item, 0, sizeof(WindowItem));
 }
 uint16_t IHS_SessionPacketsWindowNextNeededPacketId(const IHS_SessionPacketsWindow *window) {
     uint16_t size = IHS_SessionPacketsWindowSize(window);
@@ -335,7 +345,7 @@ size_t IHS_SessionPacketsWindowHoleBitmap(const IHS_SessionPacketsWindow *window
     }
     memset(bitmap, 0, (maxPackets + 7) / 8);
     for (int i = window->head.pos, j = window->head.pos + size; i < j; i++) {
-        const IHS_SessionWindowItem *item = &window->data[i % window->capacity];
+        const WindowItem *item = &window->data[i % window->capacity];
         if (!FrameItemIsUsed(item)) {
             continue;
         }
@@ -386,13 +396,16 @@ bool IHS_SessionPacketsWindowMediaFeedback(const IHS_SessionPacketsWindow *windo
         present++;
     if (present == size)
         return false;
-    const IHS_SessionWindowItem *item =
-        &window->data[(window->head.pos + present) % window->capacity];
+    const WindowItem *item = &window->data[(window->head.pos + present) % window->capacity];
     uint16_t head = IHS_SessionPacketsWindowNextNeededPacketId(window);
     feedback->base = (uint16_t)(head + present);
     feedback->confirmed = (uint16_t)(head + first - 1);
     feedback->receiveTimestamp = item->header.receiveTimestamp;
     feedback->retransmitCount = item->header.retransmitCount;
+    unsigned bits = size - present;
+    if (bits > 320)
+        bits = 320;
+    feedback->bitmapBytes = (bits + 7) / 8;
     memset(feedback->bitmap, 0, sizeof(feedback->bitmap));
     IHS_SessionPacketsWindowHoleBitmap(window, feedback->base, feedback->bitmap, 320);
     return true;

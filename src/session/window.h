@@ -88,6 +88,7 @@ uint16_t IHS_SessionPacketsWindowContiguousId(const IHS_SessionPacketsWindow *wi
 typedef struct IHS_MediaFeedback {
     uint16_t base, confirmed;
     uint8_t bitmap[40];
+    size_t bitmapBytes;
     uint32_t receiveTimestamp;
     uint8_t retransmitCount;
 } IHS_MediaFeedback;

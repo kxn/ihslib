@@ -74,3 +74,20 @@ target_link_libraries(ihstest_client_capabilities PRIVATE ihs-test-session)
 ihs_add_test(media_recovery test_media_recovery.c)
 target_link_libraries(ihstest_media_recovery PRIVATE ihs-test-session)
 set_tests_properties(media_recovery PROPERTIES TIMEOUT 10)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ihs-media-oracle media_oracle.c)
+    target_include_directories(ihs-media-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-media-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-media-oracle PRIVATE -UNDEBUG)
+    target_link_options(ihs-media-oracle PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp)
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME media_recovery_oracle COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/check_recovery_oracle.py"
+        --media $<TARGET_FILE:ihs-media-oracle>
+        --video $<TARGET_FILE:ihstest_decoder_loss>
+        --fixture "${CMAKE_CURRENT_SOURCE_DIR}/recovery_oracle.json")
+    set_tests_properties(media_recovery_oracle PROPERTIES TIMEOUT 60)
+endif()

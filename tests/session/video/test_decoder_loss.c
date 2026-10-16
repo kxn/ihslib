@@ -72,10 +72,22 @@ static pthread_cond_t readyCond = PTHREAD_COND_INITIALIZER;
 static bool initialized;
 static unsigned overflowReports;
 static uint32_t firstOverflow, lastOverflow;
-static uint64_t fakeNow;
+static _Atomic uint64_t fakeNow;
+static _Atomic bool oracleTicks;
+static _Atomic uint32_t oracleNow;
+uint32_t __real_IHS_SessionPacketTimestamp(void);
+uint32_t __wrap_IHS_SessionPacketTimestamp(void) {
+    if (oracleTicks)
+        return oracleNow;
+    uint64_t millis = fakeNow;
+    if (millis)
+        return IHS_SESSION_PACKET_TIMESTAMP_FROM_MILLIS(millis);
+    return __real_IHS_SessionPacketTimestamp();
+}
 uint64_t __real_IHS_TimerNow(void);
 uint64_t __wrap_IHS_TimerNow(void) {
-    return fakeNow ? fakeNow : __real_IHS_TimerNow();
+    uint64_t millis = fakeNow;
+    return millis ? millis : __real_IHS_TimerNow();
 }
 static int OnStart(IHS_Session *s, const IHS_StreamVideoConfig *config, void *context) {
     (void)s; (void)config; (void)context;
@@ -152,6 +164,7 @@ static size_t TakeKeyframeRequests(void) {
 static void Reset(void) {
     submittedCount = 0;
     nextSubmitResult = IHS_StreamVideoSubmitOK;
+    overflowReports = 0;
     TakeKeyframeRequests();
 }
 
@@ -233,12 +246,63 @@ static void test_soft_backlog_and_strict_gap(void) {
     Feed(12, 12000, 24, finish, 0, 0, payload, 1);
     assert(submittedCount == 3 && TakeKeyframeRequests() == 1);
     Feed(13, 13000, 26, finish, 0, 0, payload, 1);
-    assert(submittedCount == 3 && TakeKeyframeRequests() == 1);
+    assert(submittedCount == 3 && TakeKeyframeRequests() == 0);
     Feed(14, 14000, 27, finish, 0, 0, payload, 1);
     assert(submittedCount == 3 && TakeKeyframeRequests() == 0);
     Feed(15, 15000, 28, VideoFrameFlagKeyFrame | finish, 0, 0, payload, 1);
     assert(submittedCount == 4); // no retry delay after keyframe
     fakeNow = 0;
+}
+
+static void test_overflow_frame_ranges(void) {
+    Reset();
+    const uint8_t payload = 0x42;
+    const uint8_t finish = VideoFrameFlagSubFrameAdvance | VideoFrameFlagFrameFinish;
+    Feed(40, 0, 400, VideoFrameFlagKeyFrame | finish, 0, 0, &payload, 1);
+    Feed(41, 1000, 401, 0, 2, 3, &payload, 1);
+    assert(overflowReports == 0);
+    Feed(42, 1001, 402, 0, 2, 3, &payload, 1);
+    assert(overflowReports == 1 && firstOverflow == 41 && lastOverflow == 42);
+    Feed(42, 1002, 403, 0, 2, 3, &payload, 1); // equal inclusive range = 2
+    assert(overflowReports == 2);
+    Feed(43, 1003, 404, 0, 2, 3, &payload, 1); // larger range = 3
+    assert(overflowReports == 3);
+    Feed(41, 1004, 405, 0, 2, 3, &payload, 1); // range 1 < 3: suppress but store
+    assert(overflowReports == 3);
+    Feed(41, 1005, 406, 0, 2, 3, &payload, 1); // equal to the stored 1: report
+    assert(overflowReports == 4 && firstOverflow == 41 && lastOverflow == 41);
+    assert(submittedCount == 1 && TakeKeyframeRequests() == 0);
+}
+
+static void test_overflow_wrap_and_reversed_timestamps(void) {
+    Reset();
+    const uint8_t payload = 0x42;
+    const uint8_t finish = VideoFrameFlagSubFrameAdvance | VideoFrameFlagFrameFinish;
+    Feed(65534, 0, 700, VideoFrameFlagKeyFrame | finish, 0, 0, &payload, 1);
+    Feed(65535, 2000, 701, 0, 2, 3, &payload, 1);
+    Feed(0, 1999, 702, 0, 2, 3, &payload, 1);
+    assert(overflowReports == 0); // signed inclusive frame-ID range is negative
+    Feed(1, 1998, 703, 0, 2, 3, &payload, 1);
+    assert(overflowReports == 1 && firstOverflow == 65535 && lastOverflow == 1);
+    Feed(2, 0, 704, VideoFrameFlagKeyFrame | finish, 0, 0, &payload, 1);
+    Feed(3, 2000, 705, 0, 2, 3, &payload, 1);
+    Feed(4, 1999, 706, 0, 2, 3, &payload, 1);
+    assert(overflowReports == 2 && firstOverflow == 3 && lastOverflow == 4);
+    assert(TakeKeyframeRequests() == 0);
+}
+
+static void test_ready_pending_frames_do_not_wait_for_another_packet(void) {
+    Reset();
+    const uint8_t key = 0x40, a = 0x41, b = 0x42, c = 0x43;
+    const uint8_t finish = VideoFrameFlagSubFrameAdvance | VideoFrameFlagFrameFinish;
+    Feed(60, 0, 600, VideoFrameFlagKeyFrame | finish, 0, 0, &key, 1);
+    Feed(61, 1000, 601, finish, 2, 3, &b, 1);
+    Feed(62, 1001, 602, finish, 0, 0, &c, 1);
+    assert(submittedCount == 1);
+    Feed(61, 1002, 603, VideoFrameFlagSubFrameAdvance, 0, 1, &a, 1);
+    assert(submittedCount == 3); // no later packet is needed to submit frame 62
+    assert(submitted[1].len == 2 && submitted[1].data[0] == a && submitted[1].data[1] == b);
+    assert(submitted[2].len == 1 && submitted[2].data[0] == c);
 }
 
 static void test_pending_storage_bound(void) {
@@ -257,10 +321,48 @@ static void test_pending_storage_bound(void) {
     assert(submittedCount == 2);
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     SetUp();
+    if (argc == 2 && !strcmp(argv[1], "--oracle")) {
+        oracleTicks = true;
+        char line[256];
+        unsigned tick, id, seq, flags;
+        const uint8_t payload = 0x42;
+        while (fgets(line, sizeof(line), stdin)) {
+            char mode;
+            if (sscanf(line, "M %c %u", &mode, &tick) == 2) {
+                oracleNow = tick;
+                Feed(10, 0, 0, VideoFrameFlagKeyFrame | VideoFrameFlagFrameFinish, 0, 0, &payload,
+                     1);
+                if (mode == 'H')
+                    Feed(11, 1000, 2, VideoFrameFlagFrameFinish, 0, 0, &payload, 1);
+                if (mode == 'B') {
+                    Feed(11, 1000, 1, VideoFrameFlagSubFrameAdvance, 2, 3, &payload, 1);
+                    Feed(11, 11000, 2, VideoFrameFlagSubFrameAdvance | VideoFrameFlagFrameFinish, 4,
+                         5, &payload, 1);
+                    Feed(11, 11500, 3, VideoFrameFlagSubFrameAdvance, 0, 1, &payload, 1);
+                }
+                Reset();
+            } else if (sscanf(line, "F %u %u %u %u", &tick, &id, &seq, &flags) == 4) {
+                oracleNow = tick;
+                size_t before = submittedCount;
+                Feed(id, 20000, seq, flags, 0, 0, &payload, 1);
+                printf("{\"submitted\":%s,\"lost\":%zu}\n",
+                       submittedCount > before ? "true" : "false", TakeKeyframeRequests());
+            } else if (sscanf(line, "R %u", &flags) == 1) {
+                nextSubmitResult = flags;
+            } else
+                assert(!"bad oracle command");
+        }
+        oracleTicks = false;
+        TearDown();
+        return 0;
+    }
     test_decoder_reported_loss_requests_keyframe();
     test_soft_backlog_and_strict_gap();
+    test_overflow_frame_ranges();
+    test_overflow_wrap_and_reversed_timestamps();
+    test_ready_pending_frames_do_not_wait_for_another_packet();
     test_pending_storage_bound();
     TearDown();
     printf("decoder loss tests OK\n");

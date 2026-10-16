@@ -113,7 +113,10 @@ void IHS_SessionChannelDataReceived(IHS_SessionChannel *channel, IHS_SessionPack
         IHS_SessionPacketsWindowAdd(dataCh->window,
                                     packet); /* now fits; caller clears on failure */
     }
-    dataCh->lastPacketTimestamp = packet->header.sendTimestamp;
+    if (!dataCh->lastPacketTimestamp ||
+        (int32_t)(packet->header.sendTimestamp - dataCh->lastPacketTimestamp) > 0)
+        dataCh->lastPacketTimestamp = packet->header.sendTimestamp;
+    dataCh->feedbackDirty = true;
     IHS_CondSignal(dataCh->windowCond);
     IHS_CondSignal(dataCh->feedbackCond);
     IHS_MutexUnlock(dataCh->windowLock);
@@ -248,41 +251,55 @@ static const char *DataChannelName(IHS_SessionChannelType type) {
     }
 }
 
+bool IHS_SessionChannelDataBuildFeedback(IHS_SessionChannelData *channel, uint32_t now,
+                                         IHS_SessionPacket *packet, uint32_t *waitTicks) {
+    *waitTicks = UINT32_MAX;
+    if (!channel->feedbackDirty)
+        return false;
+    channel->feedbackDirty = false;
+    IHS_MediaFeedback feedback;
+    if (!IHS_SessionPacketsWindowMediaFeedback(channel->window, &feedback))
+        return false;
+    int32_t wait = 0;
+    if (feedback.retransmitCount == 1)
+        wait = (int32_t)(feedback.receiveTimestamp + 65 - now);
+    if (channel->haveFeedbackDeadline) {
+        int32_t deadline = (int32_t)(channel->feedbackDeadline - now);
+        if (deadline > wait)
+            wait = deadline;
+    }
+    if (wait > 0) {
+        channel->feedbackDirty = true;
+        *waitTicks = wait;
+        return false;
+    }
+    IHS_SessionChannelInitializePacket(&channel->base, packet, IHS_SessionPacketTypeUnreliableNack,
+                                       false, feedback.base);
+    IHS_BufferAppendUInt32LE(&packet->body, channel->lastPacketTimestamp);
+    IHS_BufferAppendUInt16LE(&packet->body, feedback.confirmed);
+    IHS_BufferAppendMem(&packet->body, feedback.bitmap, feedback.bitmapBytes);
+    channel->feedbackDeadline =
+        now + IHS_StreamClockMediaFeedbackTicks(&channel->base.session->clock);
+    channel->haveFeedbackDeadline = true;
+    *waitTicks = 0;
+    return true;
+}
+
 static void FeedbackThreadWorker(IHS_SessionChannelData *channel) {
     IHS_MutexLock(channel->windowLock);
     while (!channel->interrupted) {
-        IHS_MediaFeedback feedback;
-        if (!IHS_SessionPacketsWindowMediaFeedback(channel->window, &feedback)) {
-            IHS_CondWait(channel->feedbackCond, channel->windowLock);
-            continue;
-        }
-        uint32_t now = IHS_SessionPacketTimestamp();
-        int32_t wait = 0;
-        /* UpdateUnreliableState: original transmissions get a 65-tick grace;
-         * retransmitted successors can trigger feedback immediately. */
-        if (!feedback.retransmitCount)
-            wait = (int32_t)(feedback.receiveTimestamp + 65 - now);
-        if (channel->haveFeedbackDeadline) {
-            int32_t deadline = (int32_t)(channel->feedbackDeadline - now);
-            if (deadline > wait)
-                wait = deadline;
-        }
-        if (wait > 0) {
-            uint32_t ms = ((uint64_t)(uint32_t)wait * 1000 + 65535) / 65536;
-            IHS_CondWaitTimeout(channel->feedbackCond, channel->windowLock, ms);
-            continue;
-        }
+        uint32_t waitTicks;
         IHS_SessionPacket packet;
-        IHS_SessionChannelInitializePacket(
-            &channel->base, &packet, IHS_SessionPacketTypeUnreliableNack, false, feedback.base);
-        IHS_BufferAppendUInt32LE(&packet.body, channel->lastPacketTimestamp);
-        IHS_BufferAppendUInt16LE(&packet.body, feedback.confirmed);
-        IHS_BufferAppendMem(&packet.body, feedback.bitmap, sizeof(feedback.bitmap));
-        IHS_SessionChannelQueuePacket(&channel->base, &packet, false);
-        IHS_SessionPacketClear(&packet, true);
-        channel->feedbackDeadline =
-            now + IHS_StreamClockMediaFeedbackTicks(&channel->base.session->clock);
-        channel->haveFeedbackDeadline = true;
+        if (IHS_SessionChannelDataBuildFeedback(channel, IHS_SessionPacketTimestamp(), &packet,
+                                                &waitTicks)) {
+            IHS_SessionChannelQueuePacket(&channel->base, &packet, false);
+            IHS_SessionPacketClear(&packet, true);
+        } else if (waitTicks == UINT32_MAX) {
+            IHS_CondWait(channel->feedbackCond, channel->windowLock);
+        } else {
+            uint32_t ms = ((uint64_t)waitTicks * 1000 + 65535) / 65536;
+            IHS_CondWaitTimeout(channel->feedbackCond, channel->windowLock, ms);
+        }
     }
     IHS_MutexUnlock(channel->windowLock);
 }
