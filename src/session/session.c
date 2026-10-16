@@ -55,6 +55,7 @@ typedef struct IHS_QueueItem {
     uint32_t queuedAt;
     uint16_t batchCount; /* reliable frame head: N; continuation: 0 */
     struct IHS_QueueItem *batchNext;
+    bool pendingReliableFrame;
 } QueuedPacket;
 
 static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data);
@@ -93,6 +94,7 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig,
     atomic_init(&session->transport.notified, false);
     atomic_init(&session->transport.addressCleared, false);
     session->sendQueueMutex = IHS_MutexCreate();
+    session->reliableLock = IHS_MutexCreate();
     session->sendQueueCond = IHS_CondCreate();
     session->sendQueue = IHS_QueueCreate(sizeof(QueuedPacket));
     session->pendingData = IHS_QueueCreate(sizeof(QueuedPacket));
@@ -185,6 +187,7 @@ void IHS_SessionDestroy(IHS_Session *session) {
     IHS_TimerDestroy(session->timers);
     IHS_RetransmissionDeinit(&session->retransmission);
     IHS_OutgoingDeinit(session);
+    IHS_SessionReliableDeinit(session);
     IHS_StreamClockDeinit(&session->clock);
     if (session->clientConfig)
         cstreaming_client_config__free_unpacked(session->clientConfig, NULL);
@@ -520,6 +523,13 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
         IHS_SessionPacketClear(&packet, true);
         return;
     }
+    if (packetType == IHS_SessionPacketTypeReliable ||
+        packetType == IHS_SessionPacketTypeReliableFrag ||
+        packetType == IHS_SessionPacketTypeNACK) {
+        IHS_SessionReliableReceived(session, &packet);
+        IHS_SessionPacketClear(&packet, true);
+        return;
+    }
     IHS_SessionChannel *channel = IHS_SessionChannelFor(session, channelId);
     if (channel == NULL && channelId >= IHS_SessionChannelIdDataStart &&
         (packetType == IHS_SessionPacketTypeUnreliable ||
@@ -535,6 +545,7 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
         }
         QueuedPacket *queued = (void *)IHS_QueueItemObtain(session->pendingData);
         queued->packet = packet;
+        queued->pendingReliableFrame = false;
         memset(&packet.body, 0, sizeof(packet.body));
         IHS_QueueAppend(session->pendingData, (void *)queued);
         session->pendingDataCount++;
@@ -548,6 +559,48 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
     IHS_SessionPacketClear(&packet, true);
 }
 
+IHS_ReliableDisposition IHS_SessionDeliverReliableFrame(IHS_Session *session,
+                                                         IHS_SessionFrame *frame) {
+    if (!frame->body.size ||
+        session->state.connectionState == IHS_SessionConnectionStateUnconnected ||
+        atomic_load(&session->transport.shutdown))
+        return IHS_ReliableDiscarded;
+    uint8_t id = frame->header.channelId;
+    if (id == IHS_SessionChannelIdControl) {
+        IHS_SessionChannelControlReceiveFrame(session->channels[1], frame);
+        return IHS_ReliableControl;
+    }
+    if (id < IHS_SessionChannelIdDataStart || *IHS_BufferPointer(&frame->body) != k_EStreamDataPacket)
+        return IHS_ReliableIgnored;
+    if (session->state.connectionState != IHS_SessionConnectionStateConnected)
+        return IHS_ReliableDiscarded;
+    IHS_SessionChannel *channel = IHS_SessionChannelFor(session, id);
+    if (channel && (channel->type == IHS_SessionChannelTypeDataAudio ||
+                    channel->type == IHS_SessionChannelTypeDataVideo)) {
+        IHS_SessionChannelDataReceiveReliableFrame(channel, frame);
+        return IHS_ReliableData;
+    }
+    /* Complete reliable frames wait for Start*Data without re-entering the
+     * sequence window. Preserve their original transport metadata. */
+    if (session->pendingDataCount == 320) {
+        QueuedPacket *old = (void *)IHS_QueuePoll(session->pendingData);
+        IHS_SessionPacketClear(&old->packet, true);
+        IHS_QueueItemFree((void *)old);
+        session->pendingDataCount--;
+    }
+    QueuedPacket *queued = (void *)IHS_QueueItemObtain(session->pendingData);
+    if (!queued) {
+        IHS_SessionDisconnect(session);
+        return IHS_ReliableDiscarded;
+    }
+    queued->packet.header = frame->header;
+    IHS_BufferTransferOwnership(&frame->body, &queued->packet.body);
+    queued->pendingReliableFrame = true;
+    IHS_QueueAppend(session->pendingData, (void *)queued);
+    session->pendingDataCount++;
+    return IHS_ReliablePending;
+}
+
 static bool PendingDataMatches(IHS_QueueItem *item, void *context) {
     return ((QueuedPacket *)item)->packet.header.channelId == ((IHS_SessionChannel *)context)->id;
 }
@@ -555,7 +608,14 @@ void IHS_SessionDrainPendingData(IHS_Session *session, IHS_SessionChannel *chann
     QueuedPacket *queued;
     while ((queued = (void *)IHS_QueuePollBy(session->pendingData, PendingDataMatches, channel))) {
         session->pendingDataCount--;
-        IHS_SessionChannelReceivedPacket(channel, &queued->packet);
+        if (queued->pendingReliableFrame) {
+            IHS_SessionFrame frame = {.header = queued->packet.header, .body = queued->packet.body};
+            memset(&queued->packet.body, 0, sizeof(queued->packet.body));
+            IHS_SessionDeliverReliableFrame(session, &frame);
+            IHS_SessionFrameClear(&frame, true);
+        } else {
+            IHS_SessionChannelReceivedPacket(channel, &queued->packet);
+        }
         IHS_SessionPacketClear(&queued->packet, true);
         IHS_QueueItemFree((void *)queued);
     }
@@ -628,7 +688,7 @@ static void SessionUpdate(IHS_Base *base, void *context) {
         IHS_SessionTransportState(session) == IHS_TransportConnected;
     IHS_BaseUnlock(base);
     if (updateControl)
-        IHS_SessionChannelControlUpdateFeedback((void *)session->channels[1]);
+        IHS_SessionReliableUpdate(session);
 }
 
 void IHS_SessionWakeSend(IHS_Session *session) {

@@ -53,7 +53,6 @@ IHS_SessionChannel *IHS_SessionChannelCreate(const IHS_SessionChannelClass *cls,
     channel->type = type;
     channel->id = id;
     channel->session = session;
-    IHS_OutgoingRegister(session, id);
     if (cls->init) {
         cls->init(channel, config);
     }
@@ -218,6 +217,7 @@ IHS_SendAdmission IHS_SessionChannelQueueFrameResult(IHS_SessionChannel *channel
     if (!channel || !channel->session || channel->session->transport.detached ||
         IHS_SessionTransportState(channel->session) != IHS_TransportConnected)
         return IHS_SendAdmissionNotConnected;
+    IHS_SessionReliableGet(channel->session, channel->id);
     /* CRC emission follows the connection. Fragment capacity independently
      * reserves four bytes even without CRC (official AddToOutgoingPacketWindow
      * 0x7f6fec; docs/STEAMLINK_PROTOCOL_RE.md §42). */

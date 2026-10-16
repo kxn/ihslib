@@ -16,8 +16,8 @@ typedef struct IHS_OutgoingWindow {
     uint32_t lastFeedback;
 } IHS_OutgoingWindow;
 typedef struct IHS_Outgoing {
-    /* Scheduler/cache fields use the recursive Base lock; ID counters use
-     * sendQueueMutex so producer admission never waits for socket I/O. No channel pointers
+    /* Cache/shaper fields use Base; factory/count/order/priority/IDs use
+     * sendQueueMutex. Sender snapshots order before Socket I/O. No channel pointers
      * are retained: channel objects can stop while the connection still owns TX. */
     int32_t rate[2];
     uint32_t deadline[2];

@@ -51,13 +51,16 @@ static void array(char **strings, unsigned *count) {
     putchar(']');
     *count = 0;
 }
-static void observe(IHS_SessionChannelControl *c) {
+static void observe(IHS_ReliableChannel *c) {
     printf("{\"wire\":");
     array(wires, &wireCount);
     printf(",\"delivered\":");
     array(delivered, &deliveredCount);
-    uint16_t head = IHS_SessionPacketsWindowNextNeededPacketId(c->framePacketWindow);
-    uint16_t tail = (uint16_t)(head + IHS_SessionPacketsWindowSize(c->framePacketWindow));
+    uint16_t head =
+        c->framePacketWindow ? IHS_SessionPacketsWindowNextNeededPacketId(c->framePacketWindow) : 0;
+    uint16_t tail = c->framePacketWindow
+                        ? (uint16_t)(head + IHS_SessionPacketsWindowSize(c->framePacketWindow))
+                        : 0;
     printf(",\"dirty\":%s,\"pending_ack\":%s,\"confirmed\":%u,"
            "\"peer_time\":%" PRIu32 ",\"peer_received\":%" PRIu32 ","
            "\"deadline\":%" PRIu32 ",\"head\":%u,\"tail\":%u}",
@@ -75,7 +78,7 @@ int main(int argc, char **argv) {
     s->state.hostConnectionId = 34;
     s->state.crcRequired = atoi(argv[1]) != 0;
     s->clock.smoothedRTT = strtoul(argv[2], NULL, 10);
-    IHS_SessionChannelControl *c = (void *)s->channels[1];
+    IHS_ReliableChannel *c = IHS_SessionReliableGet(s, 1);
     printf("{\"initial\":");
     observe(c);
     printf(",\"observed\":[");
@@ -88,7 +91,7 @@ int main(int argc, char **argv) {
             result = value;
         else if (op == 'U') {
             now = value;
-            IHS_SessionChannelControlUpdateFeedback(c);
+            IHS_SessionReliableUpdateChannel(s, 1);
         } else {
             assert(op == 'R');
             int fields = sscanf(
@@ -110,7 +113,7 @@ int main(int argc, char **argv) {
             IHS_SessionPacketBodyInitialize(&p.body, s->state.crcRequired);
             const uint8_t body[] = {6, 0xaa, 0xbb};
             IHS_BufferAppendMem(&p.body, body, sizeof(body));
-            c->base.cls->received(&c->base, &p);
+            IHS_SessionReliableReceived(s, &p);
             IHS_SessionPacketClear(&p, true);
         }
         if (n++)

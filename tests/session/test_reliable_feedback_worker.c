@@ -13,7 +13,7 @@
 static IHS_Session *session;
 static atomic_uint now;
 static atomic_bool handshake, done;
-static unsigned phase, ackCount, nackCount, frames, failType, error;
+static unsigned phase, ackCount, nackCount, frames, failType, error, target;
 static bool crc;
 static pthread_t receiver;
 uint32_t __wrap_IHS_SessionPacketTimestamp(void) { return atomic_load(&now); }
@@ -38,7 +38,7 @@ bool __wrap_IHS_BaseSend(IHS_Base *base, IHS_SocketAddress address, const IHS_Bu
         atomic_store(&handshake, true);
         return true;
     }
-    assert(w[4] == 1 && (type == 7 || type == 8));
+    assert(w[4] == target && (type == 7 || type == 8));
     assert(pthread_equal(pthread_self(), receiver));
     unsigned id = w[7] | (unsigned)w[8] << 8;
     bool fail;
@@ -97,17 +97,17 @@ int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) 
     case 2:
         atomic_store(&now, 1000100);
         ++phase;
-        return incoming(received, 5, 1, 0);
+        return incoming(received, 5, target, 0);
     case 3:
         assert(frames == 1 && ackCount == 0); /* initial watermark is already zero */
         atomic_store(&now, 1000101);
         ++phase;
-        return incoming(received, 5, 1, 1);
+        return incoming(received, 5, target, 1);
     case 4:
         assert(frames == 2 && ackCount == 1);
         atomic_store(&now, 1000102);
         ++phase;
-        return incoming(received, 5, 1, 2);
+        return incoming(received, 5, target, 2);
     case 5:
         assert(frames == 3 && ackCount == 1);
         atomic_store(&now, 1000165);
@@ -122,7 +122,7 @@ int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) 
         assert(ackCount == 2);
         atomic_store(&now, 1000200);
         ++phase;
-        return incoming(received, 5, 1, 4);
+        return incoming(received, 5, target, 4);
     case 8:
         assert(frames == 3 && nackCount == 0);
         atomic_store(&now, 1000265);
@@ -142,17 +142,17 @@ int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) 
         assert(nackCount == 1 && ackCount == 2); /* no automatic feedback retry */
         atomic_store(&now, 1000500);
         ++phase;
-        return incoming(received, 5, 1, 4);
+        return incoming(received, 5, target, 4);
     case 12:
         assert(nackCount == 2);
         atomic_store(&now, 1000600);
         ++phase;
-        return incoming(received, 5, 1, 3);
+        return incoming(received, 5, target, 3);
     case 13:
         assert(frames == 5 && ackCount == 3);
         atomic_store(&now, 1000700);
         ++phase;
-        return incoming(received, 5, 1, 0);
+        return incoming(received, 5, target, 0);
     case 14:
         assert(frames == 5 && ackCount == 4 && nackCount == 2);
         ++phase;
@@ -166,25 +166,28 @@ int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) 
 }
 int main(void) {
     IHS_Init();
-    for (unsigned c = 0; c < 2; ++c)
-        for (failType = 7; failType <= 8; ++failType)
-            for (error = 1; error <= 4; ++error) {
-                crc = c != 0;
-                phase = ackCount = nackCount = frames = 0;
-                atomic_store(&now, 1000000);
-                atomic_store(&handshake, false);
-                atomic_store(&done, false);
-                session = IHS_TestSessionCreate();
-                assert(IHS_SessionConnect(session));
-                for (unsigned i = 0; !atomic_load(&done) && i < 1000; ++i)
-                    usleep(1000);
-                assert(atomic_load(&done));
-                IHS_SessionDisconnect(session);
-                IHS_SessionThreadedJoin(session);
-                assert(!session->sendThread && !session->base.worker);
-                assert(!session->transport.timedOut && ackCount == 4 && nackCount == 2);
-                IHS_SessionDestroy(session);
-            }
+    const unsigned targets[] = {0, 1, 2, 3, 31};
+    for (unsigned t = 0; t < sizeof(targets) / sizeof(targets[0]); ++t)
+        for (unsigned c = 0; c < 2; ++c)
+            for (failType = 7; failType <= 8; ++failType)
+                for (error = 1; error <= 4; ++error) {
+                    target = targets[t];
+                    crc = c != 0;
+                    phase = ackCount = nackCount = frames = 0;
+                    atomic_store(&now, 1000000);
+                    atomic_store(&handshake, false);
+                    atomic_store(&done, false);
+                    session = IHS_TestSessionCreate();
+                    assert(IHS_SessionConnect(session));
+                    for (unsigned i = 0; !atomic_load(&done) && i < 1000; ++i)
+                        usleep(1000);
+                    assert(atomic_load(&done));
+                    IHS_SessionDisconnect(session);
+                    IHS_SessionThreadedJoin(session);
+                    assert(!session->sendThread && !session->base.worker);
+                    assert(!session->transport.timedOut && ackCount == 4 && nackCount == 2);
+                    IHS_SessionDestroy(session);
+                }
     IHS_Quit();
     return 0;
 }

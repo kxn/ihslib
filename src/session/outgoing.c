@@ -51,27 +51,28 @@ void IHS_OutgoingDeinit(IHS_Session *s) {
 void IHS_OutgoingRegister(IHS_Session *s, uint8_t channel) {
     if (channel >= 32)
         return;
-    IHS_BaseLock(&s->base);
+    IHS_MutexLock(s->sendQueueMutex);
     /* GetChannel 0x7fba68 returns an existing slot directly; creating a new
      * channel fills every missing slot from zero through the requested ID. */
     if (!s->outgoing.active[channel])
         for (unsigned id = 0; id <= channel; ++id)
             if (!s->outgoing.active[id]) {
+                s->reliable[id].feedbackDeadline = IHS_SessionPacketTimestamp();
                 s->outgoing.active[id] = true;
                 s->outgoing.creation[s->outgoing.count] = id;
                 s->outgoing.order[s->outgoing.count++] = id;
                 s->outgoing.dirty = true;
             }
-    IHS_BaseUnlock(&s->base);
+    IHS_MutexUnlock(s->sendQueueMutex);
 }
 void IHS_OutgoingPriority(IHS_Session *s, uint8_t channel, int32_t priority) {
     if (channel >= 32)
         return;
-    IHS_BaseLock(&s->base);
+    IHS_MutexLock(s->sendQueueMutex);
     IHS_OutgoingRegister(s, channel);
     s->outgoing.priority[channel] = priority;
     s->outgoing.dirty = true;
-    IHS_BaseUnlock(&s->base);
+    IHS_MutexUnlock(s->sendQueueMutex);
 }
 uint16_t IHS_OutgoingNextId(IHS_Session *s, uint8_t channel, bool reliable) {
     if (channel >= 32)
@@ -268,24 +269,32 @@ void IHS_OutgoingUpdate(IHS_Session *s, uint32_t now) {
         return;
     }
     IHS_Outgoing *o = &s->outgoing;
+    uint8_t order[32];
+    IHS_MutexLock(s->sendQueueMutex);
     if (o->dirty) {
         memcpy(o->order, o->creation, o->count);
         IHS_OutgoingSort(o);
         o->dirty = false;
     }
-    for (unsigned i = 0; i < o->count; ++i) {
-        uint8_t ch = o->order[i];
+    unsigned count = o->count, rotation = o->rotation;
+    memcpy(order, o->order, count);
+    IHS_MutexUnlock(s->sendQueueMutex);
+    /* Factory publication never needs Base. Snapshot its order before I/O;
+     * a concurrently created channel is considered by the next scan. */
+    for (unsigned i = 0; i < count; ++i) {
+        uint8_t ch = order[i];
         IHS_RetransmissionProcessChannel(&s->retransmission, IHS_TimerNow(), now, ch, send_reliable,
                                          s);
         IHS_OutgoingSendUnreliable(s, ch, false);
     }
-    unsigned rotation = o->rotation;
-    for (unsigned i = 0; i < o->count; ++i) {
-        if (rotation >= o->count)
+    for (unsigned i = 0; i < count; ++i) {
+        if (rotation >= count)
             rotation = 0;
-        IHS_OutgoingSendUnreliable(s, o->order[rotation++], true);
+        IHS_OutgoingSendUnreliable(s, order[rotation++], true);
     }
-    if (++o->rotation > o->count)
+    IHS_MutexLock(s->sendQueueMutex);
+    if (++o->rotation > count)
         o->rotation = 0;
+    IHS_MutexUnlock(s->sendQueueMutex);
     IHS_BaseUnlock(&s->base);
 }

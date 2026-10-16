@@ -184,9 +184,8 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
     session->captureHeight = 1080;
 
     CNegotiatedConfig config = CNEGOTIATED_CONFIG__INIT;
-    /* Android echoes reliable_data because its media channels implement that
-     * mode. This client currently implements unreliable media only; do not
-     * negotiate a mode that ch_data cannot receive. Control remains reliable. */
+    /* Generic reliable reassembly/dispatch is separate from the negotiated
+     * platform media contract. See protocol §46 for the tested boundaries. */
     PROTOBUF_C_SET_VALUE(config, reliable_data, false);
 
     config.has_selected_audio_codec = audioCodec != k_EStreamAudioCodecNone;

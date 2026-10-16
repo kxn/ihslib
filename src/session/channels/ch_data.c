@@ -222,6 +222,19 @@ size_t IHS_SessionChannelDataFrameHeaderParse(IHS_SessionDataFrameHeader *header
     return offset;
 }
 
+void IHS_SessionChannelDataReceiveReliableFrame(IHS_SessionChannel *channel,
+                                                 IHS_SessionFrame *frame) {
+    IHS_SessionChannelData *data = (void *)channel;
+    IHS_MutexLock(data->windowLock);
+    if (!data->interrupted) {
+        IHS_SessionFrame owned = {.header = frame->header};
+        IHS_BufferTransferOwnership(&frame->body, &owned.body);
+        QueueFEC(data, &owned); /* Shared FIFO for already-complete frames. */
+        IHS_CondSignal(data->windowCond);
+    }
+    IHS_MutexUnlock(data->windowLock);
+}
+
 static void DataThreadWorker(IHS_SessionChannelData *channel) {
     const IHS_SessionChannelDataClass *cls = (const IHS_SessionChannelDataClass *)channel->base.cls;
     IHS_SessionFrame frame;
@@ -293,7 +306,8 @@ static void DataThreadInterrupt(IHS_SessionChannelData *channel) {
 
 static void ReceivedFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
     assert(frame->header.type == IHS_SessionPacketTypeUnreliable ||
-           frame->header.type == IHS_SessionPacketTypeUnreliableFEC);
+           frame->header.type == IHS_SessionPacketTypeUnreliableFEC ||
+           frame->header.type == IHS_SessionPacketTypeReliable);
     if (frame->body.size < 1)
         return;
     EStreamDataMessage type = *IHS_BufferPointer(&frame->body);

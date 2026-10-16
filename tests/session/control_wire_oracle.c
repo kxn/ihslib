@@ -115,6 +115,9 @@ int main(int argc, char **argv) {
         printf("%s\"%s\"", i ? "," : "", sent[i]);
         free(sent[i]);
     }
+    printf("],\"channels\":[");
+    for (unsigned i = 0; i < s->outgoing.count; ++i)
+        printf("%s%u", i ? "," : "", s->outgoing.creation[i]);
     printf("],\"admitted\":%s,\"attempts\":%u,\"next_id\":%u}\n", admitted ? "true" : "false",
            sentCount,
            s->outgoing.reliableId[kind == 3   ? 2

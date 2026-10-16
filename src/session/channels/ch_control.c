@@ -44,8 +44,6 @@ static bool IsMessageEncrypted(EStreamControlMessage type);
 static size_t EncryptedMessageCapacity(size_t plainSize);
 
 static void OnControlInit(IHS_SessionChannel *channel, const void *data);
-static void ControlOnNackPacket(IHS_SessionChannelControl *control, IHS_SessionPacket *packet);
-static void ControlDrainFrames(IHS_SessionChannelControl *control);
 
 static void OnControlDeinit(IHS_SessionChannel *channel);
 
@@ -232,6 +230,9 @@ static IHS_SendAdmission ControlSendLocked(IHS_SessionChannelControl *control,
     frame.header.hidReport = type == k_EStreamControlRemoteHID;
     IHS_BufferAppendUInt8(&frame.body, type);
     if (IsMessageEncrypted(type)) {
+        /* Client prepares encrypted control via GetChannel before Frame's
+         * transport guard, even if the connection then rejects the Frame. */
+        IHS_SessionReliableGet(channel->session, channel->id);
         size_t cipherSize = EncryptedMessageCapacity(messageCapacity);
         uint8_t *serialized = calloc(1, messageCapacity ? messageCapacity : 1);
         if (serialized == NULL) {
@@ -321,247 +322,68 @@ void IHS_SessionChannelControlHandshake(IHS_SessionChannel *channel, bool networ
                                   (const ProtobufCMessage *)&message, IHS_PACKET_ID_NEXT);
 }
 
-/* Original Channel::UpdateReliableState; see protocol reference §45. Run on
- * the receive worker so frame/decrypt callbacks keep their existing thread. */
 void IHS_SessionChannelControlUpdateFeedback(IHS_SessionChannelControl *control) {
-    IHS_SessionChannel *channel = &control->base;
-    IHS_Session *session = channel->session;
-    IHS_MutexLock(control->receiveLock);
-    if (!control->feedbackDirty) {
-        IHS_MutexUnlock(control->receiveLock);
-        return;
-    }
-    control->feedbackDirty = false;
-    uint32_t now = IHS_SessionPacketTimestamp();
-    IHS_MutexUnlock(control->receiveLock);
-    /* Application delegates retain their existing lock domain. Only feedback
-     * state + Socket attempts need Base -> receiveLock serialization. */
-    ControlDrainFrames(control);
-    IHS_BaseLock(&session->base);
-    IHS_MutexLock(control->receiveLock);
-    bool eligible = (int32_t)(now - control->feedbackDeadline) >= 0;
-    bool attempted = false;
-    uint16_t confirmed = IHS_SessionPacketsWindowContiguousId(control->framePacketWindow);
-    if (confirmed != control->ackWatermark) {
-        control->ackWatermark = confirmed;
-        control->ackPending = true;
-    }
-    if (control->ackPending) {
-        if (eligible) {
-            IHS_SessionChannelPacketAck(channel, confirmed, 0, true,
-                control->peerTimestamp + IHS_SessionPacketTimestamp() - control->peerReceiveTime);
-            control->ackPending = false;
-            attempted = true;
-        } else {
-            control->feedbackDirty = true;
-        }
-    }
-    IHS_MediaFeedback feedback;
-    bool mature;
-    if (IHS_SessionPacketsWindowReliableFeedback(control->framePacketWindow, now,
-                                                  &feedback, &mature)) {
-        if (eligible && mature) {
-            IHS_SessionPacket packet;
-            IHS_SessionChannelInitializePacket(channel, &packet, IHS_SessionPacketTypeNACK,
-                                               false, feedback.base);
-            packet.header.fragmentId = 0;
-            IHS_BufferAppendUInt32LE(&packet.body, control->peerTimestamp);
-            IHS_BufferAppendUInt16LE(&packet.body, confirmed);
-            IHS_BufferAppendMem(&packet.body, feedback.bitmap, feedback.bitmapBytes);
-            /* Official attempts synchronously and does not retry this feedback
-             * on Socket errors. A new receive event can re-arm the channel. */
-            IHS_SessionSendPacket(session, &packet);
-            IHS_SessionPacketClear(&packet, true);
-            attempted = true;
-        } else {
-            control->feedbackDirty = true;
-        }
-    }
-    if (attempted)
-        control->feedbackDeadline = now + IHS_StreamClockFeedbackTicks(&session->clock);
-    IHS_MutexUnlock(control->receiveLock);
-    IHS_BaseUnlock(&session->base);
+    IHS_SessionReliableUpdateChannel(control->base.session, control->base.id);
 }
 
 static void OnControlInit(IHS_SessionChannel *channel, const void *data) {
     IHS_UNUSED(data);
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *)channel;
     control->sendLock = IHS_MutexCreate();
-    control->receiveLock = IHS_MutexCreate();
-    control->framePacketWindow = IHS_SessionPacketsWindowCreateReliable(320, 0);
-    control->feedbackDeadline = IHS_SessionPacketTimestamp();
 }
 
 static void OnControlDeinit(IHS_SessionChannel *channel) {
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *)channel;
     IHS_SessionChannelControlStopHeartbeat(channel);
-    IHS_SessionPacketsWindowDestroy(control->framePacketWindow);
-    IHS_MutexDestroy(control->receiveLock);
     IHS_MutexDestroy(control->sendLock);
 }
 
 static void OnControlReceived(IHS_SessionChannel *channel, IHS_SessionPacket *packet) {
-    IHS_SessionChannelControl *control = (IHS_SessionChannelControl *)channel;
-    IHS_SessionPacketsWindow *window = control->framePacketWindow;
-    /* Receive only records the event; the RX worker's Update drains complete
-     * frames and emits coalesced feedback, like the official channel. */
-    switch (packet->header.type) {
-    case IHS_SessionPacketTypeReliable:
-    case IHS_SessionPacketTypeReliableFrag:
-        IHS_MutexLock(control->receiveLock);
-        control->feedbackDirty = true;
-        if (!control->peerTimestamp ||
-            (int32_t)(packet->header.sendTimestamp - control->peerTimestamp) > 0) {
-            control->peerTimestamp = packet->header.sendTimestamp;
-            control->peerReceiveTime = packet->header.receiveTimestamp;
-        }
-        if ((int16_t)(IHS_SessionPacketsWindowNextNeededPacketId(window) -
-                      packet->header.packetId) > 0)
-            control->ackPending = true;
-        bool added = IHS_SessionPacketsWindowAdd(window, packet);
-        IHS_MutexUnlock(control->receiveLock);
-        if (!added) {
-            /* Log and disconnect once: the packets keep coming, and firing a
-             * disconnect per packet floods the link and re-enters teardown. */
-            if (!control->overflowed) {
-                control->overflowed = true;
-                IHS_SessionLog(channel->session, IHS_LogLevelError, "Control",
-                               "Frames window overflow");
-                IHS_SessionDisconnect(channel->session);
-            }
-            return;
-        }
-        break;
-    case IHS_SessionPacketTypeACK:
-        /* SessionRecvCallback already processed the cumulative ACK. */
-        break;
-    case IHS_SessionPacketTypeNACK:
-        ControlOnNackPacket(control, packet);
-        break;
-    default:
-        /* Official ignores unrecognized channel packet types (its channel
-         * HandlePacket default falls through without action). Killing the
-         * session on one unexpected packet turns a harmless difference
-         * into a dead stream. */
-        IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Control",
-                       "Ignoring unrecognized packet type %u\n", packet->header.type);
-        break;
-    }
-    /* Frame callbacks belong to the next channel Update, not HandlePacket. */
+    IHS_SessionReliableReceived(channel->session, packet);
 }
 
-static void ControlDrainFrames(IHS_SessionChannelControl *control) {
-    IHS_SessionChannel *channel = &control->base;
-    IHS_SessionPacketsWindow *window = control->framePacketWindow;
-    IHS_SessionFrame frame;
-    IHS_BufferInit(&frame.body, 1024, 1024 * 1024);
-
-    for (;;) {
-        IHS_MutexLock(control->receiveLock);
-        bool ready = IHS_SessionPacketsWindowPoll(window, &frame);
-        IHS_MutexUnlock(control->receiveLock);
-        if (!ready)
+void IHS_SessionChannelControlReceiveFrame(IHS_SessionChannel *channel, IHS_SessionFrame *frame) {
+    IHS_SessionChannelControl *control = (void *)channel;
+    if (!frame->body.size) return;
+    EStreamControlMessage type = *IHS_BufferPointer(&frame->body);
+    IHS_BufferOffsetBy(&frame->body, 1);
+    if (IsMessageEncrypted(type)) {
+        IHS_Buffer plain;
+        IHS_BufferInit(&plain, 1024, 1024 * 1024);
+        /* OnStreamPacket 0x7ad054..0x7ad070 increments BEFORE BDecrypt,
+         * including failed attempts. No resynchronization or rollback. */
+        uint64_t expectSequence = control->recvEncryptSequence++, actualSequence;
+        switch (IHS_SessionFrameDecrypt(channel->session, &frame->body, &plain, expectSequence,
+                                        &actualSequence)) {
+        case IHS_SessionPacketResultOK: {
+            IHS_SessionChannelControlOnMessageReceived(channel, type, &plain, &frame->header);
             break;
-        if (frame.body.size == 0) {
-            IHS_SessionPacketsWindowReleaseFrame(&frame);
-            continue;
         }
-        EStreamControlMessage type = *IHS_BufferPointer(&frame.body);
-        IHS_BufferOffsetBy(&frame.body, 1);
-        if (IsMessageEncrypted(type)) {
-            IHS_Buffer plain;
-            IHS_BufferInit(&plain, 1024, 1024 * 1024);
-            /* OnStreamPacket 0x7ad054..0x7ad070 increments BEFORE BDecrypt,
-             * including failed attempts. No resynchronization or rollback. */
-            uint64_t expectSequence = control->recvEncryptSequence++, actualSequence;
-            switch (IHS_SessionFrameDecrypt(channel->session, &frame.body, &plain, expectSequence,
-                                            &actualSequence)) {
-            case IHS_SessionPacketResultOK: {
-                IHS_SessionChannelControlOnMessageReceived(channel, type, &plain, &frame.header);
-                break;
-            }
-            case IHS_SessionFrameDecryptHashMismatch:
-            case IHS_SessionFrameDecryptOldSequence: {
-                // Ignore this packet
-                break;
-            }
-            case IHS_SessionFrameDecryptSequenceMismatch: {
-                IHS_SessionLog(
-                    channel->session, IHS_LogLevelWarn, "Control",
-                    "Mismatched message sequence %llu (expect %llu). id=%d, retransmit=%d, type=%s",
-                    actualSequence, expectSequence, frame.header.packetId,
-                    frame.header.retransmitCount, ControlMessageTypeName(type));
-                break;
-            }
-            case IHS_SessionFrameDecryptFailed: {
-                IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Control",
-                               "Failed to decrypt control message. id=%d, retransmit=%d, type=%s",
-                               frame.header.packetId, frame.header.retransmitCount,
-                               ControlMessageTypeName(type));
-                break;
-            }
-            }
-            IHS_BufferClear(&plain, true);
-        } else {
-            IHS_SessionChannelControlOnMessageReceived(channel, type, &frame.body, &frame.header);
+        case IHS_SessionFrameDecryptHashMismatch:
+        case IHS_SessionFrameDecryptOldSequence: {
+            // Ignore this packet
+            break;
         }
-        IHS_SessionPacketsWindowReleaseFrame(&frame);
+        case IHS_SessionFrameDecryptSequenceMismatch: {
+            IHS_SessionLog(
+                channel->session, IHS_LogLevelWarn, "Control",
+                "Mismatched message sequence %llu (expect %llu). id=%d, retransmit=%d, type=%s",
+                actualSequence, expectSequence, frame->header.packetId,
+                frame->header.retransmitCount, ControlMessageTypeName(type));
+            break;
+        }
+        case IHS_SessionFrameDecryptFailed: {
+            IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Control",
+                           "Failed to decrypt control message. id=%d, retransmit=%d, type=%s",
+                           frame->header.packetId, frame->header.retransmitCount,
+                           ControlMessageTypeName(type));
+            break;
+        }
+        }
+        IHS_BufferClear(&plain, true);
+    } else {
+        IHS_SessionChannelControlOnMessageReceived(channel, type, &frame->body, &frame->header);
     }
-
-    IHS_BufferClear(&frame.body, true);
-
-}
-
-/* Peer reports its receive state for OUR reliable stream. Extended NACK body
- * (wire offsets after the 13B header): [0..3] u32 timestamp, [4..5] u16
- * contiguous delivery point, [6..] presence mask (bit=1: peer holds it).
- * bit=1 releases the packet from retransmission; bit=0 forces a resend.
- * Header-only (empty body) is the simple form: everything the reference
- * (header.packetId) covers is missing on the peer. */
-static void ControlOnNackPacket(IHS_SessionChannelControl *control, IHS_SessionPacket *packet) {
-    IHS_Session *session = control->base.session;
-    uint64_t nowMs = IHS_TimerNow();
-    /* HandleNackPacket 0x7f9610: ignore stale feedback, allowing equality. */
-    if (control->haveNackTimestamp &&
-        (int32_t)(packet->header.sendTimestamp - control->lastNackTimestamp) < 0)
-        return;
-    if (packet->body.size != 0 && packet->body.size < 6)
-        return;
-    control->haveNackTimestamp = true;
-    control->lastNackTimestamp = packet->header.sendTimestamp;
-    uint32_t cutoff = IHS_SessionPacketTimestamp() - IHS_StreamClockNackAgeTicks(&session->clock);
-    if (packet->body.size >= 6) {
-        const uint8_t *body = IHS_BufferPointer(&packet->body);
-        uint32_t seen =
-            body[0] | (uint32_t)body[1] << 8 | (uint32_t)body[2] << 16 | (uint32_t)body[3] << 24;
-        /* csel ..., lt at 0x7f977c selects seen when cutoff < seen (max). */
-        if ((int32_t)(cutoff - seen) < 0)
-            cutoff = seen;
-        uint16_t contiguous = (uint16_t)(body[4] | (body[5] << 8));
-        IHS_RetransmissionAcknowledgeThrough(&session->retransmission, IHS_SessionChannelIdControl,
-                                             (uint16_t)(contiguous + 1u), nowMs);
-        size_t maskLen = packet->body.size - 6;
-        for (size_t j = 0; j < maskLen; j++) {
-            uint8_t bits = body[6 + j];
-            /* 0x7f9840 skips zero bytes; 0x7f9868..78 stops after the highest
-             * set bit. Trailing zero bits are not explicit resend requests. */
-            for (size_t k = 0; bits; k++, bits >>= 1) {
-                uint16_t id = (uint16_t)(packet->header.packetId + j * 8 + k);
-                if (bits & 1u) {
-                    IHS_RetransmissionAcknowledge(&session->retransmission,
-                                                  IHS_SessionChannelIdControl, id, INT16_MIN,
-                                                  nowMs);
-                } else {
-                    IHS_RetransmissionNackBefore(&session->retransmission,
-                                                 IHS_SessionChannelIdControl, id, false, cutoff,
-                                                 nowMs);
-                }
-            }
-        }
-    }
-    /* Header-only and extended forms also request IDs BELOW the bitmap base. */
-    IHS_RetransmissionNackBefore(&session->retransmission, IHS_SessionChannelIdControl,
-                                 packet->header.packetId, true, cutoff, nowMs);
 }
 
 void IHS_SessionChannelControlOnMessageReceived(IHS_SessionChannel *channel,

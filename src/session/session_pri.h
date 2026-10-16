@@ -30,6 +30,7 @@
 #include "ihslib/session.h"
 #include "packet.h"
 #include "outgoing.h"
+#include "reliable.h"
 #include "retransmission.h"
 #include <stdatomic.h>
 
@@ -120,6 +121,8 @@ struct IHS_Session {
     IHS_Timer *timers;
     IHS_SessionRetransmission retransmission;
     IHS_Outgoing outgoing;
+    IHS_ReliableChannel reliable[32];
+    IHS_Mutex *reliableLock;
     IHS_StreamClock clock;
     IHS_HIDManager *hidManager;
     struct IHS_FrameStatsAggregator *frameStats;

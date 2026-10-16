@@ -17,6 +17,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive
         -Wl,--wrap=IHS_SessionPacketsWindowPoll)
     set_tests_properties(reliable_feedback_worker PROPERTIES TIMEOUT 20)
+    add_executable(ihs-reliable-channels-oracle reliable_channels_oracle.c)
+    target_include_directories(ihs-reliable-channels-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-reliable-channels-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-reliable-channels-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-reliable-channels-oracle PRIVATE -Wl,--wrap=IHS_BaseSend
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_SessionDeliverReliableFrame
+        -Wl,--wrap=IHS_SessionChannelDataReceiveReliableFrame)
     add_executable(ihs-reliable-feedback-oracle reliable_feedback_oracle.c)
     target_include_directories(ihs-reliable-feedback-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-reliable-feedback-oracle PRIVATE ihs-test-session ihslib)

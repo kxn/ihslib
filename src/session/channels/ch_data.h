@@ -100,3 +100,6 @@ size_t IHS_SessionChannelDataFrameHeaderParse(IHS_SessionDataFrameHeader *header
  * more input; otherwise retry after waitTicks. Ready packets transfer to caller. */
 bool IHS_SessionChannelDataBuildFeedback(IHS_SessionChannelData *, uint32_t now,
                                          IHS_SessionPacket *, uint32_t *waitTicks);
+
+/* Transfer an ordered, reassembled reliable frame to the decoder worker. */
+void IHS_SessionChannelDataReceiveReliableFrame(IHS_SessionChannel *, IHS_SessionFrame *);

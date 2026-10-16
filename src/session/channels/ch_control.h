@@ -46,22 +46,12 @@ typedef struct IHS_SessionChannelControl {
      * messages — the receive thread answering HID requests, the timer thread's
      * keepalive, and the application's per-frame HID report. */
     IHS_Mutex *sendLock;
-    IHS_Mutex *receiveLock;
-    uint32_t peerTimestamp, peerReceiveTime;
-    bool feedbackDirty, ackPending;
-    uint16_t ackWatermark;
-    uint32_t feedbackDeadline;
     uint64_t sendEncryptSequence;
     uint64_t recvEncryptSequence;
     uint64_t hidSubmitted;
     uint64_t hidCoalesced;
     uint64_t hidSent;
-    IHS_SessionPacketsWindow *framePacketWindow;
-    /** Set once the frame window overflowed, so we disconnect only once. */
-    bool overflowed;
     IHS_TimerTask *keepAliveTimer;
-    uint32_t lastNackTimestamp;
-    bool haveNackTimestamp;
 } IHS_SessionChannelControl;
 
 IHS_SessionChannel *IHS_SessionChannelControlCreate(IHS_Session *session);
@@ -134,3 +124,5 @@ void IHS_ControlDiagnosticsInit(void);
 void IHS_ControlDiagnosticsQuit(void);
 
 void IHS_SessionChannelControlUpdateFeedback(IHS_SessionChannelControl *control);
+
+void IHS_SessionChannelControlReceiveFrame(IHS_SessionChannel *, IHS_SessionFrame *);
