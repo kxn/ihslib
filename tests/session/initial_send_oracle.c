@@ -67,7 +67,6 @@ int main(int argc, char **argv) {
     IHS_Init();
     IHS_Session *s = IHS_TestSessionCreate();
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
-    IHS_TimerTaskStopImmediate(((IHS_SessionChannelControl *)s->channels[1])->feedbackTimer);
     s->state.connectionState = IHS_SessionConnectionStateHandshaking;
     s->state.connectionId = 12;
     s->state.hostConnectionId = 34;

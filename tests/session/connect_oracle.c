@@ -49,7 +49,6 @@ int main(void) {
     IHS_Init();
     IHS_Session *s = IHS_TestSessionCreate();
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
-    IHS_TimerTaskStopImmediate(((IHS_SessionChannelControl *)s->channels[1])->feedbackTimer);
     char line[128];
     unsigned paused, size, crc;
     while (fgets(line, sizeof(line), stdin)) {

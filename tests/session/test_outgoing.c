@@ -117,7 +117,6 @@ int main(void) {
     s->state.connectionState = IHS_SessionConnectionStateHandshaking;
     assert(s);
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
-    IHS_TimerTaskStopImmediate(((IHS_SessionChannelControl *)s->channels[1])->feedbackTimer);
     admission(s);
     growth(s);
     IHS_SessionDestroy(s);

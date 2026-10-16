@@ -35,7 +35,6 @@ int main(void) {
     f.session->state.connectionState = IHS_SessionConnectionStateHandshaking;
     IHS_TimerTaskStopImmediate(f.session->retransmission.timer);
     IHS_SessionChannelControl *c = (void *)f.session->channels[1];
-    IHS_TimerTaskStopImmediate(c->feedbackTimer);
     f.device = calloc(1, sizeof(*f.device));
     f.device->manager = f.session->hidManager;
     f.device->id = 1;

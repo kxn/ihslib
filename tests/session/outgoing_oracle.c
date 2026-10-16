@@ -81,7 +81,6 @@ int main(void) {
     IHS_Init();
     IHS_Session *s = IHS_TestSessionCreate();
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
-    IHS_TimerTaskStopImmediate(((IHS_SessionChannelControl *)s->channels[1])->feedbackTimer);
     IHS_OutgoingDeinit(s);
     IHS_OutgoingInit(s, 1000000);
     s->state.connectionId = s->state.hostConnectionId = 0;

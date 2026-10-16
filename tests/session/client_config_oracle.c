@@ -109,6 +109,7 @@ static void receive(IHS_Session *s, const uint8_t *payload, size_t n) {
         IHS_Buffer wire = IHS_BUFFER_INIT(2048, 2048);
         IHS_BufferAppendMem(&wire, p.body.data, IHS_SessionPacketSize(&p));
         s->base.callbacks.received(&s->base, &s->info.address, &wire);
+        IHS_SessionChannelControlUpdateFeedback((void *)s->channels[1]);
         IHS_BufferClear(&wire, true);
         IHS_SessionPacketClear(&p, true);
     }
@@ -119,7 +120,6 @@ int main(void) {
     IHS_Session *s = IHS_TestSessionCreate();
     assert(s);
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
-    IHS_TimerTaskStopImmediate(((IHS_SessionChannelControl *)s->channels[1])->feedbackTimer);
     s->state.connectionId = 12;
     s->state.hostConnectionId = 34;
     s->state.mtu = 512;

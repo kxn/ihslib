@@ -35,7 +35,7 @@ static void window_cases(void) {
     IHS_StreamClockInit(&clock);
     IHS_StreamClockFeedback(&clock, 1000, 2000, 1656); // ~10ms RTT
     assert(IHS_StreamClockMediaDelayTicks(&clock) == 6946);
-    assert(IHS_StreamClockMediaFeedbackTicks(&clock) == 164);
+    assert(IHS_StreamClockFeedbackTicks(&clock) == 164);
     IHS_StreamClockDeinit(&clock);
     IHS_SessionPacketsWindow *initial = IHS_SessionPacketsWindowCreateMedia(32);
     IHS_MediaFeedback initialFeedback;

@@ -102,7 +102,6 @@ int main(int argc, char **argv) {
     IHS_Session *s = IHS_TestSessionCreate();
     assert(s);
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
-    IHS_TimerTaskStopImmediate(((IHS_SessionChannelControl *)s->channels[1])->feedbackTimer);
     s->state.connectionState = atoi(argv[1]);
     s->state.connectionId = 12;
     s->state.hostConnectionId = 34;
@@ -136,6 +135,7 @@ int main(int argc, char **argv) {
             if (!address)
                 peer.port++;
             s->base.callbacks.received(&s->base, &peer, &buffer);
+            IHS_SessionChannelControlUpdateFeedback((void *)s->channels[1]);
             IHS_BufferClear(&buffer, true);
         } else if (sscanf(line, "FOREGROUND %u", &value) == 1) {
             IHS_SessionSetForeground(s, value != 0);

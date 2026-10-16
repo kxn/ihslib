@@ -354,7 +354,7 @@ bool IHS_SessionChannelDataBuildFeedback(IHS_SessionChannelData *channel, uint32
     IHS_BufferAppendUInt16LE(&packet->body, feedback.confirmed);
     IHS_BufferAppendMem(&packet->body, feedback.bitmap, feedback.bitmapBytes);
     channel->feedbackDeadline =
-        now + IHS_StreamClockMediaFeedbackTicks(&channel->base.session->clock);
+        now + IHS_StreamClockFeedbackTicks(&channel->base.session->clock);
     channel->haveFeedbackDeadline = true;
     *waitTicks = 0;
     return true;

@@ -47,7 +47,7 @@
 #include "hid/manager.h"
 
 /* Bounded receive wait lets the existing worker advance transport deadlines. */
-#define SESSION_RECV_TIMEOUT_US 10000
+#define SESSION_RECV_TIMEOUT_US 1000
 
 typedef struct IHS_QueueItem {
     IHS_SessionPacket packet;
@@ -621,7 +621,14 @@ static void SessionFinalized(IHS_Base *base, void *context) {
 
 static void SessionUpdate(IHS_Base *base, void *context) {
     (void)context;
-    IHS_SessionTransportUpdate((IHS_Session *)base, IHS_SessionPacketTimestamp());
+    IHS_Session *session = (IHS_Session *)base;
+    IHS_SessionTransportUpdate(session, IHS_SessionPacketTimestamp());
+    IHS_BaseLock(base);
+    bool updateControl = !base->interrupted && !session->transport.detached &&
+        IHS_SessionTransportState(session) == IHS_TransportConnected;
+    IHS_BaseUnlock(base);
+    if (updateControl)
+        IHS_SessionChannelControlUpdateFeedback((void *)session->channels[1]);
 }
 
 void IHS_SessionWakeSend(IHS_Session *session) {

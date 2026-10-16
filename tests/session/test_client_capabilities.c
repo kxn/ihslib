@@ -22,7 +22,6 @@ static void wire_capabilities(IHS_StreamDeviceFormFactor form, unsigned decode, 
     const IHS_StreamSessionCallbacks callbacks = {.configuring = configure_fec};
     IHS_SessionSetSessionCallbacks(s, &callbacks, &fec);
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
-    IHS_TimerTaskStopImmediate(((IHS_SessionChannelControl *)s->channels[1])->feedbackTimer);
     if (complete)
         assert(IHS_SessionSetStreamingClientConfig(s, NULL, 0, true));
     char system[] = "\"SystemInfo\" { \"CPUID\" \"test platform\" }";

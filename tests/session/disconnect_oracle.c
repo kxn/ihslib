@@ -86,7 +86,6 @@ int main(int argc, char **argv) {
     IHS_Init();
     IHS_Session *s = IHS_TestSessionCreate();
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
-    IHS_TimerTaskStopImmediate(((IHS_SessionChannelControl *)s->channels[1])->feedbackTimer);
     int state = atoi(argv[1]);
     s->state.connectionState = state == 0   ? IHS_SessionConnectionStateConnecting
                                : state == 3 ? IHS_SessionConnectionStateUnconnected

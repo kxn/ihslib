@@ -410,3 +410,25 @@ bool IHS_SessionPacketsWindowMediaFeedback(const IHS_SessionPacketsWindow *windo
     IHS_SessionPacketsWindowHoleBitmap(window, feedback->base, feedback->bitmap, 320);
     return true;
 }
+
+/* Reliable gap age scans every present successor, independently of the 320
+ * bits representable in a NACK. The receive timestamp is local, not sender time. */
+bool IHS_SessionPacketsWindowReliableFeedback(const IHS_SessionPacketsWindow *window,
+                                               uint32_t now, IHS_MediaFeedback *feedback,
+                                               bool *mature) {
+    *mature = false;
+    if (!IHS_SessionPacketsWindowMediaFeedback(window, feedback))
+        return false;
+    unsigned first = (uint16_t)(feedback->base -
+        IHS_SessionPacketsWindowNextNeededPacketId(window));
+    unsigned size = IHS_SessionPacketsWindowSize(window);
+    for (unsigned i = first; i < size; ++i) {
+        const WindowItem *item = &window->data[(window->head.pos + i) % window->capacity];
+        if (FrameItemIsUsed(item) &&
+            (int32_t)(item->header.receiveTimestamp - (now - 65u)) < 0) {
+            *mature = true;
+            break;
+        }
+    }
+    return true;
+}

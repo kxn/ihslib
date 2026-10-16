@@ -47,9 +47,10 @@ typedef struct IHS_SessionChannelControl {
      * keepalive, and the application's per-frame HID report. */
     IHS_Mutex *sendLock;
     IHS_Mutex *receiveLock;
-    IHS_TimerTask *feedbackTimer;
     uint32_t peerTimestamp, peerReceiveTime;
-    bool receivedReliable;
+    bool feedbackDirty, ackPending;
+    uint16_t ackWatermark;
+    uint32_t feedbackDeadline;
     uint64_t sendEncryptSequence;
     uint64_t recvEncryptSequence;
     uint64_t hidSubmitted;
@@ -59,10 +60,6 @@ typedef struct IHS_SessionChannelControl {
     /** Set once the frame window overflowed, so we disconnect only once. */
     bool overflowed;
     IHS_TimerTask *keepAliveTimer;
-    /** Gap-NACK cadence: official hole-age threshold ~1ms with 5ms update
-     * ticks ([f47000+2444], 0x7fe284); see docs/STEAMLINK_PROTOCOL_RE.md §9.1.
-     * See protocol RE §14 for receive-watermark and echo evidence. */
-    uint64_t lastNackSentMs;
     uint32_t lastNackTimestamp;
     bool haveNackTimestamp;
 } IHS_SessionChannelControl;

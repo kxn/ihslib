@@ -42,7 +42,6 @@ static IHS_Session *create(void) {
     failQueue = writeFail = false;
     IHS_Session *s = IHS_TestSessionCreate();
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
-    IHS_TimerTaskStopImmediate(((IHS_SessionChannelControl *)s->channels[1])->feedbackTimer);
     s->state.connectionState = IHS_SessionConnectionStateHandshaking;
     s->state.mtu = 512;
     s->outgoing.rate[0] = s->outgoing.rate[1] = 0;

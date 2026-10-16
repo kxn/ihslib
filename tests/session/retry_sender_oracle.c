@@ -40,7 +40,6 @@ int main(int argc, char **argv) {
     IHS_Init();
     IHS_Session *s = IHS_TestSessionCreate();
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
-    IHS_TimerTaskStopImmediate(((IHS_SessionChannelControl *)s->channels[1])->feedbackTimer);
     s->state.connectionId = s->state.hostConnectionId = 0;
     s->state.crcRequired = true;
     s->clock.smoothedRTT = rtt;

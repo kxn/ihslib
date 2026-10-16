@@ -83,7 +83,7 @@ size_t IHS_SessionPacketsWindowHoleBitmap(const IHS_SessionPacketsWindow *window
 IHS_SessionPacketsWindow *IHS_SessionPacketsWindowCreateReliable(uint16_t capacity, uint16_t firstId);
 uint16_t IHS_SessionPacketsWindowContiguousId(const IHS_SessionPacketsWindow *window);
 
-/* UnreliableNack uses the first PRESENT successor as bitmap base, while the
+/* Both reliable NACK and UnreliableNack use the first PRESENT successor as bitmap base, while the
  * watermark stops before the first hole. Snapshot while holding windowLock. */
 typedef struct IHS_MediaFeedback {
     uint16_t base, confirmed;
@@ -96,3 +96,8 @@ bool IHS_SessionPacketsWindowMediaFeedback(const IHS_SessionPacketsWindow *, IHS
 
 /* Fresh media channels, like reliable channels, start at packet ID zero. */
 IHS_SessionPacketsWindow *IHS_SessionPacketsWindowCreateMedia(uint16_t capacity);
+
+/* Snapshot a reliable gap and whether any present successor is older than 65
+ * local clock ticks. This age scan is not capped at the bitmap's 320 bits. */
+bool IHS_SessionPacketsWindowReliableFeedback(const IHS_SessionPacketsWindow *, uint32_t now,
+                                               IHS_MediaFeedback *, bool *mature);

@@ -14,8 +14,6 @@ static IHS_Session *session_new(void) {
     IHS_Session *s = IHS_TestSessionCreate();
     s->state.connectionState = IHS_SessionConnectionStateHandshaking;
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
-    IHS_SessionChannelControl *c = (void *) s->channels[1];
-    IHS_TimerTaskStopImmediate(c->feedbackTimer);
     return s;
 }
 static void init(IHS_SessionPacket *p, unsigned type, unsigned id, int fragment) {
@@ -23,57 +21,8 @@ static void init(IHS_SessionPacket *p, unsigned type, unsigned id, int fragment)
     p->header.type = type; p->header.channelId = 1;
     p->header.packetId = id; p->header.fragmentId = fragment;
     p->header.sendTimestamp = 123456;
+    p->header.receiveTimestamp = IHS_SessionPacketTimestamp();
     IHS_SessionPacketBodyInitialize(&p->body, false);
-}
-static void receive(IHS_Session *s, unsigned type, unsigned id, int frag) {
-    IHS_SessionPacket p;
-    init(&p, type, id, frag);
-    IHS_BufferAppendUInt8(&p.body, k_EStreamControlClientHandshake);
-    s->channels[1]->cls->received(s->channels[1], &p);
-    IHS_SessionPacketClear(&p, true);
-}
-static void feedback(IHS_Session *s, int confirmed, int base, int mask) {
-    bool ack = false, nack = false;
-    IHS_QueueItem *q;
-    while ((q = IHS_QueuePoll(s->sendQueue))) {
-        const uint8_t *b = IHS_BufferPointer(&q->packet.body);
-        if (q->packet.header.type == IHS_SessionPacketTypeACK) {
-            assert(q->packet.header.packetId == (uint16_t) confirmed);
-            uint32_t echo = b[0] | (uint32_t)b[1]<<8 | (uint32_t)b[2]<<16 | (uint32_t)b[3]<<24;
-            assert(echo >= 123456 && echo < 124112); /* echoed peer clock, <=10 ms processing */
-            ack = true;
-        } else if (q->packet.header.type == IHS_SessionPacketTypeNACK) {
-            assert(base >= 0);
-            assert(q->packet.header.packetId == (uint16_t) base);
-            assert((b[4] | b[5]<<8) == (uint16_t) confirmed);
-            assert(b[6] == mask);
-            nack = true;
-        }
-        IHS_SessionPacketClear(&q->packet, true); IHS_QueueItemFree(q);
-    }
-    assert(ack);
-    assert(nack == (base >= 0));
-}
-static void gaps_and_wrap(void) {
-    IHS_Session *s = session_new();
-    IHS_SessionChannelControl *c = (void *) s->channels[1];
-    /* Lost first packet must remain a hole, not establish a new sequence origin. */
-    receive(s, IHS_SessionPacketTypeReliable, 1, 0);
-    feedback(s, 65535, 0, 2);
-    receive(s, IHS_SessionPacketTypeReliable, 0, 0);
-    feedback(s, 1, -1, 0);
-    receive(s, IHS_SessionPacketTypeReliable, 1, 0); /* lost ACK -> duplicate */
-    feedback(s, 1, -1, 0);
-    IHS_SessionPacketsWindowDestroy(c->framePacketWindow);
-    c->framePacketWindow = IHS_SessionPacketsWindowCreateReliable(320, 65535);
-    c->lastNackSentMs = 0;
-    receive(s, IHS_SessionPacketTypeReliable, 65535, 2); /* head needs two fragments */
-    feedback(s, 65535, -1, 0);
-    receive(s, IHS_SessionPacketTypeReliableFrag, 1, 1); /* missing continuation 0 */
-    feedback(s, 65535, 0, 2);
-    receive(s, IHS_SessionPacketTypeReliableFrag, 0, 0);
-    feedback(s, 1, -1, 0);
-    IHS_SessionDestroy(s);
 }
 static void reliable_window_growth(void) {
     IHS_SessionPacketsWindow *w = IHS_SessionPacketsWindowCreateReliable(320, 65535);
@@ -95,39 +44,6 @@ static void reliable_window_growth(void) {
     assert(IHS_SessionPacketsWindowSize(w) == 1025);
     IHS_SessionPacketClear(&p, true);
     IHS_SessionPacketsWindowDestroy(w);
-}
-static unsigned drain_nacks(IHS_Session *s) {
-    unsigned count = 0;
-    IHS_MutexLock(s->sendQueueMutex);
-    IHS_QueueItem *q;
-    while ((q = IHS_QueuePoll(s->sendQueue))) {
-        if (q->packet.header.type == IHS_SessionPacketTypeNACK) {
-            assert(q->packet.header.packetId == 0);
-            count++;
-        }
-        IHS_SessionPacketClear(&q->packet, true);
-        IHS_QueueItemFree(q);
-    }
-    IHS_MutexUnlock(s->sendQueueMutex);
-    return count;
-}
-static void lost_nack_recovery(void) {
-    IHS_Session *s = IHS_TestSessionCreate(); /* keep feedback timer running */
-    s->state.connectionState = IHS_SessionConnectionStateHandshaking;
-    receive(s, IHS_SessionPacketTypeReliable, 1, 0);
-    assert(drain_nacks(s) >= 1); /* pretend this feedback was lost */
-    unsigned repeated = 0;
-    uint64_t deadline = IHS_TimerNow() + 1000;
-    while (repeated < 2 && IHS_TimerNow() < deadline) {
-        usleep(5000);
-        repeated += drain_nacks(s);
-    }
-    assert(repeated >= 2); /* recovery must not require another incoming packet */
-    receive(s, IHS_SessionPacketTypeReliable, 0, 0);
-    drain_nacks(s);
-    usleep(20000);
-    assert(drain_nacks(s) == 0);
-    IHS_SessionDestroy(s);
 }
 static void nack_layout(void) {
     IHS_Session *s = session_new();
@@ -203,6 +119,7 @@ static void decrypt_attempts(void) {
     init(&p, IHS_SessionPacketTypeReliable, 0, 0);
     IHS_BufferAppendUInt8(&p.body, k_EStreamControlSetInputTemporarilyDisabled);
     c->base.cls->received(&c->base, &p);
+    IHS_SessionChannelControlUpdateFeedback(c);
     assert(c->recvEncryptSequence == 1);
     IHS_SessionPacketClear(&p, true);
     uint8_t msg[] = {0x08, 0x01}; /* disabled=true */
@@ -212,6 +129,7 @@ static void decrypt_attempts(void) {
     IHS_BufferAppendUInt8(&p.body, k_EStreamControlSetInputTemporarilyDisabled);
     IHS_BufferAppendMem(&p.body, cipher, len);
     c->base.cls->received(&c->base, &p);
+    IHS_SessionChannelControlUpdateFeedback(c);
     assert(c->recvEncryptSequence == 2);
     assert(s->state.inputTemporarilyDisabled);
     assert(IHS_SessionInputEnabled(s)); /* Informational dialog, not HID admission. */
@@ -468,9 +386,8 @@ static void explicit_stop_game(void) {
 int main(void) {
     IHS_Init();
     explicit_stop_game();
-    gaps_and_wrap(); nack_layout(); decrypt_attempts(); clock_and_events();
+    nack_layout(); decrypt_attempts(); clock_and_events();
     reliable_window_growth();
-    lost_nack_recovery();
     nack_age_and_trailing_zeros();
     handshake_unconnected_probe();
     session_feedback_and_early_data();

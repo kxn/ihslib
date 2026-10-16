@@ -85,7 +85,6 @@ int main(void) {
     IHS_Session *s = IHS_TestSessionCreate();
     assert(s);
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
-    IHS_TimerTaskStopImmediate(((IHS_SessionChannelControl *)s->channels[1])->feedbackTimer);
     receive(s, true, 0, 10);
     assert(s->pendingDataCount == 1);
     IHS_SessionChannel *c =

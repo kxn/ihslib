@@ -115,7 +115,7 @@ uint32_t IHS_StreamClockMediaDelayTicks(IHS_StreamClock *clock) {
     uint32_t extraMs = (uint32_t)((meanMs + 2.0f) * 0.5f);
     return 6553 + (uint32_t)((uint64_t)extraMs * 65536 / 1000);
 }
-uint32_t IHS_StreamClockMediaFeedbackTicks(IHS_StreamClock *clock) {
+uint32_t IHS_StreamClockFeedbackTicks(IHS_StreamClock *clock) {
     IHS_MutexLock(clock->lock);
     uint32_t ticks = clock->smoothedRTT;
     IHS_MutexUnlock(clock->lock);

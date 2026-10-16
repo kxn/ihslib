@@ -41,7 +41,6 @@ int main(int argc, char **argv) {
     IHS_Session *s = IHS_TestSessionCreate();
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
     IHS_SessionChannelControl *c = (void *)s->channels[1];
-    IHS_TimerTaskStopImmediate(c->feedbackTimer);
     s->state.connectionState = IHS_SessionConnectionStateHandshaking;
     s->state.crcRequired = crc != 0;
     s->state.mtu = mtu;

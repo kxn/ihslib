@@ -11,6 +11,18 @@ ihs_add_test(video_control test_video_control.c)
 target_link_libraries(ihstest_video_control PRIVATE ihs-test-session)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    ihs_add_test(reliable_feedback_worker test_reliable_feedback_worker.c)
+    target_link_libraries(ihstest_reliable_feedback_worker PRIVATE ihs-test-session)
+    target_link_options(ihstest_reliable_feedback_worker PRIVATE -Wl,--wrap=IHS_BaseSend
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive
+        -Wl,--wrap=IHS_SessionPacketsWindowPoll)
+    set_tests_properties(reliable_feedback_worker PROPERTIES TIMEOUT 20)
+    add_executable(ihs-reliable-feedback-oracle reliable_feedback_oracle.c)
+    target_include_directories(ihs-reliable-feedback-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-reliable-feedback-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-reliable-feedback-oracle PRIVATE -UNDEBUG)
+    target_link_options(ihs-reliable-feedback-oracle PRIVATE -Wl,--wrap=IHS_BaseSend
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_SessionPacketsWindowPoll)
     add_executable(ihs-initial-send-oracle initial_send_oracle.c)
     target_include_directories(ihs-initial-send-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-initial-send-oracle PRIVATE ihs-test-session ihslib)

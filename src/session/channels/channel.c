@@ -268,10 +268,10 @@ void IHS_SessionChannelPacketAck(IHS_SessionChannel *channel, int32_t packetId, 
                                  bool ok, uint32_t echoedTimestamp) {
     IHS_SessionPacket packet;
     IHS_SessionPacketType type = ok ? IHS_SessionPacketTypeACK : IHS_SessionPacketTypeNACK;
-    IHS_SessionChannelInitializePacket(channel, &packet, type, true, packetId);
+    IHS_SessionChannelInitializePacket(channel, &packet, type, false, packetId);
     packet.header.fragmentId = fragmentId;
     IHS_BufferAppendUInt32LE(&packet.body, echoedTimestamp);
-    IHS_SessionChannelQueuePacket(channel, &packet, false);
+    IHS_SessionSendPacket(channel->session, &packet);
     IHS_SessionPacketClear(&packet, true);
 }
 

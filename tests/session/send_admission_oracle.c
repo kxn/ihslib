@@ -53,7 +53,6 @@ int main(int argc, char **argv) {
     IHS_Session *s = IHS_TestSessionCreate();
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
     IHS_SessionChannelControl *c = (void *)s->channels[1];
-    IHS_TimerTaskStopImmediate(c->feedbackTimer);
     s->state.connectionState =
         state == 0 ? IHS_SessionConnectionStateConnecting : IHS_SessionConnectionStateHandshaking;
     atomic_store(&s->transport.shutdown, state >= 2 ? state - 1 : 0);

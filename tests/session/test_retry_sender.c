@@ -92,7 +92,6 @@ static void *retry_worker(void *ctx) {
 static void concurrent_clock(void) {
     IHS_Session *s = IHS_TestSessionCreate();
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
-    IHS_TimerTaskStopImmediate(((IHS_SessionChannelControl *)s->channels[1])->feedbackTimer);
     for (unsigned id = 100; id < 132; ++id)
         track(&s->retransmission, id, true);
     ConcurrentClock c = {.session = s};
