@@ -70,3 +70,7 @@ endif()
 
 ihs_add_test(client_capabilities test_client_capabilities.c)
 target_link_libraries(ihstest_client_capabilities PRIVATE ihs-test-session)
+
+ihs_add_test(datagram_transport test_datagram_transport.c)
+target_link_libraries(ihstest_datagram_transport PRIVATE ihs-test-session)
+set_tests_properties(datagram_transport PROPERTIES TIMEOUT 15)

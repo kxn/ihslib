@@ -30,6 +30,7 @@
 #include <stddef.h>
 
 #include "ihslib/common.h"
+#include "ihslib/transport.h"
 #include "ihs_udp.h"
 #include "ihs_thread.h"
 #include "ihs_timer.h"
@@ -67,6 +68,10 @@ struct IHS_Base {
 
     bool broadcast;
     IHS_UDPSocket *socket;
+    IHS_DatagramTransport transport;
+    void *transportContext;
+    IHS_SocketAddress transportPeer;
+    bool transportActive, started;
 
     IHS_Thread *worker;
     IHS_Mutex *lock;

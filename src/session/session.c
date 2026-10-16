@@ -116,6 +116,22 @@ bool IHS_SessionConnect(IHS_Session *session) {
     return IHS_BaseStartWorker(&session->base, "IHSSession");
 }
 
+bool IHS_SessionSetDatagramTransport(IHS_Session *session,
+                                    const IHS_DatagramTransport *transport, void *context) {
+    if (!session || (transport && (!transport->send || !transport->receive)))
+        return false;
+    IHS_Base *base = &session->base;
+    IHS_BaseLock(base);
+    bool ok = !base->started && !base->interrupted;
+    if (ok) {
+        base->transport = transport ? *transport : (IHS_DatagramTransport){0};
+        base->transportContext = transport ? context : NULL;
+        base->transportPeer = session->info.address;
+    }
+    IHS_BaseUnlock(base);
+    return ok;
+}
+
 /* Transport disconnect preserves the host game. StopRequest(129) is the
  * separate official "stop game" action; never send it during generic cleanup. */
 void IHS_SessionDisconnect(IHS_Session *session) {
@@ -424,7 +440,7 @@ static void SessionInitialized(IHS_Base *base, void *context) {
     /* Interrupting a worker only changes base.interrupted; it cannot wake a
      * blocking recvfrom(). Once StopRequest makes the host go quiet, join must
      * still observe the interrupt without waiting for another datagram. */
-    if (!IHS_UDPSocketSetRecvTimeout(base->socket, SESSION_RECV_TIMEOUT_US)) {
+    if (base->socket && !IHS_UDPSocketSetRecvTimeout(base->socket, SESSION_RECV_TIMEOUT_US)) {
         IHS_SessionLog(session, IHS_LogLevelWarn, "Session",
                        "Failed to set session receive timeout");
     }
@@ -457,6 +473,9 @@ static void SessionInitialized(IHS_Base *base, void *context) {
 static void SessionFinalized(IHS_Base *base, void *context) {
     (void)context;
     IHS_Session *session = (IHS_Session *)base;
+    IHS_MutexLock(session->sendQueueMutex);
+    IHS_CondSignal(session->sendQueueCond);
+    IHS_MutexUnlock(session->sendQueueMutex);
     IHS_ThreadJoin(session->sendThread);
     session->sendThread = NULL;
     if (session->callbacks.session && session->callbacks.session->finalized) {
@@ -471,6 +490,12 @@ static void SessionSendWorker(void *context) {
         QueuedPacket *queued;
         // Poll the first item in the queue
         while ((queued = IHS_QueuePoll(session->sendQueue)) == NULL) {
+            /* Interrupt can win after the outer loop condition but before we
+             * acquire this mutex. Do not sleep after its final wakeup. */
+            if (session->base.interrupted) {
+                IHS_MutexUnlock(session->sendQueueMutex);
+                return;
+            }
             // Wait till someone add item into the queue
             IHS_CondWait(session->sendQueueCond, session->sendQueueMutex);
             if (session->base.interrupted) {
