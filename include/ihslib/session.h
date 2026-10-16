@@ -157,6 +157,11 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig, const IHS_S
  */
 bool IHS_SessionConnect(IHS_Session *session);
 
+/** Publish SDL WILLENTERBACKGROUND / DIDENTERFOREGROUND edges without waiting
+ * for network/decoder locks. Repeated values are idempotent. The session
+ * worker applies Pause/Resume and the connection clock in event order. */
+void IHS_SessionSetForeground(IHS_Session *session, bool foreground);
+
 /** Wake and stop the session worker thread. Safe to call before
  * IHS_SessionThreadedJoin to guarantee the join completes. */
 void IHS_SessionInterrupt(IHS_Session *session);

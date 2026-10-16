@@ -61,6 +61,7 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
 static void SessionInitialized(IHS_Base *base, void *context);
 
 static void SessionFinalized(IHS_Base *base, void *context);
+static void SessionUpdate(IHS_Base *base, void *context);
 
 static void SessionSendWorker(void *context);
 
@@ -71,6 +72,7 @@ static void QueuedPacketDestroy(QueuedPacket *queued, void *unused);
 static const IHS_BaseRunCallbacks SessionRunCallbacks = {
     .initialized = SessionInitialized,
     .finalized = SessionFinalized,
+    .update = SessionUpdate,
 };
 
 IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig,
@@ -79,6 +81,12 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig,
     IHS_BaseInit(&session->base, clientConfig, SessionRecvCallback, false);
     IHS_BaseSetRunCallbacks(&session->base, &SessionRunCallbacks, NULL);
     session->info = *sessionInfo;
+    atomic_init(&session->state.connectionState, IHS_SessionConnectionStateUnconnected);
+    atomic_init(&session->state.mtu, 1024);
+    atomic_init(&session->state.connectionId, 0);
+    atomic_init(&session->state.hostConnectionId, 0);
+    atomic_init(&session->state.crcRequired, false);
+    atomic_init(&session->transport.lifecycleGeneration, 0);
     session->sendQueueMutex = IHS_MutexCreate();
     session->sendQueueCond = IHS_CondCreate();
     session->sendQueue = IHS_QueueCreate(sizeof(QueuedPacket));
@@ -197,6 +205,10 @@ bool IHS_SessionSendPacket(IHS_Session *session, IHS_SessionPacket *packet) {
     const IHS_SessionInfo *config = &session->info;
     /* Transport clock is stamped at the actual send attempt, including retries. */
     packet->header.sendTimestamp = IHS_SessionPacketTimestamp();
+    if (session->state.crcRequired && !packet->header.hasCrc) {
+        packet->header.hasCrc = true;
+        IHS_BufferSetSuffixLength(&packet->body, 4);
+    }
     // Write header and CRC to the buffer
     IHS_SessionPacketPopulateBuffer(packet);
     // Shallow copied buffer - offset & suffix changes will be temporary
@@ -348,6 +360,29 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
     packet.header.receiveTimestamp = IHS_SessionPacketTimestamp();
     IHS_SessionChannelId channelId = packet.header.channelId;
     IHS_SessionPacketType packetType = packet.header.type;
+    bool special = packetType == IHS_SessionPacketTypeUnconnected ||
+                   packetType == IHS_SessionPacketTypeConnect ||
+                   packetType == IHS_SessionPacketTypeConnectACK ||
+                   packetType == IHS_SessionPacketTypeDisconnect;
+    if ((!special && (channelId >= 32 ||
+                      (session->state.crcRequired && !packet.header.hasCrc))) ||
+        session->transport.timedOut) {
+        IHS_SessionPacketClear(&packet, true);
+        return;
+    }
+    /* Transport acceptance precedes Connected's body/state guard and a
+     * channel's payload validation. Discovery probes do not keep it alive. */
+    if (packetType != IHS_SessionPacketTypeUnconnected)
+        session->transport.lastReceive = packet.header.receiveTimestamp;
+    if (packetType >= IHS_SessionPacketTypeMax) {
+        IHS_SessionPacketClear(&packet, true);
+        return;
+    }
+    if (packetType == IHS_SessionPacketTypeConnectACK) {
+        IHS_SessionChannelReceivedPacket(session->channels[IHS_SessionChannelIdDiscovery], &packet);
+        IHS_SessionPacketClear(&packet, true);
+        return;
+    }
     if (packetType == IHS_SessionPacketTypeACK) {
         if (packet.body.size < 4) {
             IHS_SessionPacketClear(&packet, true);
@@ -374,7 +409,8 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
         /* Host quit the game / tore the session down. Without this the client
          * sat in a dead session forever: no video, dead inputs, no exit.
          * (Hardware freeze 2026-09-04.) */
-        IHS_SessionHostStopped(session);
+        if (session->state.connectionState >= IHS_SessionConnectionStateHandshaking)
+            IHS_SessionHostStopped(session);
         IHS_SessionPacketClear(&packet, true);
         return;
     }
@@ -442,6 +478,7 @@ static void SessionInitialized(IHS_Base *base, void *context) {
     IHS_BaseLock(&session->base);
     session->state.connectionId = IHS_CryptoRandomUInt32();
     session->state.connectionState = IHS_SessionConnectionStateConnecting;
+    IHS_SessionTransportBegin(session, IHS_SessionPacketTimestamp());
     IHS_BaseUnlock(&session->base);
 
     /* crc32c(b'Connect') */
@@ -458,11 +495,19 @@ static void SessionInitialized(IHS_Base *base, void *context) {
 static void SessionFinalized(IHS_Base *base, void *context) {
     (void)context;
     IHS_Session *session = (IHS_Session *)base;
+    /* A fatal receive error may end BaseWorker without a requested stop.
+     * Wake the send worker before joining it in that path too. */
+    IHS_SessionInterrupt(session);
     IHS_ThreadJoin(session->sendThread);
     session->sendThread = NULL;
     if (session->callbacks.session && session->callbacks.session->finalized) {
         session->callbacks.session->finalized(session, session->callbackContexts.session);
     }
+}
+
+static void SessionUpdate(IHS_Base *base, void *context) {
+    (void)context;
+    IHS_SessionTransportUpdate((IHS_Session *)base, IHS_SessionPacketTimestamp());
 }
 
 static void SessionSendWorker(void *context) {

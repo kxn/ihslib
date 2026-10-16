@@ -204,6 +204,12 @@ bool IHS_SessionChannelQueuePacket(IHS_SessionChannel *channel, IHS_SessionPacke
 
 bool IHS_SessionChannelQueueFrame(IHS_SessionChannel *channel, IHS_SessionFrame *frame,
                                   bool enableRetransmit) {
+    /* Reserve negotiated CRC before computing fragment capacity, not only at
+     * final socket send; otherwise full fragments could exceed MTU by four. */
+    if (channel->session->state.crcRequired && !frame->header.hasCrc) {
+        frame->header.hasCrc = true;
+        IHS_BufferSetSuffixLength(&frame->body, 4);
+    }
     size_t mtu = channel->session->state.mtu > 0 ? channel->session->state.mtu : 1024;
     int packetBodySizeLimit = (int)mtu - IHS_PACKET_HEADER_SIZE;
     if (frame->header.hasCrc) {

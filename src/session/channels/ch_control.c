@@ -819,11 +819,10 @@ static void OnServerHandshake(IHS_SessionChannel *channel, const CServerHandshak
     if (session->state.connectionState != IHS_SessionConnectionStateHandshaking) {
         return;
     }
-    if (message->info->has_mtu) {
-        session->state.mtu = message->info->mtu;
-    } else {
-        session->state.mtu = 1500;
-    }
+    /* Official uses the optional int32 value (zero when absent), then clamps
+     * it at 0x7a64cc..0x7a64f0. Required info validation is separate. */
+    int32_t mtu = message->info->mtu;
+    session->state.mtu = mtu < 512 ? 512 : mtu > 1472 ? 1472 : mtu;
     IHS_SessionChannelControlRequestAuthentication(channel);
 }
 

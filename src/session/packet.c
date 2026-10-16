@@ -37,9 +37,8 @@ size_t IHS_SessionPacketHeaderParse(IHS_SessionPacketHeader *header, const uint8
     size_t offset = 0;
     header->hasCrc = (src[offset] & 0x80) == 0x80;
     header->type = src[offset] & 0x7f;
-    if (header->type >= IHS_SessionPacketTypeMax) {
-        return 0;
-    }
+    /* Unknown seven-bit types still pass socket CRC and connection admission.
+     * The connection refreshes its lease before the channel ignores them. */
     offset += 1;
     header->retransmitCount = src[offset++];
     header->srcConnectionId = src[offset++];

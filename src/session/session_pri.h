@@ -60,10 +60,11 @@ typedef enum IHS_SessionConnectionState {
 } IHS_SessionConnectionState;
 
 typedef struct IHS_SessionState {
-    IHS_SessionConnectionState connectionState;
-    int mtu;
-    uint8_t connectionId;
-    uint8_t hostConnectionId;
+    atomic_int connectionState;
+    atomic_int mtu;
+    atomic_uchar connectionId;
+    atomic_uchar hostConnectionId;
+    atomic_bool crcRequired;
     /**
      * Negotiated stream-enable flags from CSetStreamingClientConfig. Default true at
      * session creation since the streaming request asked for all three; the server
@@ -84,6 +85,13 @@ struct IHS_Session {
     IHS_Base base;
     IHS_SessionInfo info;
     IHS_SessionState state;
+    /* RX-worker-owned connection clock and lifecycle state. The application
+     * publishes foreground transitions through lifecycleGeneration only. */
+    struct {
+        uint32_t updateTime, lastReceive, appliedGeneration;
+        atomic_uint lifecycleGeneration;
+        bool active, clientPaused, connectionPaused, timedOut;
+    } transport;
     /* Negotiated codec preference and capture size; StartVideoData supplies
      * the actual decoder configuration. */
     int negotiatedVideoCodec;
@@ -128,6 +136,10 @@ struct IHS_Session {
     IHS_BaseLog((IHS_Base *)(session), (level), (tag), __VA_ARGS__)
 
 void IHS_SessionInterrupt(IHS_Session *session);
+
+/* Worker steps, also used by the protocol oracle with a controlled clock. */
+void IHS_SessionTransportBegin(IHS_Session *session, uint32_t now);
+void IHS_SessionTransportUpdate(IHS_Session *session, uint32_t now);
 
 bool IHS_SessionSendPacket(IHS_Session *session, IHS_SessionPacket *packet);
 

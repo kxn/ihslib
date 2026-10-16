@@ -47,6 +47,10 @@ typedef struct IHS_BaseRunCallbacks {
      * @param context
      */
     void (*finalized)(IHS_Base *base, void *context);
+
+    /* Runs on the receive worker between bounded receive attempts. Never on
+     * the application's rendering/input thread. */
+    void (*update)(IHS_Base *base, void *context);
 } IHS_BaseRunCallbacks;
 
 struct IHS_Base {

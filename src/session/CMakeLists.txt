@@ -1,5 +1,6 @@
 target_sources(ihslib PRIVATE
         session.c
+        lifecycle.c
         packet.c
         fec.c
         frame.c

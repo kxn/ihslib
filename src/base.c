@@ -227,6 +227,10 @@ static void BaseWorker(IHS_Base *base) {
         IHS_BaseUnlock(base);
         if (interrupted)
             break;
+        if (base->callbacks.run && base->callbacks.run->update)
+            base->callbacks.run->update(base, base->callbackContexts.run);
+        if (base->interrupted)
+            break;
         int ret;
         if ((ret = IHS_UDPSocketReceive(socket, &recv)) < 0) {
             break;
