@@ -290,7 +290,9 @@ static void handshake_unconnected_probe(void) {
     CDiscoveryPingResponse *response = cdiscovery_ping_response__unpack(NULL,
         q->packet.body.size - 5, body + 5);
     assert(response && response->sequence == 2);
-    assert(response->packet_size_received == IHS_PACKET_HEADER_SIZE + sizeof(request));
+    /* Official OnPingRequest serializes the request object: field2 echoes the
+     * requested size (zero here), not this datagram's received length. §43. */
+    assert(response->has_packet_size_received && response->packet_size_received == 0);
     cdiscovery_ping_response__free_unpacked(response, NULL);
     IHS_SessionPacketClear(&q->packet, true); IHS_QueueItemFree(q);
     IHS_SessionDestroy(s);

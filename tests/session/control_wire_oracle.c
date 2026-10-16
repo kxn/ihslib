@@ -3,6 +3,7 @@
 #include "ihs_buffer.h"
 #include "ihs_buffer_ext.h"
 #include "session/channels/ch_control.h"
+#include "session/channels/ch_stats.h"
 #include "session/session_pri.h"
 #include "test_session.h"
 #include <assert.h>
@@ -65,6 +66,33 @@ int main(int argc, char **argv) {
         s->state.connectionState = IHS_SessionConnectionStateConnecting;
         IHS_SessionChannelControlHandshake(&c->base, false);
         admitted = s->state.connectionState == IHS_SessionConnectionStateHandshaking;
+    } else if (kind == 3) {
+        unsigned length = (unsigned)atoi(argv[6]);
+        assert(length < 3000);
+        char *text = malloc(length + 1);
+        assert(text);
+        memset(text, 'x', length);
+        text[length] = '\0';
+        CLogMsg message = CLOG_MSG__INIT;
+        message.message = text;
+        admitted = IHS_SessionChannelStatsSend(s->channels[2], k_EStreamStatsLogMessage,
+                                               &message.base, IHS_PACKET_ID_NEXT);
+        free(text);
+    } else if (kind == 4) {
+        CDiscoveryPingRequest request = CDISCOVERY_PING_REQUEST__INIT;
+        request.has_sequence = (type & 1) != 0;
+        request.has_packet_size_requested = (type & 2) != 0;
+        request.sequence = 7;
+        request.packet_size_requested = (unsigned)atoi(argv[6]);
+        IHS_SessionPacket packet;
+        IHS_SessionChannelInitializePacket(s->channels[0], &packet,
+                                           IHS_SessionPacketTypeUnconnected, false, 0);
+        IHS_BufferAppendUInt8(&packet.body, k_EStreamDiscoveryPingRequest);
+        IHS_BufferAppendUInt32LE(&packet.body, cdiscovery_ping_request__get_packed_size(&request));
+        IHS_BufferAppendMessage(&packet.body, &request.base);
+        IHS_SessionChannelReceivedPacket(s->channels[0], &packet);
+        IHS_SessionPacketClear(&packet, true);
+        admitted = true; /* Known valid request; this void callback has no queue result. */
     } else {
         CAuthenticationRequestMsg auth = CAUTHENTICATION_REQUEST_MSG__INIT;
         CAuthenticationResponseMsg response = CAUTHENTICATION_RESPONSE_MSG__INIT;
@@ -100,7 +128,10 @@ int main(int argc, char **argv) {
         free(sent[i]);
     }
     printf("],\"admitted\":%s,\"socket_result\":%d,\"next_id\":%u}\n", admitted ? "true" : "false",
-           socketResult, s->outgoing.reliableId[1]);
+           socketResult,
+           s->outgoing.reliableId[kind == 3   ? 2
+                                  : kind == 4 ? 0
+                                              : 1]);
     IHS_SessionDestroy(s);
     IHS_Quit();
     return 0;

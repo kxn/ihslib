@@ -117,16 +117,18 @@ static void OnUnconnected(IHS_SessionChannel *channel, const IHS_SessionPacket *
 
 static void OnPingRequest(IHS_SessionChannel *channel, const IHS_SessionPacket *packet,
                           const CDiscoveryPingRequest *request) {
-    CDiscoveryPingResponse response = CDISCOVERY_PING_RESPONSE__INIT;
-    PROTOBUF_C_SET_VALUE(response, sequence, request->sequence);
-    PROTOBUF_C_SET_VALUE(response, packet_size_received, IHS_PACKET_HEADER_SIZE + packet->body.size);
-    size_t msgSize = cdiscovery_ping_response__get_packed_size(&response);
+    IHS_UNUSED(packet);
+    /* The official client builds a response object, but OnPingRequest 0x7accf8
+     * passes the parsed REQUEST to Frame::Put. Preserve that observed wire
+     * behavior (including field presence), not the field2 schema label.
+     * docs/STEAMLINK_PROTOCOL_RE.md §43 records both object addresses. */
+    size_t msgSize = cdiscovery_ping_request__get_packed_size(request);
 
     IHS_SessionPacket outPacket;
-    IHS_SessionChannelInitializePacket(channel, &outPacket, IHS_SessionPacketTypeUnconnected, true, 0);
+    IHS_SessionChannelInitializePacket(channel, &outPacket, IHS_SessionPacketTypeUnconnected, false, 0);
     IHS_BufferAppendUInt8(&outPacket.body, k_EStreamDiscoveryPingResponse);
     IHS_BufferAppendUInt32LE(&outPacket.body, msgSize);
-    IHS_BufferAppendMessage(&outPacket.body, (const ProtobufCMessage *) &response);
+    IHS_BufferAppendMessage(&outPacket.body, &request->base);
 
     IHS_SessionPacketPadTo(&outPacket, request->packet_size_requested);
     IHS_SessionQueuePacket(channel->session, &outPacket, false);

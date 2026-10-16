@@ -40,11 +40,14 @@ IHS_SessionChannel *IHS_SessionChannelStatsCreate(IHS_Session *session) {
 
 bool IHS_SessionChannelStatsSend(IHS_SessionChannel *channel, EStreamStatsMessage type,
                                  const ProtobufCMessage *message, int32_t packetId) {
-    IHS_SessionPacket packet;
-    IHS_SessionChannelInitializePacket(channel, &packet, IHS_SessionPacketTypeReliable, true, packetId);
-    IHS_BufferAppendUInt8(&packet.body, type);
-    IHS_BufferAppendMessage(&packet.body, message);
-    bool ret = IHS_SessionChannelQueuePacket(channel, &packet, true);
-    IHS_SessionPacketClear(&packet, true);
+    /* Official SendStatsMessage uses Frame::Send, including fragmentation and
+     * negotiated CRC; docs/STEAMLINK_PROTOCOL_RE.md §43. */
+    IHS_SessionFrame frame;
+    IHS_SessionChannelInitializeFrame(channel, &frame, IHS_SessionPacketTypeReliable, false, packetId);
+    frame.body.maxCapacity = 0;
+    IHS_BufferAppendUInt8(&frame.body, type);
+    IHS_BufferAppendMessage(&frame.body, message);
+    bool ret = IHS_SessionChannelQueueFrame(channel, &frame, true);
+    IHS_SessionFrameClear(&frame, true);
     return ret;
 }
