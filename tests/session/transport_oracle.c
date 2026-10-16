@@ -43,6 +43,9 @@ void __wrap_IHS_SessionDisconnect(IHS_Session *s) {
     (void)s;
     strcat(actions, "D ");
 }
+void __wrap_IHS_SessionTransportDisconnect(IHS_Session *s) {
+    __wrap_IHS_SessionDisconnect(s);
+}
 static void channel_received(IHS_SessionChannel *c, IHS_SessionPacket *p) {
     (void)c;
     (void)p;

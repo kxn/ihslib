@@ -194,7 +194,8 @@ bool IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamControlMe
     IHS_MutexLock(control->sendLock);
     bool ret = ControlSendLocked(control, type, message, packetId, NULL);
     IHS_MutexUnlock(control->sendLock);
-    if (!ret) {
+    if (!ret && !atomic_load(&channel->session->transport.shutdown) &&
+        !channel->session->transport.detached) {
         IHS_SessionDisconnect(channel->session);
     }
     return ret;
@@ -281,7 +282,8 @@ bool IHS_SessionChannelControlSubmitHIDReport(IHS_SessionChannel *channel, const
     if (ret)
         HIDPendingPush(IHS_TimerNow(), data, dataLen);
     IHS_MutexUnlock(control->sendLock);
-    if (!ret) {
+    if (!ret && !atomic_load(&channel->session->transport.shutdown) &&
+        !channel->session->transport.detached) {
         IHS_SessionDisconnect(channel->session);
     }
     return ret;

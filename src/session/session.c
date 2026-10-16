@@ -29,7 +29,6 @@
 #include <string.h>
 
 #include "base.h"
-#include "crypto.h"
 #include "ihslib/common.h"
 #include "ihslib/session.h"
 #include "packet.h"
@@ -87,6 +86,10 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig,
     atomic_init(&session->state.hostConnectionId, 0);
     atomic_init(&session->state.crcRequired, false);
     atomic_init(&session->transport.lifecycleGeneration, 0);
+    atomic_init(&session->transport.shutdown, 0);
+    atomic_init(&session->transport.detached, false);
+    atomic_init(&session->transport.notified, false);
+    atomic_init(&session->transport.addressCleared, false);
     session->sendQueueMutex = IHS_MutexCreate();
     session->sendQueueCond = IHS_CondCreate();
     session->sendQueue = IHS_QueueCreate(sizeof(QueuedPacket));
@@ -127,8 +130,12 @@ bool IHS_SessionConnect(IHS_Session *session) {
 /* Transport disconnect preserves the host game. StopRequest(129) is the
  * separate official "stop game" action; never send it during generic cleanup. */
 void IHS_SessionDisconnect(IHS_Session *session) {
-    IHS_SessionChannelDiscoveryDisconnect(
-        IHS_SessionChannelFor(session, IHS_SessionChannelIdDiscovery));
+    /* Client::Disconnect -> ResetConnection -> Close. The first close attempts
+     * one goodbye synchronously; later requests cannot resend it. */
+    IHS_SessionTransportClose(session);
+    IHS_SessionInterrupt(session);
+    if (!session->base.worker)
+        IHS_SessionNotifyDisconnected(session);
 }
 
 bool IHS_SessionStopGame(IHS_Session *session) {
@@ -209,6 +216,10 @@ bool IHS_SessionSendPacket(IHS_Session *session, IHS_SessionPacket *packet) {
 }
 int IHS_SessionSendPacketResult(IHS_Session *session, IHS_SessionPacket *packet) {
     IHS_BaseLock(&session->base);
+    if (session->transport.detached) {
+        IHS_BaseUnlock(&session->base);
+        return 3;
+    }
     const IHS_SessionInfo *config = &session->info;
     /* Transport clock is stamped at the actual send attempt, including retries. */
     packet->header.sendTimestamp = IHS_SessionPacketTimestamp();
@@ -234,7 +245,8 @@ int IHS_SessionSendPacketResult(IHS_Session *session, IHS_SessionPacket *packet)
                        packet->header.retransmitCount);
     }
     bool sent = IHS_BaseSend(&session->base, config->address, &serialized);
-    int result = sent ? 0 : errno == EAGAIN || errno == EWOULDBLOCK ? 1 : 2;
+    int result = sent ? 0 : errno == EAGAIN || errno == EWOULDBLOCK ? 1 :
+        errno == EMSGSIZE ? 2 : errno == EBADF ? 3 : 4;
     if (sent) IHS_OutgoingSent(session, packet->header.type, packet->header.sendTimestamp, charged);
     IHS_BaseUnlock(&session->base);
     return result;
@@ -245,6 +257,12 @@ bool IHS_SessionQueuePacket(IHS_Session *session, IHS_SessionPacket *packet, boo
     // If the packet has CRC, require 4 bytes extra space at the end of body
     assert(!packet->header.hasCrc || packet->body.suffix == 4);
     IHS_MutexLock(session->sendQueueMutex);
+    if (session->transport.detached ||
+        (atomic_load(&session->transport.shutdown) &&
+         packet->header.type != IHS_SessionPacketTypeUnconnected)) {
+        IHS_MutexUnlock(session->sendQueueMutex);
+        return false;
+    }
     if (packet->header.autoPacketId) {
         bool reliable = packet->header.type == IHS_SessionPacketTypeReliable ||
                         packet->header.type == IHS_SessionPacketTypeReliableFrag;
@@ -342,22 +360,14 @@ bool IHS_SessionHostRequestedStop(IHS_Session *session) {
 void IHS_SessionHostStopped(IHS_Session *session) {
     atomic_store(&session->hostRequestedStop, true);
     IHS_SessionLog(session, IHS_LogLevelWarn, "Session", "Host stopped the session");
-    /* Best-effort goodbye: bounded, never blocks on the dead peer. */
     IHS_SessionDisconnect(session);
-    IHS_BaseLock(&session->base);
-    bool notify =
-        session->callbacks.session != NULL && session->callbacks.session->disconnected != NULL;
-    IHS_BaseUnlock(&session->base);
-    if (notify) {
-        session->callbacks.session->disconnected(session, session->callbackContexts.session);
-    }
-    /* Belt and braces: the worker must exit even if the timer path stalls. */
-    IHS_SessionInterrupt(session);
 }
 
 static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
                                 IHS_Buffer *data) {
     IHS_Session *session = (IHS_Session *)base;
+    if (session->transport.detached)
+        return;
     IHS_SessionPacket packet;
     IHS_SessionPacketReturn ret = IHS_SessionPacketParse(&packet, data);
     if (ret != IHS_SessionPacketResultOK) {
@@ -367,16 +377,18 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
 
     /* Socket HandleMessage 0x7ff660..0x7ff6f0 dispatches Unconnected discovery
      * before connection-ID checks: MTU probes have zero IDs after Connected.
-     * HandlePacket 0x7faff0..0x7fb028 checks IDs only for connected traffic. */
-    if (IHS_IPAddressCompare(&address->ip, &session->info.address.ip) != 0 ||
+     * HandlePacket 0x7faf08/0x7faff0 checks both IDs for type9/ordinary traffic,
+     * including while the transport is still connecting. */
+    if ((packet.header.type != IHS_SessionPacketTypeUnconnected && session->transport.addressCleared) ||
+        IHS_IPAddressCompare(&address->ip, &session->info.address.ip) != 0 ||
         address->port != session->info.address.port ||
         (packet.header.type != IHS_SessionPacketTypeUnconnected &&
          packet.header.dstConnectionId != session->state.connectionId) ||
         (packet.header.type == IHS_SessionPacketTypeUnconnected &&
          packet.header.channelId != IHS_SessionChannelIdDiscovery) ||
         (packet.header.type != IHS_SessionPacketTypeUnconnected &&
-         session->state.connectionState >= IHS_SessionConnectionStateHandshaking &&
          packet.header.type != IHS_SessionPacketTypeConnectACK &&
+         packet.header.type != IHS_SessionPacketTypeConnect &&
          packet.header.srcConnectionId != session->state.hostConnectionId)) {
         IHS_SessionPacketClear(&packet, true);
         return;
@@ -440,11 +452,12 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
                                              IHS_TimerNow());
 
     } else if (packetType == IHS_SessionPacketTypeDisconnect) {
-        /* Host quit the game / tore the session down. Without this the client
-         * sat in a dead session forever: no video, dead inputs, no exit.
-         * (Hardware freeze 2026-09-04.) */
-        if (session->state.connectionState >= IHS_SessionConnectionStateHandshaking)
-            IHS_SessionHostStopped(session);
+        /* Connection HandlePacket 0x7fafd8: transport termination is not a
+         * StopRequest(129) or proof that the host game process exited. */
+        if (IHS_SessionTransportState(session) == IHS_TransportConnected) {
+            atomic_store(&session->hostRequestedStop, true);
+            IHS_SessionTransportDisconnect(session);
+        }
         IHS_SessionPacketClear(&packet, true);
         return;
     }
@@ -492,6 +505,8 @@ void IHS_SessionDrainPendingData(IHS_Session *session, IHS_SessionChannel *chann
 static void SessionInitialized(IHS_Base *base, void *context) {
     (void)context;
     IHS_Session *session = (IHS_Session *)base;
+    if (base->interrupted || session->transport.detached)
+        return;
     /* Interrupting a worker only changes base.interrupted; it cannot wake a
      * blocking recvfrom(). Once StopRequest makes the host go quiet, join must
      * still observe the interrupt without waiting for another datagram. */
@@ -510,7 +525,11 @@ static void SessionInitialized(IHS_Base *base, void *context) {
     }
 
     IHS_BaseLock(&session->base);
-    session->state.connectionId = IHS_CryptoRandomUInt32();
+    if (session->transport.detached || session->base.interrupted) {
+        IHS_BaseUnlock(&session->base);
+        return;
+    }
+    session->state.connectionId = IHS_SessionNextConnectionId();
     session->state.connectionState = IHS_SessionConnectionStateConnecting;
     session->state.hostConnectionId = 0;
     session->state.crcRequired = false;
@@ -525,8 +544,17 @@ static void SessionFinalized(IHS_Base *base, void *context) {
     /* A fatal receive error may end BaseWorker without a requested stop.
      * Wake the send worker before joining it in that path too. */
     IHS_SessionInterrupt(session);
-    IHS_ThreadJoin(session->sendThread);
+    if (session->sendThread)
+        IHS_ThreadJoin(session->sendThread);
     session->sendThread = NULL;
+    /* Joining producers never occurs under Base/socket or timer locks. */
+    IHS_SessionChannelControlStopHeartbeat(session->channels[IHS_SessionChannelIdControl]);
+    IHS_HIDManagerCloseAll(session->hidManager);
+    bool requested = session->transport.detached || atomic_load(&session->transport.shutdown);
+    IHS_SessionTransportClose(session);
+    IHS_SessionTransportFinish(session);
+    if (requested)
+        IHS_SessionNotifyDisconnected(session);
     if (session->callbacks.session && session->callbacks.session->finalized) {
         session->callbacks.session->finalized(session, session->callbackContexts.session);
     }
@@ -559,8 +587,13 @@ static void SessionSendWorker(void *context) {
         }
         bool hadQueued = queued != NULL;
         if (queued) {
+            IHS_BaseLock(&session->base);
             unsigned type = queued->packet.header.type;
-            if (type == IHS_SessionPacketTypeUnreliable || type == IHS_SessionPacketTypeUnreliableFrag) {
+            bool connected = IHS_SessionTransportState(session) == IHS_TransportConnected;
+            if (session->transport.detached ||
+                (!connected && type != IHS_SessionPacketTypeUnconnected)) {
+                /* Close/Disconnect won the race after queue admission. */
+            } else if (type == IHS_SessionPacketTypeUnreliable || type == IHS_SessionPacketTypeUnreliableFrag) {
                 uint8_t ch = queued->packet.header.channelId;
                 if (IHS_OutgoingRetain(session, &queued->packet, queued->queuedAt))
                     IHS_OutgoingSendUnreliable(session, ch, false);
@@ -572,12 +605,14 @@ static void SessionSendWorker(void *context) {
                     IHS_RetransmissionNoteInitialSend(&session->retransmission, &queued->packet.header,
                                                       sent, IHS_TimerNow());
             }
+            IHS_BaseUnlock(&session->base);
             QueuedPacketDestroy(queued, NULL);
             IHS_QueueItemFree((void *)queued);
         }
         uint32_t now = IHS_SessionPacketTimestamp();
         if (!hadQueued || (uint32_t)(now - lastUpdate) >= 65) {
-            if (session->state.connectionState >= IHS_SessionConnectionStateHandshaking)
+            if (IHS_SessionTransportState(session) == IHS_TransportConnected &&
+                !session->transport.detached)
                 IHS_OutgoingUpdate(session, now);
             lastUpdate = now;
         }

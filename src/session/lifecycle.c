@@ -45,7 +45,7 @@ bool IHS_SessionTransportSendConnect(IHS_Session *s) {
 
 static void ChangeForeground(IHS_Session *s, bool foreground) {
     int phase = s->state.connectionState;
-    bool connected = phase >= IHS_SessionConnectionStateHandshaking && !s->transport.timedOut &&
+    bool connected = IHS_SessionTransportState(s) == IHS_TransportConnected && !s->transport.detached &&
                      !s->base.interrupted;
     if (!foreground) {
         if (s->transport.clientPaused)
@@ -99,7 +99,14 @@ void IHS_SessionTransportUpdate(IHS_Session *s, uint32_t now) {
         ChangeForeground(s, !(generation & 1u));
     }
     s->transport.updateTime = now;
-    if (!s->transport.active || s->transport.timedOut)
+    if (IHS_SessionTransportFinish(s)) {
+        /* The official main client subsequently stops consumers and closes.
+         * Wake existing workers; their owners perform the actual joins. */
+        IHS_SessionInterrupt(s);
+        return;
+    }
+    if (!s->transport.active || s->transport.timedOut || s->transport.detached ||
+        IHS_SessionTransportState(s) == IHS_TransportClosed)
         return;
     if (s->state.connectionState == IHS_SessionConnectionStateConnecting &&
         (!s->transport.lastConnect || (uint32_t)(now - s->transport.lastConnect) >= 6553u)) {
@@ -115,6 +122,6 @@ void IHS_SessionTransportUpdate(IHS_Session *s, uint32_t now) {
         IHS_SessionLog(s, IHS_LogLevelWarn, "Session", "Connection timed out (%u seconds)",
                        timeout / 65536u);
         /* A local timeout is not evidence that the host stopped the game. */
-        IHS_SessionDisconnect(s);
+        IHS_SessionTransportDisconnect(s);
     }
 }

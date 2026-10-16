@@ -130,9 +130,14 @@ bool IHS_UDPSocketSend(IHS_UDPSocket *s, const IHS_UDPPacket *packet) {
     struct sockaddr_storage addr;
     size_t addr_len = AddressToSys(&packet->address, &addr);
     IHS_MutexLock(s->mutex);
-    bool ret = sendto(s->fd, IHS_BufferPointer(&packet->buffer), packet->buffer.size, 0,
-                      (struct sockaddr *) &addr, addr_len) > 0;
+    /* Official TransportUDP BInit sets O_NONBLOCK. Keep bounded receive waits,
+     * but make each outgoing attempt nonblocking, including the one goodbye. */
+    ssize_t sent = sendto(s->fd, IHS_BufferPointer(&packet->buffer), packet->buffer.size, MSG_DONTWAIT,
+                          (struct sockaddr *) &addr, addr_len);
+    bool ret = sent == (ssize_t)packet->buffer.size;
+    int error = errno;
     IHS_MutexUnlock(s->mutex);
+    if (!ret) errno = error;
     return ret;
 }
 

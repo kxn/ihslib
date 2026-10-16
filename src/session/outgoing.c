@@ -263,6 +263,10 @@ static bool send_reliable(IHS_SessionPacket *p, void *ctx) {
 }
 void IHS_OutgoingUpdate(IHS_Session *s, uint32_t now) {
     IHS_BaseLock(&s->base);
+    if (IHS_SessionTransportState(s) != IHS_TransportConnected || s->transport.detached) {
+        IHS_BaseUnlock(&s->base);
+        return;
+    }
     IHS_Outgoing *o = &s->outgoing;
     if (o->dirty) {
         memcpy(o->order, o->creation, o->count);

@@ -30,7 +30,7 @@ bool __wrap_IHS_BaseSend(IHS_Base *b, IHS_SocketAddress addr, const IHS_Buffer *
     for (size_t i = 0; i < wire->size; ++i)
         sprintf(str + 2 * i, "%02x", IHS_BufferPointer(wire)[i]);
     sent[sentCount++] = str;
-    errno = transport == 1 ? EAGAIN : EIO;
+    errno = transport == 1 ? EAGAIN : transport == 2 ? EMSGSIZE : transport == 3 ? EBADF : EIO;
     return transport == 0;
 }
 static bool send_reliable(IHS_SessionPacket *p, void *ctx) {

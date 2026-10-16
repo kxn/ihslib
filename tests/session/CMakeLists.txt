@@ -80,17 +80,32 @@ target_link_libraries(ihstest_fec_channel PRIVATE ihs-test-session)
 set_tests_properties(fec_channel PROPERTIES TIMEOUT 10)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    ihs_add_test(connection_id test_connection_id.c)
+    set_tests_properties(connection_id PROPERTIES TIMEOUT 10)
+    add_executable(ihs-disconnect-oracle disconnect_oracle.c)
+    target_include_directories(ihs-disconnect-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-disconnect-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-disconnect-oracle PRIVATE -UNDEBUG)
+    target_link_options(ihs-disconnect-oracle PRIVATE -Wl,--wrap=IHS_BaseSend
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_SessionNextConnectionId
+        -Wl,--wrap=IHS_CryptoRandomUInt32)
     add_executable(ihs-connect-oracle connect_oracle.c)
     target_include_directories(ihs-connect-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-connect-oracle PRIVATE ihs-test-session ihslib)
     target_compile_options(ihs-connect-oracle PRIVATE -UNDEBUG)
     target_link_options(ihs-connect-oracle PRIVATE -Wl,--wrap=IHS_BaseSend
-        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_SessionDisconnect)
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_SessionDisconnect
+        -Wl,--wrap=IHS_SessionTransportDisconnect)
     ihs_add_test(connect_worker test_connect_worker.c)
     target_link_libraries(ihstest_connect_worker PRIVATE ihs-test-session)
     target_link_options(ihstest_connect_worker PRIVATE -Wl,--wrap=IHS_BaseSend
         -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive)
     set_tests_properties(connect_worker PROPERTIES TIMEOUT 10)
+    ihs_add_test(disconnect_worker test_disconnect_worker.c)
+    target_link_libraries(ihstest_disconnect_worker PRIVATE ihs-test-session)
+    target_link_options(ihstest_disconnect_worker PRIVATE -Wl,--wrap=IHS_BaseSend
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive)
+    set_tests_properties(disconnect_worker PROPERTIES TIMEOUT 20)
     ihs_add_test(transport_worker test_transport_worker.c)
     target_link_libraries(ihstest_transport_worker PRIVATE ihs-test-session)
     target_link_options(ihstest_transport_worker PRIVATE
@@ -109,6 +124,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_compile_options(ihs-transport-oracle PRIVATE -UNDEBUG)
     target_link_options(ihs-transport-oracle PRIVATE
         -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_SessionDisconnect
+        -Wl,--wrap=IHS_SessionTransportDisconnect
         -Wl,--wrap=IHS_BaseSend)
     add_executable(ihs-fec-oracle fec_oracle.c)
     target_include_directories(ihs-fec-oracle PRIVATE ${TEST_INCLUDES})

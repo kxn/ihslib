@@ -32,6 +32,9 @@ void __wrap_IHS_SessionDisconnect(IHS_Session *s) {
     (void)s;
     strcat(actions, actions[0] ? ",{\"action\":\"disconnect\"}" : "{\"action\":\"disconnect\"}");
 }
+void __wrap_IHS_SessionTransportDisconnect(IHS_Session *s) {
+    __wrap_IHS_SessionDisconnect(s);
+}
 static void print(IHS_Session *s) {
     IHS_RetransmissionStats stats;
     IHS_RetransmissionGetStats(&s->retransmission, &stats, IHS_TimerNow());

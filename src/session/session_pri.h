@@ -60,6 +60,13 @@ typedef enum IHS_SessionConnectionState {
     IHS_SessionConnectionStateConnected,
 } IHS_SessionConnectionState;
 
+typedef enum IHS_TransportState {
+    IHS_TransportConnecting = 0,
+    IHS_TransportConnected = 1,
+    IHS_TransportClosing = 2,
+    IHS_TransportClosed = 3,
+} IHS_TransportState;
+
 typedef struct IHS_SessionState {
     atomic_int connectionState;
     atomic_int mtu;
@@ -90,6 +97,8 @@ struct IHS_Session {
     struct {
         uint32_t updateTime, lastReceive, lastConnect, appliedGeneration;
         atomic_uint lifecycleGeneration;
+        atomic_uint shutdown; /* 0: live phase, 1: closing, 2: closed */
+        atomic_bool detached, notified, addressCleared;
         bool active, clientPaused, connectionPaused, timedOut;
     } transport;
     /* Negotiated codec preference and capture size; StartVideoData supplies
@@ -141,6 +150,12 @@ void IHS_SessionInterrupt(IHS_Session *session);
 /* Worker steps, also used by the protocol oracle with a controlled clock. */
 void IHS_SessionTransportBegin(IHS_Session *session, uint32_t now);
 bool IHS_SessionTransportSendConnect(IHS_Session *session);
+IHS_TransportState IHS_SessionTransportState(const IHS_Session *session);
+uint8_t IHS_SessionNextConnectionId(void);
+void IHS_SessionTransportDisconnect(IHS_Session *session);
+void IHS_SessionTransportClose(IHS_Session *session);
+bool IHS_SessionTransportFinish(IHS_Session *session);
+void IHS_SessionNotifyDisconnected(IHS_Session *session);
 CStreamingClientConfig *IHS_SessionClientConfigCopy(IHS_Session *session);
 bool IHS_SessionClientConfigStore(IHS_Session *session, const CStreamingClientConfig *config);
 bool IHS_SessionClientConfigApply(IHS_Session *session, const CStreamingClientConfig *config,

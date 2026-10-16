@@ -207,6 +207,8 @@ bool IHS_SessionChannelQueuePacket(IHS_SessionChannel *channel, IHS_SessionPacke
 
 bool IHS_SessionChannelQueueFrame(IHS_SessionChannel *channel, IHS_SessionFrame *frame,
                                   bool enableRetransmit) {
+    if (channel->session->transport.detached || atomic_load(&channel->session->transport.shutdown))
+        return false;
     /* Reserve negotiated CRC before computing fragment capacity, not only at
      * final socket send; otherwise full fragments could exceed MTU by four. */
     if (channel->session->state.crcRequired && !frame->header.hasCrc) {
