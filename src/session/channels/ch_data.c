@@ -78,15 +78,21 @@ void IHS_SessionChannelDataDeinit(IHS_SessionChannel *channel) {
 
     assert(!dataCh->worker || dataCh->interrupted);
 
-    IHS_ThreadJoin(dataCh->feedbackWorker);
-    IHS_ThreadJoin(dataCh->worker);
+    if (dataCh->feedbackWorker)
+        IHS_ThreadJoin(dataCh->feedbackWorker);
+    if (dataCh->worker)
+        IHS_ThreadJoin(dataCh->worker);
     if (dataCh->window)
         IHS_SessionPacketsWindowDestroy(dataCh->window);
-    IHS_MutexDestroy(dataCh->windowLock);
-    IHS_CondDestroy(dataCh->windowCond);
-    IHS_CondDestroy(dataCh->feedbackCond);
+    if (dataCh->windowLock)
+        IHS_MutexDestroy(dataCh->windowLock);
+    if (dataCh->windowCond)
+        IHS_CondDestroy(dataCh->windowCond);
+    if (dataCh->feedbackCond)
+        IHS_CondDestroy(dataCh->feedbackCond);
     dataCh->window = NULL;
-    IHS_MutexDestroy(dataCh->lock);
+    if (dataCh->lock)
+        IHS_MutexDestroy(dataCh->lock);
 }
 
 void IHS_SessionChannelDataReceived(IHS_SessionChannel *channel, IHS_SessionPacket *packet) {
