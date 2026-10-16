@@ -1,6 +1,7 @@
 target_sources(ihslib PRIVATE
         session.c
         packet.c
+        fec.c
         frame.c
         window.c
         frame_crypto.c

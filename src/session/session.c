@@ -381,7 +381,8 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
     IHS_SessionChannel *channel = IHS_SessionChannelFor(session, channelId);
     if (channel == NULL && channelId >= IHS_SessionChannelIdDataStart &&
         (packetType == IHS_SessionPacketTypeUnreliable ||
-         packetType == IHS_SessionPacketTypeUnreliableFrag)) {
+         packetType == IHS_SessionPacketTypeUnreliableFrag ||
+         packetType == IHS_SessionPacketTypeUnreliableFEC)) {
         /* OnDataPacket queues early data; StartVideoData supplies codec/channel
          * identity before HandlePendingDataPackets (0x7ae1f4). Do not guess. */
         if (session->pendingDataCount == 320) {

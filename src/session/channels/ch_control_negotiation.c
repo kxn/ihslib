@@ -193,6 +193,12 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
     }
 
     CStreamingClientConfig clientConfig = CSTREAMING_CLIENT_CONFIG__INIT;
+    /* Official Default omits field 25 (false). Explicit enabled settings and
+     * presets request true before the video channel starts; never infer this
+     * choice from quality alone or the local ability to receive FEC. */
+    if (ihsConf.enableUnreliableFec) {
+        PROTOBUF_C_SET_VALUE(clientConfig, enable_unreliable_fec, true);
+    }
 
     PROTOBUF_C_SET_VALUE(clientConfig, desired_resolution_x, (int32_t) ihsConf.maxWidth);
     PROTOBUF_C_SET_VALUE(clientConfig, desired_resolution_y, (int32_t) ihsConf.maxHeight);

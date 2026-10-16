@@ -49,6 +49,7 @@ typedef enum IHS_SessionPacketType {
     IHS_SessionPacketTypeNACK = 8,
     IHS_SessionPacketTypeDisconnect = 9,
     IHS_SessionPacketTypeUnreliableNack = 10,
+    IHS_SessionPacketTypeUnreliableFEC = 11,
     IHS_SessionPacketTypeMax,
 } IHS_SessionPacketType;
 

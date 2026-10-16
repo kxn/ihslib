@@ -30,6 +30,7 @@
 #include "ihs_thread.h"
 #include "protobuf/remoteplay.pb-c.h"
 #include "session/frame.h"
+#include "session/fec.h"
 #include "session/window.h"
 
 typedef struct IHS_SessionDataFrameHeader {
@@ -56,6 +57,13 @@ typedef struct IHS_SessionChannelData {
     IHS_Cond *feedbackCond;
     uint32_t lastPacketTimestamp, feedbackDeadline;
     bool haveFeedbackDeadline, feedbackDirty;
+
+    /* FEC groups have their own sequence and never enter window. Complete
+     * payloads cross to the existing decoder worker through a bounded FIFO. */
+    IHS_FECReceiver *fec;
+    struct IHS_FECFrameNode *fecHead, *fecTail;
+    size_t fecQueuedBytes, fecQueuedCount, fecQueueLimit;
+    unsigned fecQueueCapacity;
 } IHS_SessionChannelData;
 
 typedef struct IHS_SessionChannelDataClass {

@@ -24,6 +24,7 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "ch_data.h"
 #include "endianness.h"
@@ -41,6 +42,57 @@ static void ReceivedFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *fra
 
 static const char *DataChannelName(IHS_SessionChannelType type);
 
+typedef struct IHS_FECFrameNode {
+    IHS_SessionFrame frame;
+    struct IHS_FECFrameNode *next;
+} IHS_FECFrameNode;
+
+static bool PollFEC(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
+    IHS_FECFrameNode *node = channel->fecHead;
+    if (!node)
+        return false;
+    channel->fecHead = node->next;
+    if (!channel->fecHead)
+        channel->fecTail = NULL;
+    channel->fecQueuedBytes -= node->frame.body.capacity + sizeof(*node);
+    channel->fecQueuedCount--;
+    IHS_BufferClear(&frame->body, true);
+    *frame = node->frame;
+    /* The worker also reuses this buffer for ordinary assembled messages. */
+    if (frame->body.maxCapacity < IHS_FEC_MAX_PAYLOAD)
+        frame->body.maxCapacity = IHS_FEC_MAX_PAYLOAD;
+    free(node);
+    return true;
+}
+
+static void QueueFEC(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
+    size_t size = frame->body.capacity + sizeof(IHS_FECFrameNode);
+    if (size > channel->fecQueueLimit) {
+        IHS_BufferClear(&frame->body, true);
+        return;
+    }
+    while (channel->fecHead &&
+           (channel->fecQueuedBytes + size > channel->fecQueueLimit ||
+            channel->fecQueuedCount == channel->fecQueueCapacity)) {
+        IHS_SessionFrame old = {0};
+        PollFEC(channel, &old);
+        IHS_BufferClear(&old.body, true);
+    }
+    IHS_FECFrameNode *node = malloc(sizeof(*node));
+    if (!node) {
+        IHS_BufferClear(&frame->body, true);
+        return;
+    }
+    *node = (IHS_FECFrameNode){.frame = *frame};
+    if (channel->fecTail)
+        channel->fecTail->next = node;
+    else
+        channel->fecHead = node;
+    channel->fecTail = node;
+    channel->fecQueuedBytes += size;
+    channel->fecQueuedCount++;
+}
+
 IHS_SessionChannel *IHS_SessionChannelDataCreate(const IHS_SessionChannelDataClass *cls,
                                                  IHS_Session *session, IHS_SessionChannelType type,
                                                  IHS_SessionChannelId id, const void *config) {
@@ -55,9 +107,12 @@ bool IHS_SessionChannelDataInit(IHS_SessionChannel *channel, uint16_t windowCapa
     dataCh->windowCond = IHS_CondCreate();
     dataCh->feedbackCond = IHS_CondCreate();
     dataCh->window = IHS_SessionPacketsWindowCreateMedia(windowCapacity);
+    dataCh->fec = IHS_FECReceiverCreate();
+    dataCh->fecQueueCapacity = windowCapacity;
+    dataCh->fecQueueLimit = (size_t)windowCapacity * 2048;
     atomic_init(&dataCh->interrupted, false);
     if (!dataCh->lock || !dataCh->windowLock || !dataCh->windowCond || !dataCh->feedbackCond ||
-        !dataCh->window) {
+        !dataCh->window || !dataCh->fec) {
         channel->initFailed = true;
         return false;
     }
@@ -82,6 +137,10 @@ void IHS_SessionChannelDataDeinit(IHS_SessionChannel *channel) {
         IHS_ThreadJoin(dataCh->feedbackWorker);
     if (dataCh->worker)
         IHS_ThreadJoin(dataCh->worker);
+    IHS_SessionFrame remaining = {0};
+    while (PollFEC(dataCh, &remaining))
+        IHS_BufferClear(&remaining.body, true);
+    IHS_FECReceiverDestroy(dataCh->fec);
     if (dataCh->window)
         IHS_SessionPacketsWindowDestroy(dataCh->window);
     if (dataCh->windowLock)
@@ -99,9 +158,23 @@ void IHS_SessionChannelDataReceived(IHS_SessionChannel *channel, IHS_SessionPack
     IHS_SessionChannelData *dataCh = (IHS_SessionChannelData *)channel;
     assert(dataCh->window != NULL);
     IHS_SessionPacketType type = packet->header.type;
-    if (type != IHS_SessionPacketTypeUnreliable && type != IHS_SessionPacketTypeUnreliableFrag)
+    if (type != IHS_SessionPacketTypeUnreliable && type != IHS_SessionPacketTypeUnreliableFrag &&
+        type != IHS_SessionPacketTypeUnreliableFEC)
         return;
     IHS_MutexLock(dataCh->windowLock);
+    if (dataCh->interrupted) {
+        IHS_MutexUnlock(dataCh->windowLock);
+        return;
+    }
+    if (type == IHS_SessionPacketTypeUnreliableFEC) {
+        IHS_SessionFrame frame;
+        if (IHS_FECReceiverAdd(dataCh->fec, packet, &frame)) {
+            QueueFEC(dataCh, &frame);
+            IHS_CondSignal(dataCh->windowCond);
+        }
+        IHS_MutexUnlock(dataCh->windowLock);
+        return; /* no ordinary window, sender timestamp propagation or NACK */
+    }
     if (!IHS_SessionPacketsWindowAdd(dataCh->window, packet)) {
         IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Data",
                        "%s channel items overflow! Available: %u", DataChannelName(channel->type),
@@ -172,7 +245,8 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
             /* Retry the age-based discard on every wakeup, not just once per
              * delivered frame: a packet lost at the head makes Poll fail forever,
              * and the discard that would step over it is the only way out. */
-            if ((hasFrame = IHS_SessionPacketsWindowPoll(channel->window, &frame)))
+            if ((hasFrame = PollFEC(channel, &frame) ||
+                            IHS_SessionPacketsWindowPoll(channel->window, &frame)))
                 break;
             uint16_t discarded = IHS_SessionPacketsWindowDiscard(
                 channel->window, IHS_StreamClockMediaDelayTicks(&channel->base.session->clock));
@@ -218,7 +292,8 @@ static void DataThreadInterrupt(IHS_SessionChannelData *channel) {
 }
 
 static void ReceivedFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
-    assert(frame->header.type == IHS_SessionPacketTypeUnreliable);
+    assert(frame->header.type == IHS_SessionPacketTypeUnreliable ||
+           frame->header.type == IHS_SessionPacketTypeUnreliableFEC);
     if (frame->body.size < 1)
         return;
     EStreamDataMessage type = *IHS_BufferPointer(&frame->body);

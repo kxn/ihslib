@@ -57,6 +57,10 @@ typedef struct IHS_SessionConfig {
     uint32_t maxFps;
     uint32_t maxBitrateKbps;
     IHS_StreamQuality quality;
+    /** Saved user/preset choice, default false like official Default. This
+     * requests field 25 at initial negotiation; it is not a loss-rate policy,
+     * redundancy percentage, or a gate on receiving type-11 packets. */
+    bool enableUnreliableFec;
 } IHS_SessionConfig;
 
 /** Optional platform/decoder facts. Unknown fields are omitted from the wire.
