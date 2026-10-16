@@ -222,7 +222,9 @@ static IHS_SendAdmission ControlSendLocked(IHS_SessionChannelControl *control,
         break;
     }
     IHS_SessionFrame frame;
-    IHS_SessionChannelInitializeFrame(channel, &frame, IHS_SessionPacketTypeReliable, true,
+    /* Official Channel::Send clears CRC; Socket adds it only when negotiated.
+     * docs/STEAMLINK_PROTOCOL_RE.md §42 executes the full producer/wire chain. */
+    IHS_SessionChannelInitializeFrame(channel, &frame, IHS_SessionPacketTypeReliable, false,
                                       packetId);
     /* Complete configs can exceed one packet; channel fragmentation applies
      * MTU after encryption. Keep packet buffers bounded, allow a larger frame. */

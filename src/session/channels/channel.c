@@ -218,17 +218,15 @@ IHS_SendAdmission IHS_SessionChannelQueueFrameResult(IHS_SessionChannel *channel
     if (!channel || !channel->session || channel->session->transport.detached ||
         IHS_SessionTransportState(channel->session) != IHS_TransportConnected)
         return IHS_SendAdmissionNotConnected;
-    /* Reserve negotiated CRC before computing fragment capacity, not only at
-     * final socket send; otherwise full fragments could exceed MTU by four. */
+    /* CRC emission follows the connection. Fragment capacity independently
+     * reserves four bytes even without CRC (official AddToOutgoingPacketWindow
+     * 0x7f6fec; docs/STEAMLINK_PROTOCOL_RE.md §42). */
     if (channel->session->state.crcRequired && !frame->header.hasCrc) {
         frame->header.hasCrc = true;
         IHS_BufferSetSuffixLength(&frame->body, 4);
     }
     size_t mtu = channel->session->state.mtu > 0 ? channel->session->state.mtu : 1024;
-    int packetBodySizeLimit = (int)mtu - IHS_PACKET_HEADER_SIZE;
-    if (frame->header.hasCrc) {
-        packetBodySizeLimit -= 4;
-    }
+    int packetBodySizeLimit = (int)mtu - IHS_PACKET_HEADER_SIZE - 4;
     assert(packetBodySizeLimit > 0);
     /* A local frame bound is not a transport error or a reason to disconnect.
      * Reject before reserving any sequence ID or publishing the first fragment. */
@@ -246,7 +244,7 @@ IHS_SendAdmission IHS_SessionChannelQueueFrameResult(IHS_SessionChannel *channel
         frame->header.autoPacketId = false;
     }
     IHS_SendAdmission ret;
-    if (frame->body.size < packetBodySizeLimit) {
+    if (frame->body.size <= packetBodySizeLimit) {
         // Frame can fit in single packet
         IHS_SessionPacket packet;
         packet.header = frame->header;

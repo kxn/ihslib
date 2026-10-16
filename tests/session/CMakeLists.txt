@@ -95,6 +95,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(ihs-send-admission-oracle PRIVATE -Wl,--wrap=IHS_BaseSend
         -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_RetransmissionTrack
         -Wl,--wrap=IHS_SessionFrameEncrypt)
+    add_executable(ihs-control-wire-oracle control_wire_oracle.c)
+    target_include_directories(ihs-control-wire-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-control-wire-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-control-wire-oracle PRIVATE -UNDEBUG)
+    target_link_options(ihs-control-wire-oracle PRIVATE -Wl,--wrap=IHS_BaseSend
+        -Wl,--wrap=IHS_SessionPacketTimestamp)
     ihs_add_test(connection_id test_connection_id.c)
     set_tests_properties(connection_id PROPERTIES TIMEOUT 10)
     add_executable(ihs-disconnect-oracle disconnect_oracle.c)
