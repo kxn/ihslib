@@ -60,6 +60,10 @@ bool IHS_RetransmissionIsTracked(const IHS_SessionRetransmission *retransmission
 
 bool IHS_RetransmissionTrack(IHS_SessionRetransmission *retransmission,
                              const IHS_SessionPacket *packet, uint64_t nowMs);
+void IHS_RetransmissionActivate(IHS_SessionRetransmission *, uint8_t channel, uint16_t firstId,
+                                uint16_t count);
+/* Roll back a staged, never-published registration; not a peer ACK. */
+void IHS_RetransmissionCancelUnsent(IHS_SessionRetransmission *, const IHS_SessionPacketHeader *);
 
 bool IHS_RetransmissionAcknowledge(IHS_SessionRetransmission *retransmission,
                                    IHS_SessionChannelId channelId, uint16_t packetId,

@@ -23,10 +23,11 @@
  *
  */
 
-#include <stdlib.h>
 #include "ch_stats.h"
 #include "ihs_buffer.h"
 #include "ihs_buffer_ext.h"
+#include "session/session_pri.h"
+#include <stdlib.h>
 
 static const IHS_SessionChannelClass ChannelClass = {
         .received = IHS_SessionChannelReceivedPacketNoop,
@@ -47,7 +48,13 @@ bool IHS_SessionChannelStatsSend(IHS_SessionChannel *channel, EStreamStatsMessag
     frame.body.maxCapacity = 0;
     IHS_BufferAppendUInt8(&frame.body, type);
     IHS_BufferAppendMessage(&frame.body, message);
-    bool ret = IHS_SessionChannelQueueFrame(channel, &frame, true);
+    IHS_SendAdmission ret = IHS_SessionChannelQueueFrameResult(channel, &frame, true);
     IHS_SessionFrameClear(&frame, true);
-    return ret;
+    /* A failed local preparation can have consumed IDs. Match the existing
+     * control-side protection: never continue that connection with an ID hole.
+     * Socket errors occur later on the sender and do not enter this branch. */
+    if (ret == IHS_SendAdmissionLocalFailure && !channel->session->transport.shutdown &&
+        !channel->session->transport.detached)
+        IHS_SessionDisconnect(channel->session);
+    return ret == IHS_SendAdmissionAccepted;
 }

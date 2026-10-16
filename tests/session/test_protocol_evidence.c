@@ -138,6 +138,8 @@ static void nack_layout(void) {
         assert(IHS_RetransmissionTrack(&s->retransmission, &p, 100));
         IHS_SessionPacketClear(&p, true);
     }
+    /* This fixture seeds the active protocol window, not a future queued frame. */
+    IHS_RetransmissionActivate(&s->retransmission, 1, 65534, 4);
     IHS_SessionPacket p;
     init(&p, IHS_SessionPacketTypeNACK, 65535, 0);
     IHS_BufferAppendUInt32LE(&p.body, 200); /* not a sequence ID */

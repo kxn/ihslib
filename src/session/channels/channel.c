@@ -238,6 +238,10 @@ IHS_SendAdmission IHS_SessionChannelQueueFrameResult(IHS_SessionChannel *channel
      * Reserve the complete fragment run under queue lock before publishing any
      * fragment; producer threads must not allocate interleaved frame IDs. */
     IHS_MutexLock(channel->session->sendQueueMutex);
+    if (!IHS_SessionSendBatchBegin(channel->session)) {
+        IHS_MutexUnlock(channel->session->sendQueueMutex);
+        return IHS_SendAdmissionLocalFailure;
+    }
     if (frame->header.autoPacketId) {
         frame->header.packetId = frame->header.type == IHS_SessionPacketTypeUnreliable ?
             IHS_OutgoingNextId(channel->session, channel->id, false) : IHS_SessionChannelNextPacketId(channel);
@@ -255,6 +259,7 @@ IHS_SendAdmission IHS_SessionChannelQueueFrameResult(IHS_SessionChannel *channel
         ret =
             SessionChannelQueueFramePackets(channel, frame, packetBodySizeLimit, enableRetransmit);
     }
+    IHS_SessionSendBatchEnd(channel->session, ret == IHS_SendAdmissionAccepted);
     IHS_MutexUnlock(channel->session->sendQueueMutex);
     return ret;
 }

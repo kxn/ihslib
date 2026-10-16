@@ -11,7 +11,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 
-static void track(IHS_SessionRetransmission *r, unsigned id) {
+static void track(IHS_SessionRetransmission *r, unsigned id, bool attempted) {
     IHS_SessionPacket p = {0};
     p.header.type = IHS_SessionPacketTypeReliable;
     p.header.channelId = 1;
@@ -20,7 +20,8 @@ static void track(IHS_SessionRetransmission *r, unsigned id) {
     IHS_SessionPacketBodyInitialize(&p.body, false);
     IHS_BufferAppendUInt8(&p.body, 7);
     assert(IHS_RetransmissionTrack(r, &p, 0));
-    IHS_RetransmissionNoteInitialSend(r, &p.header, true, 0);
+    if (attempted)
+        IHS_RetransmissionNoteInitialSend(r, &p.header, true, 0);
     IHS_SessionPacketClear(&p, true);
 }
 typedef struct {
@@ -43,11 +44,13 @@ static void *send_worker(void *ctx) {
     c->attempts = IHS_RetransmissionProcessAt(c->r, 25, blocking_send, c);
     return NULL;
 }
-static void concurrent_ack(void) {
+static void concurrent_ack(bool initial) {
     IHS_SessionRetransmission r;
     IHS_RetransmissionInit(&r, NULL);
-    track(&r, 10);
-    track(&r, 11);
+    track(&r, 10, !initial);
+    track(&r, 11, !initial);
+    if (initial)
+        IHS_RetransmissionActivate(&r, 1, 10, 2);
     ConcurrentAck c = {.r = &r};
     atomic_init(&c.entered, false);
     atomic_init(&c.proceed, false);
@@ -91,7 +94,7 @@ static void concurrent_clock(void) {
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
     IHS_TimerTaskStopImmediate(((IHS_SessionChannelControl *)s->channels[1])->feedbackTimer);
     for (unsigned id = 100; id < 132; ++id)
-        track(&s->retransmission, id);
+        track(&s->retransmission, id, true);
     ConcurrentClock c = {.session = s};
     atomic_init(&c.ready, false);
     atomic_init(&c.go, false);
@@ -117,7 +120,8 @@ static void concurrent_clock(void) {
 }
 int main(void) {
     IHS_Init();
-    concurrent_ack();
+    concurrent_ack(false);
+    concurrent_ack(true);
     concurrent_clock();
     IHS_Quit();
     return 0;

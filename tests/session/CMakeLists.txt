@@ -11,6 +11,22 @@ ihs_add_test(video_control test_video_control.c)
 target_link_libraries(ihstest_video_control PRIVATE ihs-test-session)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ihs-initial-send-oracle initial_send_oracle.c)
+    target_include_directories(ihs-initial-send-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-initial-send-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-initial-send-oracle PRIVATE -UNDEBUG)
+    target_link_options(ihs-initial-send-oracle PRIVATE -Wl,--wrap=IHS_BaseSend
+        -Wl,--wrap=IHS_SessionPacketTimestamp)
+    ihs_add_test(initial_send test_initial_send.c)
+    target_link_libraries(ihstest_initial_send PRIVATE ihs-test-session)
+    target_link_options(ihstest_initial_send PRIVATE -Wl,--wrap=IHS_BaseSend
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_RetransmissionTrack
+        -Wl,--wrap=IHS_QueueCreate -Wl,--wrap=IHS_QueueItemObtain)
+    ihs_add_test(initial_send_worker test_initial_send_worker.c)
+    target_link_libraries(ihstest_initial_send_worker PRIVATE ihs-test-session)
+    target_link_options(ihstest_initial_send_worker PRIVATE -Wl,--wrap=IHS_BaseSend
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive)
+    set_tests_properties(initial_send initial_send_worker PROPERTIES TIMEOUT 20)
     ihs_add_test(video_tracked test_video_tracked.c)
     target_link_libraries(ihstest_video_tracked PRIVATE ihs-test-session)
     target_link_options(ihstest_video_tracked PRIVATE -Wl,--wrap=IHS_SessionSendControlMessage)

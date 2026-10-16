@@ -114,6 +114,7 @@ struct IHS_Session {
     IHS_Cond *sendQueueCond;
     IHS_Mutex *sendQueueMutex;
     IHS_Queue *sendQueue;
+    IHS_Queue *sendBatch;   /* producer-only staging, guarded by sendQueueMutex */
     IHS_Queue *pendingData; /* RX-thread-owned packets awaiting Start*Data metadata */
     unsigned pendingDataCount;
     IHS_Timer *timers;
@@ -174,6 +175,11 @@ bool IHS_SessionSendPacket(IHS_Session *session, IHS_SessionPacket *packet);
 bool IHS_SessionQueuePacket(IHS_Session *session, IHS_SessionPacket *packet, bool retransmit);
 IHS_SendAdmission IHS_SessionQueuePacketResult(IHS_Session *session, IHS_SessionPacket *packet,
                                                bool retransmit);
+/* Caller holds sendQueueMutex across begin, every fragment and end. */
+bool IHS_SessionSendBatchBegin(IHS_Session *session);
+void IHS_SessionSendBatchEnd(IHS_Session *session, bool commit);
+/* Dispatch one complete transaction; wait=true is the bounded worker wait. */
+bool IHS_SessionDispatchQueued(IHS_Session *session, bool wait);
 
 bool IHS_SessionSendControlMessage(IHS_Session *session, EStreamControlMessage type,
                                    const ProtobufCMessage *message);

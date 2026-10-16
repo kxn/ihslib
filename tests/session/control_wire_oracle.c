@@ -1,5 +1,6 @@
 /* Production frame/control producers -> queue/retention -> Socket serialization.
- * Clock and final UDP are controlled. No sender scheduling or real Steam host. */
+ * Clock and final UDP are controlled. The worker transaction step runs, but
+ * there is no full worker event loop or real Steam host. */
 #include "ihs_buffer.h"
 #include "ihs_buffer_ext.h"
 #include "session/channels/ch_control.h"
@@ -108,27 +109,15 @@ int main(int argc, char **argv) {
                                                       : &server.base;
         admitted = IHS_SessionSendControlMessage(s, type, message);
     }
-    typedef struct {
-        IHS_SessionPacket packet;
-        bool reliable;
-    } QueuedPacket;
-    QueuedPacket *q;
-    int socketResult = -1;
-    while ((q = (void *)IHS_QueuePoll(s->sendQueue))) {
-        socketResult = IHS_SessionSendPacketResult(s, &q->packet);
-        if (q->reliable)
-            IHS_RetransmissionNoteInitialSend(&s->retransmission, &q->packet.header,
-                                              socketResult == 0, IHS_TimerNow());
-        IHS_SessionPacketClear(&q->packet, true);
-        IHS_QueueItemFree((void *)q);
+    while (IHS_SessionDispatchQueued(s, false)) {
     }
     printf("{\"wire\":[");
     for (unsigned i = 0; i < sentCount; ++i) {
         printf("%s\"%s\"", i ? "," : "", sent[i]);
         free(sent[i]);
     }
-    printf("],\"admitted\":%s,\"socket_result\":%d,\"next_id\":%u}\n", admitted ? "true" : "false",
-           socketResult,
+    printf("],\"admitted\":%s,\"attempts\":%u,\"next_id\":%u}\n", admitted ? "true" : "false",
+           sentCount,
            s->outgoing.reliableId[kind == 3   ? 2
                                   : kind == 4 ? 0
                                               : 1]);

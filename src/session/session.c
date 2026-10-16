@@ -53,6 +53,8 @@ typedef struct IHS_QueueItem {
     IHS_SessionPacket packet;
     bool reliable;
     uint32_t queuedAt;
+    uint16_t batchCount; /* reliable frame head: N; continuation: 0 */
+    struct IHS_QueueItem *batchNext;
 } QueuedPacket;
 
 static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data);
@@ -188,6 +190,7 @@ void IHS_SessionDestroy(IHS_Session *session) {
         cstreaming_client_config__free_unpacked(session->clientConfig, NULL);
     IHS_CondDestroy(session->sendQueueCond);
     IHS_MutexDestroy(session->sendQueueMutex);
+    assert(!session->sendBatch);
     IHS_QueueDestroy(session->sendQueue, QueuedPacketDestroy, NULL);
     IHS_QueueDestroy(session->pendingData, QueuedPacketDestroy, NULL);
     IHS_SessionLog(session, IHS_LogLevelInfo, "Session", "Destroying session, bye!");
@@ -288,14 +291,63 @@ IHS_SendAdmission IHS_SessionQueuePacketResult(IHS_Session *session, IHS_Session
     }
     // Move buffer ownership from packet to QueuedPacket
     QueuedPacket *item = QueuedPacketCreate(session, packet);
+    if (!item) {
+        if (retransmit)
+            IHS_RetransmissionCancelUnsent(&session->retransmission, &packet->header);
+        IHS_MutexUnlock(session->sendQueueMutex);
+        return IHS_SendAdmissionLocalFailure;
+    }
     item->reliable = retransmit;
     item->queuedAt = IHS_SessionPacketTimestamp();
 
-    IHS_QueueAppend(session->sendQueue, item);
+    item->batchCount = 1;
+    IHS_QueueAppend(session->sendBatch ? session->sendBatch : session->sendQueue, item);
 
     IHS_CondSignal(session->sendQueueCond);
     IHS_MutexUnlock(session->sendQueueMutex);
     return IHS_SendAdmissionAccepted;
+}
+
+bool IHS_SessionSendBatchBegin(IHS_Session *s) {
+    assert(!s->sendBatch);
+    s->sendBatch = IHS_QueueCreate(sizeof(QueuedPacket));
+    return s->sendBatch != NULL;
+}
+
+void IHS_SessionSendBatchEnd(IHS_Session *s, bool commit) {
+    assert(s->sendBatch);
+    QueuedPacket *first = NULL, *last = NULL, *q;
+    unsigned count = 0;
+    while ((q = (void *)IHS_QueuePoll(s->sendBatch))) {
+        if (last)
+            last->batchNext = q;
+        else
+            first = q;
+        last = q;
+        count++;
+    }
+    IHS_QueueDestroy(s->sendBatch, NULL, NULL);
+    s->sendBatch = NULL;
+    bool grouped = first && first->reliable &&
+                   (first->packet.header.type == IHS_SessionPacketTypeReliable ||
+                    first->packet.header.type == IHS_SessionPacketTypeReliableFrag);
+    assert(count <= UINT16_MAX);
+    unsigned index = 0;
+    for (q = first; q;) {
+        QueuedPacket *next = q->batchNext;
+        q->batchNext = NULL;
+        if (commit) {
+            q->batchCount = grouped ? (index == 0 ? count : 0) : 1;
+            IHS_QueueAppend(s->sendQueue, q);
+        } else {
+            if (q->reliable)
+                IHS_RetransmissionCancelUnsent(&s->retransmission, &q->packet.header);
+            QueuedPacketDestroy(q, NULL);
+            IHS_QueueItemFree(q);
+        }
+        index++;
+        q = next;
+    }
 }
 
 bool IHS_SessionSendControlMessage(IHS_Session *session, EStreamControlMessage type,
@@ -581,41 +633,9 @@ static void SessionSendWorker(void *context) {
     IHS_Session *session = context;
     uint32_t lastUpdate = IHS_SessionPacketTimestamp();
     while (!session->base.interrupted) {
-        IHS_MutexLock(session->sendQueueMutex);
-        QueuedPacket *queued = (void *)IHS_QueuePoll(session->sendQueue);
-        if (!queued && !session->base.interrupted) {
-            IHS_CondWaitTimeout(session->sendQueueCond, session->sendQueueMutex, 1);
-            queued = (void *)IHS_QueuePoll(session->sendQueue);
-        }
-        IHS_MutexUnlock(session->sendQueueMutex);
-        if (session->base.interrupted) {
-            if (queued) { QueuedPacketDestroy(queued, NULL); IHS_QueueItemFree((void *)queued); }
+        bool hadQueued = IHS_SessionDispatchQueued(session, true);
+        if (session->base.interrupted)
             break;
-        }
-        bool hadQueued = queued != NULL;
-        if (queued) {
-            IHS_BaseLock(&session->base);
-            unsigned type = queued->packet.header.type;
-            bool connected = IHS_SessionTransportState(session) == IHS_TransportConnected;
-            if (session->transport.detached ||
-                (!connected && type != IHS_SessionPacketTypeUnconnected)) {
-                /* Close/Disconnect won the race after queue admission. */
-            } else if (type == IHS_SessionPacketTypeUnreliable || type == IHS_SessionPacketTypeUnreliableFrag) {
-                uint8_t ch = queued->packet.header.channelId;
-                if (IHS_OutgoingRetain(session, &queued->packet, queued->queuedAt))
-                    IHS_OutgoingSendUnreliable(session, ch, false);
-                else
-                    IHS_SessionLog(session, IHS_LogLevelError, "Send", "Cannot retain outgoing channel %u packet", ch);
-            } else {
-                bool sent = IHS_SessionSendPacket(session, &queued->packet);
-                if (queued->reliable)
-                    IHS_RetransmissionNoteInitialSend(&session->retransmission, &queued->packet.header,
-                                                      sent, IHS_TimerNow());
-            }
-            IHS_BaseUnlock(&session->base);
-            QueuedPacketDestroy(queued, NULL);
-            IHS_QueueItemFree((void *)queued);
-        }
         uint32_t now = IHS_SessionPacketTimestamp();
         if (!hadQueued || (uint32_t)(now - lastUpdate) >= 65) {
             if (IHS_SessionTransportState(session) == IHS_TransportConnected &&
@@ -626,8 +646,72 @@ static void SessionSendWorker(void *context) {
     }
 }
 
+static bool SendRetained(IHS_SessionPacket *packet, void *context) {
+    return IHS_SessionSendPacket(context, packet);
+}
+
+bool IHS_SessionDispatchQueued(IHS_Session *s, bool wait) {
+    IHS_MutexLock(s->sendQueueMutex);
+    QueuedPacket *first = (void *)IHS_QueuePoll(s->sendQueue);
+    if (!first && wait && !s->base.interrupted) {
+        IHS_CondWaitTimeout(s->sendQueueCond, s->sendQueueMutex, 1);
+        first = (void *)IHS_QueuePoll(s->sendQueue);
+    }
+    if (!first) {
+        IHS_MutexUnlock(s->sendQueueMutex);
+        return false;
+    }
+    assert(first->batchCount > 0);
+    QueuedPacket *last = first;
+    for (unsigned i = 1; i < first->batchCount; ++i) {
+        QueuedPacket *q = (void *)IHS_QueuePoll(s->sendQueue);
+        assert(q && !q->batchCount && q->reliable &&
+               q->packet.header.channelId == first->packet.header.channelId);
+        last->batchNext = q;
+        last = q;
+    }
+    IHS_MutexUnlock(s->sendQueueMutex);
+    IHS_BaseLock(&s->base);
+    unsigned type = first->packet.header.type;
+    bool connected = IHS_SessionTransportState(s) == IHS_TransportConnected;
+    if (!s->base.interrupted && !s->transport.detached &&
+        (connected || type == IHS_SessionPacketTypeUnconnected)) {
+        if (first->reliable &&
+            (type == IHS_SessionPacketTypeReliable || type == IHS_SessionPacketTypeReliableFrag)) {
+            uint8_t ch = first->packet.header.channelId;
+            IHS_RetransmissionActivate(&s->retransmission, ch, first->packet.header.packetId,
+                                       first->batchCount);
+            IHS_RetransmissionProcessChannel(&s->retransmission, IHS_TimerNow(),
+                                             IHS_SessionPacketTimestamp(), ch, SendRetained, s);
+        } else if (type == IHS_SessionPacketTypeUnreliable ||
+                   type == IHS_SessionPacketTypeUnreliableFrag) {
+            uint8_t ch = first->packet.header.channelId;
+            if (IHS_OutgoingRetain(s, &first->packet, first->queuedAt))
+                IHS_OutgoingSendUnreliable(s, ch, false);
+            else
+                IHS_SessionLog(s, IHS_LogLevelError, "Send",
+                               "Cannot retain outgoing channel %u packet", ch);
+        } else {
+            bool sent = IHS_SessionSendPacket(s, &first->packet);
+            if (first->reliable)
+                IHS_RetransmissionNoteInitialSend(&s->retransmission, &first->packet.header, sent,
+                                                  IHS_TimerNow());
+        }
+    }
+    IHS_BaseUnlock(&s->base);
+    for (QueuedPacket *q = first; q;) {
+        QueuedPacket *next = q->batchNext;
+        QueuedPacketDestroy(q, NULL);
+        IHS_QueueItemFree(q);
+        q = next;
+    }
+    return true;
+}
+
 static QueuedPacket *QueuedPacketCreate(IHS_Session *session, IHS_SessionPacket *packet) {
     QueuedPacket *item = IHS_QueueItemObtain(session->sendQueue);
+    if (!item)
+        return NULL;
     item->packet.header = packet->header;
     item->packet.crc = packet->crc;
     IHS_BufferTransferOwnership(&packet->body, &item->packet.body);
