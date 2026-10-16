@@ -20,12 +20,27 @@ void IHS_SessionSetForeground(IHS_Session *s, bool foreground) {
 void IHS_SessionTransportBegin(IHS_Session *s, uint32_t now) {
     s->transport.updateTime = now;
     s->transport.lastReceive = now;
+    s->transport.lastConnect = 0;
     /* Constructor 0x7fb28c..90 seeds the actual ProcessTimestamp watermark. */
     IHS_MutexLock(s->clock.lock);
     s->clock.lastEcho = now;
     s->clock.haveEcho = true;
     IHS_MutexUnlock(s->clock.lock);
     s->transport.active = true;
+}
+
+bool IHS_SessionTransportSendConnect(IHS_Session *s) {
+    /* Official client BConnect -> Connect -> SendConnectPacket 0x7fb84c.
+     * Fresh packets, count/IDs zero except local ID, cookie but no CRC tail.
+     * Connect itself does not write the periodic lastConnect watermark. */
+    static const uint8_t cookie[] = {0xc7, 0x3d, 0x8f, 0x3c};
+    IHS_SessionPacket packet = {.header = {.type = IHS_SessionPacketTypeConnect,
+                                           .srcConnectionId = s->state.connectionId}};
+    IHS_SessionPacketBodyInitialize(&packet.body, false);
+    IHS_BufferAppendMem(&packet.body, cookie, sizeof(cookie));
+    bool sent = IHS_SessionSendPacket(s, &packet);
+    IHS_SessionPacketClear(&packet, true);
+    return sent;
 }
 
 static void ChangeForeground(IHS_Session *s, bool foreground) {
@@ -86,6 +101,13 @@ void IHS_SessionTransportUpdate(IHS_Session *s, uint32_t now) {
     s->transport.updateTime = now;
     if (!s->transport.active || s->transport.timedOut)
         return;
+    if (s->state.connectionState == IHS_SessionConnectionStateConnecting &&
+        (!s->transport.lastConnect || (uint32_t)(now - s->transport.lastConnect) >= 6553u)) {
+        /* Update 0x7fc190..1b8: attempt before the lease check, and write the
+         * Update timestamp even on EAGAIN/hard failure; no reliable RTO window. */
+        IHS_SessionTransportSendConnect(s);
+        s->transport.lastConnect = now;
+    }
     uint32_t timeout = (s->transport.connectionPaused ? 180u : 15u) * 65536u;
     if ((uint32_t)(now - s->transport.lastReceive) >= timeout) {
         s->transport.timedOut = true;

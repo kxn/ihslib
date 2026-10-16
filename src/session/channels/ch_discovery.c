@@ -104,7 +104,8 @@ static void OnConnectACK(IHS_SessionChannel *channel, const IHS_SessionPacket *p
     IHS_Session *session = channel->session;
     if (session->state.connectionId != packet->header.dstConnectionId) return;
     // Drop stale / replayed ACKs that arrive after the handshake has progressed.
-    if (session->state.connectionState != IHS_SessionConnectionStateConnecting) return;
+    if (session->state.connectionState != IHS_SessionConnectionStateConnecting ||
+        session->transport.timedOut) return;
     /* HandleConnected 0x7fbf18: exactly 13B header + 4B echoed time after CRC removal. */
     if (packet->body.size != 4) return;
     session->state.hostConnectionId = packet->header.srcConnectionId;
@@ -113,10 +114,6 @@ static void OnConnectACK(IHS_SessionChannel *channel, const IHS_SessionPacket *p
     IHS_ReadUInt32LE(IHS_BufferPointer(&packet->body), &echo);
     IHS_StreamClockFeedback(&session->clock, echo, packet->header.sendTimestamp,
                             packet->header.receiveTimestamp);
-    IHS_RetransmissionAcknowledge(&session->retransmission,
-                                 IHS_SessionChannelIdDiscovery, 0, 0,
-                                 IHS_TimerNow());
-
     IHS_SessionChannel *control = IHS_SessionChannelFor(session, IHS_SessionChannelIdControl);
     IHS_SessionChannelControlHandshake(control, false);
 }

@@ -88,7 +88,7 @@ struct IHS_Session {
     /* RX-worker-owned connection clock and lifecycle state. The application
      * publishes foreground transitions through lifecycleGeneration only. */
     struct {
-        uint32_t updateTime, lastReceive, appliedGeneration;
+        uint32_t updateTime, lastReceive, lastConnect, appliedGeneration;
         atomic_uint lifecycleGeneration;
         bool active, clientPaused, connectionPaused, timedOut;
     } transport;
@@ -140,6 +140,7 @@ void IHS_SessionInterrupt(IHS_Session *session);
 
 /* Worker steps, also used by the protocol oracle with a controlled clock. */
 void IHS_SessionTransportBegin(IHS_Session *session, uint32_t now);
+bool IHS_SessionTransportSendConnect(IHS_Session *session);
 CStreamingClientConfig *IHS_SessionClientConfigCopy(IHS_Session *session);
 bool IHS_SessionClientConfigStore(IHS_Session *session, const CStreamingClientConfig *config);
 bool IHS_SessionClientConfigApply(IHS_Session *session, const CStreamingClientConfig *config,

@@ -47,8 +47,7 @@
 
 #include "hid/manager.h"
 
-/* Long enough to ride out one lost packet and its 10 ms retransmit, short enough
- * that a host which never answers doesn't hold the UI. */
+/* Bounded receive wait lets the existing worker advance transport deadlines. */
 #define SESSION_RECV_TIMEOUT_US 10000
 
 typedef struct IHS_QueueItem {
@@ -513,18 +512,11 @@ static void SessionInitialized(IHS_Base *base, void *context) {
     IHS_BaseLock(&session->base);
     session->state.connectionId = IHS_CryptoRandomUInt32();
     session->state.connectionState = IHS_SessionConnectionStateConnecting;
+    session->state.hostConnectionId = 0;
+    session->state.crcRequired = false;
     IHS_SessionTransportBegin(session, IHS_SessionPacketTimestamp());
+    IHS_SessionTransportSendConnect(session);
     IHS_BaseUnlock(&session->base);
-
-    /* crc32c(b'Connect') */
-    const static uint8_t body[4] = {0xc7, 0x3d, 0x8f, 0x3c};
-
-    IHS_SessionChannel *discovery = IHS_SessionChannelFor(session, IHS_SessionChannelIdDiscovery);
-    IHS_SessionPacket packet;
-    IHS_SessionChannelInitializePacket(discovery, &packet, IHS_SessionPacketTypeConnect, true, 0);
-    IHS_BufferAppendMem(&packet.body, body, sizeof(body));
-    IHS_SessionQueuePacket(session, &packet, true);
-    IHS_SessionPacketClear(&packet, true);
 }
 
 static void SessionFinalized(IHS_Base *base, void *context) {
@@ -549,9 +541,6 @@ void IHS_SessionWakeSend(IHS_Session *session) {
     IHS_MutexLock(session->sendQueueMutex);
     IHS_CondSignal(session->sendQueueCond);
     IHS_MutexUnlock(session->sendQueueMutex);
-}
-static bool legacy_send(IHS_SessionPacket *packet, void *ctx) {
-    return IHS_SessionSendPacket(ctx, packet);
 }
 static void SessionSendWorker(void *context) {
     IHS_Session *session = context;
@@ -590,9 +579,6 @@ static void SessionSendWorker(void *context) {
         if (!hadQueued || (uint32_t)(now - lastUpdate) >= 65) {
             if (session->state.connectionState >= IHS_SessionConnectionStateHandshaking)
                 IHS_OutgoingUpdate(session, now);
-            else
-                IHS_RetransmissionProcessChannel(&session->retransmission, IHS_TimerNow(), now, 0,
-                                                  legacy_send, session);
             lastUpdate = now;
         }
     }
