@@ -168,10 +168,12 @@ bool IHS_SessionSendPacket(IHS_Session *session, IHS_SessionPacket *packet);
  * Add packet to send queue
  * @param session Session instance
  * @param packet Packet
- * @param retransmit If true, retain and retry the packet until its exact ACK arrives
- * @return
+ * @param retransmit Retain until cumulative/selective peer feedback confirms receipt.
+ * @return Producer admission only; actual socket I/O happens on the sender worker.
  */
 bool IHS_SessionQueuePacket(IHS_Session *session, IHS_SessionPacket *packet, bool retransmit);
+IHS_SendAdmission IHS_SessionQueuePacketResult(IHS_Session *session, IHS_SessionPacket *packet,
+                                               bool retransmit);
 
 bool IHS_SessionSendControlMessage(IHS_Session *session, EStreamControlMessage type,
                                    const ProtobufCMessage *message);

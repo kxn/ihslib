@@ -38,6 +38,7 @@ int main(int argc, char **argv) {
     assert(argc == 3);
     IHS_Init();
     IHS_Session *s = IHS_TestSessionCreate();
+    s->state.connectionState = IHS_SessionConnectionStateHandshaking;
     s->state.connectionId = 12;
     s->clock.rttSamples = 1;
     s->clock.rttSum = strtoul(argv[1], NULL, 0);

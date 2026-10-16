@@ -114,6 +114,7 @@ static void growth(IHS_Session *s) {
 int main(void) {
     IHS_Init();
     IHS_Session *s = IHS_TestSessionCreate();
+    s->state.connectionState = IHS_SessionConnectionStateHandshaking;
     assert(s);
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
     IHS_TimerTaskStopImmediate(((IHS_SessionChannelControl *)s->channels[1])->feedbackTimer);

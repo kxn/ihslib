@@ -183,27 +183,30 @@ void IHS_SessionChannelControlGetRecentHIDReports(uint64_t *out_ms, uint16_t *ou
     IHS_MutexUnlock(hidPendingLock);
 }
 
-static bool ControlSendLocked(IHS_SessionChannelControl *control, EStreamControlMessage type,
-                              const ProtobufCMessage *message, int32_t packetId,
-                              uint16_t *assignedPacketId);
+static IHS_SendAdmission ControlSendLocked(IHS_SessionChannelControl *control,
+                                           EStreamControlMessage type,
+                                           const ProtobufCMessage *message, int32_t packetId,
+                                           uint16_t *assignedPacketId);
 
 bool IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamControlMessage type,
                                    const ProtobufCMessage *message, int32_t packetId) {
     assert(channel->id == IHS_SessionChannelIdControl);
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *)channel;
     IHS_MutexLock(control->sendLock);
-    bool ret = ControlSendLocked(control, type, message, packetId, NULL);
+    IHS_SendAdmission ret = ControlSendLocked(control, type, message, packetId, NULL);
     IHS_MutexUnlock(control->sendLock);
-    if (!ret && !atomic_load(&channel->session->transport.shutdown) &&
+    if (ret == IHS_SendAdmissionLocalFailure &&
+        !atomic_load(&channel->session->transport.shutdown) &&
         !channel->session->transport.detached) {
         IHS_SessionDisconnect(channel->session);
     }
-    return ret;
+    return ret == IHS_SendAdmissionAccepted;
 }
 
-static bool ControlSendLocked(IHS_SessionChannelControl *control, EStreamControlMessage type,
-                              const ProtobufCMessage *message, int32_t packetId,
-                              uint16_t *assignedPacketId) {
+static IHS_SendAdmission ControlSendLocked(IHS_SessionChannelControl *control,
+                                           EStreamControlMessage type,
+                                           const ProtobufCMessage *message, int32_t packetId,
+                                           uint16_t *assignedPacketId) {
     IHS_SessionChannel *channel = &control->base;
     assert(channel->id == IHS_SessionChannelIdControl);
     size_t messageCapacity = protobuf_c_message_get_packed_size(message);
@@ -231,7 +234,7 @@ static bool ControlSendLocked(IHS_SessionChannelControl *control, EStreamControl
         uint8_t *serialized = calloc(1, messageCapacity ? messageCapacity : 1);
         if (serialized == NULL) {
             IHS_SessionFrameClear(&frame, true);
-            return false;
+            return IHS_SendAdmissionLocalFailure;
         }
         size_t serializedLen = protobuf_c_message_pack(message, serialized);
         uint8_t *cipher = IHS_BufferPointerForAppend(&frame.body, cipherSize);
@@ -241,14 +244,14 @@ static bool ControlSendLocked(IHS_SessionChannelControl *control, EStreamControl
             IHS_SessionFrameClear(&frame, true);
             IHS_SessionLog(channel->session, IHS_LogLevelError, "Control",
                            "Failed to encrypt payload\n");
-            return false;
+            return IHS_SendAdmissionLocalFailure;
         }
         free(serialized);
         frame.body.size += cipherSize;
     } else {
         IHS_BufferAppendMessage(&frame.body, message);
     }
-    bool ret = IHS_SessionChannelQueueFrame(channel, &frame, true);
+    IHS_SendAdmission ret = IHS_SessionChannelQueueFrameResult(channel, &frame, true);
     if (assignedPacketId != NULL) *assignedPacketId = frame.header.packetId;
     IHS_SessionLog(channel->session, logLevel, "Control", "Send control message: %s, id=%u",
                    value->name, frame.header.packetId);
@@ -275,18 +278,20 @@ bool IHS_SessionChannelControlSubmitHIDReport(IHS_SessionChannel *channel, const
      * (SendRemoteHIDMessage bool → CRemoteHIDMsg.active_input, 0x7ab4c8). */
     wrapped.has_active_input = true;
     wrapped.active_input = activeInput;
-    bool ret = ControlSendLocked(control, k_EStreamControlRemoteHID,
-                                 (const ProtobufCMessage *)&wrapped, IHS_PACKET_ID_NEXT, NULL);
-    if (ret)
+    IHS_SendAdmission ret =
+        ControlSendLocked(control, k_EStreamControlRemoteHID, (const ProtobufCMessage *)&wrapped,
+                          IHS_PACKET_ID_NEXT, NULL);
+    if (ret == IHS_SendAdmissionAccepted)
         control->hidSent++;
-    if (ret)
+    if (ret == IHS_SendAdmissionAccepted)
         HIDPendingPush(IHS_TimerNow(), data, dataLen);
     IHS_MutexUnlock(control->sendLock);
-    if (!ret && !atomic_load(&channel->session->transport.shutdown) &&
+    if (ret == IHS_SendAdmissionLocalFailure &&
+        !atomic_load(&channel->session->transport.shutdown) &&
         !channel->session->transport.detached) {
         IHS_SessionDisconnect(channel->session);
     }
-    return ret;
+    return ret == IHS_SendAdmissionAccepted;
 }
 
 bool IHS_SessionChannelControlFlushPendingHID(IHS_SessionChannel *channel) {

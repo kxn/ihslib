@@ -12,6 +12,7 @@
 struct IHS_QueueItem { IHS_SessionPacket packet; bool reliable; };
 static IHS_Session *session_new(void) {
     IHS_Session *s = IHS_TestSessionCreate();
+    s->state.connectionState = IHS_SessionConnectionStateHandshaking;
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
     IHS_SessionChannelControl *c = (void *) s->channels[1];
     IHS_TimerTaskStopImmediate(c->feedbackTimer);
@@ -112,6 +113,7 @@ static unsigned drain_nacks(IHS_Session *s) {
 }
 static void lost_nack_recovery(void) {
     IHS_Session *s = IHS_TestSessionCreate(); /* keep feedback timer running */
+    s->state.connectionState = IHS_SessionConnectionStateHandshaking;
     receive(s, IHS_SessionPacketTypeReliable, 1, 0);
     assert(drain_nacks(s) >= 1); /* pretend this feedback was lost */
     unsigned repeated = 0;

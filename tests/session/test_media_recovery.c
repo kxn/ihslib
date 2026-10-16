@@ -172,6 +172,7 @@ int main(void) {
     IHS_Init();
     window_cases();
     IHS_Session *s = IHS_TestSessionCreate();
+    s->state.connectionState = IHS_SessionConnectionStateHandshaking;
     IHS_SessionChannel *c =
         IHS_SessionChannelDataCreate(&cls, s, IHS_SessionChannelTypeDataVideo, 3, NULL);
     assert(c);

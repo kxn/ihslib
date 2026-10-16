@@ -176,6 +176,8 @@ static void SetUp(void) {
     assert(IHS_SessionSetClientCapabilities(session, &capabilities));
     memset(decoder, 'x', sizeof(decoder) - 1); /* session owns its copy */
     IHS_SessionSetVideoCallbacks(session, &videoCallbacks, NULL);
+    /* This fixture starts media after the transport handshake. */
+    session->state.connectionState = IHS_SessionConnectionStateHandshaking;
     CStartVideoDataMsg message = CSTART_VIDEO_DATA_MSG__INIT;
     message.channel = 3;
     PROTOBUF_C_SET_VALUE(message, codec, k_EStreamVideoCodecH264);

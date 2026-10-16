@@ -25,6 +25,15 @@
 
 #pragma once
 
+/* Producer admission only. Actual socket results are asynchronous and have a
+ * separate 0..4 transport contract; accepted packets may still need retry. */
+typedef enum IHS_SendAdmission {
+    IHS_SendAdmissionAccepted = 0,
+    IHS_SendAdmissionTooLarge = 2,
+    IHS_SendAdmissionNotConnected = 3,
+    IHS_SendAdmissionLocalFailure = 4,
+} IHS_SendAdmission;
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>

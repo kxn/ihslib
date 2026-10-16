@@ -80,6 +80,21 @@ target_link_libraries(ihstest_fec_channel PRIVATE ihs-test-session)
 set_tests_properties(fec_channel PROPERTIES TIMEOUT 10)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    ihs_add_test(send_admission test_send_admission.c)
+    target_link_libraries(ihstest_send_admission PRIVATE ihs-test-session)
+    target_link_options(ihstest_send_admission PRIVATE -Wl,--wrap=IHS_SessionChannelQueueFrameResult)
+    ihs_add_test(send_admission_worker test_send_admission_worker.c)
+    target_link_libraries(ihstest_send_admission_worker PRIVATE ihs-test-session)
+    target_link_options(ihstest_send_admission_worker PRIVATE -Wl,--wrap=IHS_BaseSend
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive)
+    set_tests_properties(send_admission send_admission_worker PROPERTIES TIMEOUT 20)
+    add_executable(ihs-send-admission-oracle send_admission_oracle.c)
+    target_include_directories(ihs-send-admission-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-send-admission-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-send-admission-oracle PRIVATE -UNDEBUG)
+    target_link_options(ihs-send-admission-oracle PRIVATE -Wl,--wrap=IHS_BaseSend
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_RetransmissionTrack
+        -Wl,--wrap=IHS_SessionFrameEncrypt)
     ihs_add_test(connection_id test_connection_id.c)
     set_tests_properties(connection_id PROPERTIES TIMEOUT 10)
     add_executable(ihs-disconnect-oracle disconnect_oracle.c)

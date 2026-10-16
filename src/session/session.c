@@ -253,15 +253,22 @@ int IHS_SessionSendPacketResult(IHS_Session *session, IHS_SessionPacket *packet)
 }
 
 bool IHS_SessionQueuePacket(IHS_Session *session, IHS_SessionPacket *packet, bool retransmit) {
+    return IHS_SessionQueuePacketResult(session, packet, retransmit) == IHS_SendAdmissionAccepted;
+}
+
+IHS_SendAdmission IHS_SessionQueuePacketResult(IHS_Session *session, IHS_SessionPacket *packet,
+                                               bool retransmit) {
+    if (!session)
+        return IHS_SendAdmissionNotConnected;
     assert(packet->body.offset == IHS_PACKET_HEADER_SIZE);
     // If the packet has CRC, require 4 bytes extra space at the end of body
     assert(!packet->header.hasCrc || packet->body.suffix == 4);
     IHS_MutexLock(session->sendQueueMutex);
     if (session->transport.detached ||
-        (atomic_load(&session->transport.shutdown) &&
+        (IHS_SessionTransportState(session) != IHS_TransportConnected &&
          packet->header.type != IHS_SessionPacketTypeUnconnected)) {
         IHS_MutexUnlock(session->sendQueueMutex);
-        return false;
+        return IHS_SendAdmissionNotConnected;
     }
     if (packet->header.autoPacketId) {
         bool reliable = packet->header.type == IHS_SessionPacketTypeReliable ||
@@ -277,7 +284,7 @@ bool IHS_SessionQueuePacket(IHS_Session *session, IHS_SessionPacket *packet, boo
                        "Failed to track reliable Packet(channelId=%u, packetId=%u, fragmentId=%d)",
                        packet->header.channelId, packet->header.packetId,
                        packet->header.fragmentId);
-        return false;
+        return IHS_SendAdmissionLocalFailure;
     }
     // Move buffer ownership from packet to QueuedPacket
     QueuedPacket *item = QueuedPacketCreate(session, packet);
@@ -288,7 +295,7 @@ bool IHS_SessionQueuePacket(IHS_Session *session, IHS_SessionPacket *packet, boo
 
     IHS_CondSignal(session->sendQueueCond);
     IHS_MutexUnlock(session->sendQueueMutex);
-    return true;
+    return IHS_SendAdmissionAccepted;
 }
 
 bool IHS_SessionSendControlMessage(IHS_Session *session, EStreamControlMessage type,

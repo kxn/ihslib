@@ -35,8 +35,9 @@
 #include "session/frame.h"
 #include "session/session_pri.h"
 
-static bool SessionChannelQueueFramePackets(IHS_SessionChannel *channel, IHS_SessionFrame *frame,
-                                            size_t bodyLimit, bool enableRetransmit);
+static IHS_SendAdmission SessionChannelQueueFramePackets(IHS_SessionChannel *channel,
+                                                         IHS_SessionFrame *frame, size_t bodyLimit,
+                                                         bool enableRetransmit);
 
 static IHS_SessionPacketType FragmentedPacketType(IHS_SessionPacketType type);
 
@@ -207,8 +208,16 @@ bool IHS_SessionChannelQueuePacket(IHS_SessionChannel *channel, IHS_SessionPacke
 
 bool IHS_SessionChannelQueueFrame(IHS_SessionChannel *channel, IHS_SessionFrame *frame,
                                   bool enableRetransmit) {
-    if (channel->session->transport.detached || atomic_load(&channel->session->transport.shutdown))
-        return false;
+    return IHS_SessionChannelQueueFrameResult(channel, frame, enableRetransmit) ==
+           IHS_SendAdmissionAccepted;
+}
+
+IHS_SendAdmission IHS_SessionChannelQueueFrameResult(IHS_SessionChannel *channel,
+                                                     IHS_SessionFrame *frame,
+                                                     bool enableRetransmit) {
+    if (!channel || !channel->session || channel->session->transport.detached ||
+        IHS_SessionTransportState(channel->session) != IHS_TransportConnected)
+        return IHS_SendAdmissionNotConnected;
     /* Reserve negotiated CRC before computing fragment capacity, not only at
      * final socket send; otherwise full fragments could exceed MTU by four. */
     if (channel->session->state.crcRequired && !frame->header.hasCrc) {
@@ -221,6 +230,11 @@ bool IHS_SessionChannelQueueFrame(IHS_SessionChannel *channel, IHS_SessionFrame 
         packetBodySizeLimit -= 4;
     }
     assert(packetBodySizeLimit > 0);
+    /* A local frame bound is not a transport error or a reason to disconnect.
+     * Reject before reserving any sequence ID or publishing the first fragment. */
+    if (frame->body.size / packetBodySizeLimit + !!(frame->body.size % packetBodySizeLimit) >
+        INT16_MAX)
+        return IHS_SendAdmissionTooLarge;
 
     /* The original AddToOutgoingPacketWindow assigns IDs at send admission.
      * Reserve the complete fragment run under queue lock before publishing any
@@ -231,13 +245,13 @@ bool IHS_SessionChannelQueueFrame(IHS_SessionChannel *channel, IHS_SessionFrame 
             IHS_OutgoingNextId(channel->session, channel->id, false) : IHS_SessionChannelNextPacketId(channel);
         frame->header.autoPacketId = false;
     }
-    bool ret;
+    IHS_SendAdmission ret;
     if (frame->body.size < packetBodySizeLimit) {
         // Frame can fit in single packet
         IHS_SessionPacket packet;
         packet.header = frame->header;
         IHS_BufferTransferOwnership(&frame->body, &packet.body);
-        ret = IHS_SessionQueuePacket(channel->session, &packet, enableRetransmit);
+        ret = IHS_SessionQueuePacketResult(channel->session, &packet, enableRetransmit);
         IHS_SessionPacketClear(&packet, true);
     } else {
         ret =
@@ -258,8 +272,9 @@ void IHS_SessionChannelPacketAck(IHS_SessionChannel *channel, int32_t packetId, 
     IHS_SessionPacketClear(&packet, true);
 }
 
-static bool SessionChannelQueueFramePackets(IHS_SessionChannel *channel, IHS_SessionFrame *frame,
-                                            size_t bodyLimit, bool enableRetransmit) {
+static IHS_SendAdmission SessionChannelQueueFramePackets(IHS_SessionChannel *channel,
+                                                         IHS_SessionFrame *frame, size_t bodyLimit,
+                                                         bool enableRetransmit) {
     /* The head carries the number of fragments that FOLLOW it, which is what the
      * receiving window reads back (window.c: packetsCount = 1 + head->fragmentId).
      * `size / bodyLimit + 1` counted the head as well, and over-counted by one more
@@ -285,15 +300,16 @@ static bool SessionChannelQueueFramePackets(IHS_SessionChannel *channel, IHS_Ses
         }
         IHS_SessionPacketBodyInitialize(&packet.body, packet.header.hasCrc);
         IHS_BufferAppendMem(&packet.body, IHS_BufferPointer(&frame->body), packetBodySize);
-        bool ret = IHS_SessionQueuePacket(channel->session, &packet, enableRetransmit);
+        IHS_SendAdmission ret =
+            IHS_SessionQueuePacketResult(channel->session, &packet, enableRetransmit);
         IHS_SessionPacketClear(&packet, true);
-        if (!ret) {
-            return false;
+        if (ret != IHS_SendAdmissionAccepted) {
+            return ret;
         }
         IHS_BufferOffsetBy(&frame->body, (int)packetBodySize);
         fragmentId += 1;
     }
-    return true;
+    return IHS_SendAdmissionAccepted;
 }
 
 static IHS_SessionPacketType FragmentedPacketType(IHS_SessionPacketType type) {

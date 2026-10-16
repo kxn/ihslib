@@ -32,6 +32,7 @@ static void generate(void *context) {
 int main(void) {
     IHS_Init();
     Fixture f = {.session = IHS_TestSessionCreate()};
+    f.session->state.connectionState = IHS_SessionConnectionStateHandshaking;
     IHS_TimerTaskStopImmediate(f.session->retransmission.timer);
     IHS_SessionChannelControl *c = (void *)f.session->channels[1];
     IHS_TimerTaskStopImmediate(c->feedbackTimer);
