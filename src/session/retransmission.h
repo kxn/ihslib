@@ -44,6 +44,7 @@ typedef struct IHS_RetransmissionStats {
 typedef struct IHS_SessionRetransmission {
     IHS_Session *session;
     IHS_Mutex *lock;
+    IHS_Mutex *sendLock; /* Serialize attempts without holding the ACK/NACK lock. */
     IHS_RetransmissionPending *head;
     IHS_TimerTask *timer;
     IHS_RetransmissionStats stats;
@@ -97,3 +98,8 @@ void IHS_RetransmissionGetStats(IHS_SessionRetransmission *retransmission,
 
 size_t IHS_RetransmissionNackBefore(IHS_SessionRetransmission *r, IHS_SessionChannelId channel,
                                     uint16_t id, bool below, uint32_t cutoff, uint64_t nowMs);
+
+/* Production timer uses the official strict 16.16 timestamp boundary. The ms
+ * entry remains for standalone legacy test callers without a session clock. */
+size_t IHS_RetransmissionProcessTicks(IHS_SessionRetransmission *, uint64_t nowMs,
+                                      uint32_t nowTicks, IHS_RetransmissionSendFunction, void *);

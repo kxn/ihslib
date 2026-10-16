@@ -7,6 +7,7 @@
 
 #include <assert.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include "session_pri.h"
@@ -34,6 +35,10 @@ struct IHS_RetransmissionPending {
     uint32_t retryCount;
     bool initialSent;
     bool nackPending;
+    bool tracked;
+    atomic_uint references;
+    uint8_t nextWireCount;
+    uint64_t feedbackGeneration;
     IHS_RetransmissionPending *next;
 };
 
@@ -53,6 +58,7 @@ static void PacketClone(IHS_SessionPacket *dest, const IHS_SessionPacket *source
 }
 
 static void PendingDestroy(IHS_RetransmissionPending *pending) {
+    if (atomic_fetch_sub(&pending->references, 1) != 1) return;
     IHS_SessionPacketClear(&pending->packet, true);
     free(pending);
 }
@@ -70,8 +76,8 @@ static bool SendRetry(IHS_SessionPacket *packet, void *context) {
 static uint64_t RetransmissionTimerRun(int runCount, void *context) {
     (void) runCount;
     IHS_SessionRetransmission *retransmission = context;
-    IHS_RetransmissionProcessAt(retransmission, IHS_TimerNow(), SendRetry,
-                                retransmission->session);
+    IHS_RetransmissionProcessTicks(retransmission, IHS_TimerNow(),
+                                   IHS_SessionPacketTimestamp(), SendRetry, retransmission->session);
     return RETRANSMISSION_TICK_MS;
 }
 
@@ -84,6 +90,7 @@ void IHS_RetransmissionInit(IHS_SessionRetransmission *retransmission, IHS_Sessi
     memset(retransmission, 0, sizeof(*retransmission));
     retransmission->session = session;
     retransmission->lock = IHS_MutexCreate();
+    retransmission->sendLock = IHS_MutexCreate();
     if (session != NULL && session->timers != NULL) {
         retransmission->timer = IHS_TimerTaskStart(session->timers, RetransmissionTimerRun,
                                                    RetransmissionTimerEnd,
@@ -102,6 +109,7 @@ void IHS_RetransmissionDeinit(IHS_SessionRetransmission *retransmission) {
         PendingDestroy(pending);
         pending = next;
     }
+    IHS_MutexDestroy(retransmission->sendLock);
     IHS_MutexDestroy(retransmission->lock);
 }
 
@@ -114,7 +122,9 @@ bool IHS_RetransmissionTrack(IHS_SessionRetransmission *retransmission,
     if (pending == NULL) {
         return false;
     }
+    atomic_init(&pending->references, 1);
     PacketClone(&pending->packet, packet);
+    pending->nextWireCount = packet->header.retransmitCount;
     pending->firstTrackedMs = nowMs;
     /* Registration precedes queue admission so a fast ACK cannot race past us.
      * Do not arm retry here: the send queue may take longer than the retry delay,
@@ -131,6 +141,7 @@ bool IHS_RetransmissionTrack(IHS_SessionRetransmission *retransmission,
             return false;
         }
     }
+    pending->tracked = true;
     pending->next = retransmission->head;
     retransmission->head = pending;
     retransmission->stats.tracked++;
@@ -151,6 +162,7 @@ bool IHS_RetransmissionAcknowledge(IHS_SessionRetransmission *retransmission,
     IHS_RetransmissionPending *pending = *link;
     if (pending != NULL) {
         *link = pending->next;
+        pending->tracked = false;
         retransmission->stats.acknowledged++;
         if (pending->packet.header.hidReport) retransmission->stats.hidAcknowledged++;
         retransmission->stats.outstanding--;
@@ -194,9 +206,11 @@ bool IHS_RetransmissionNack(IHS_SessionRetransmission *retransmission,
         if (PacketIdentityMatches(&pending->packet.header, channelId, packetId, fragmentId)) {
             if (pending->initialSent) {
                 pending->nextRetryMs = nowMs;
+                pending->nackPending = true;
             } else {
                 pending->nackPending = true;
             }
+            pending->feedbackGeneration++;
             retransmission->stats.nacks++;
             found = true;
             break;
@@ -217,6 +231,9 @@ void IHS_RetransmissionNoteInitialSend(IHS_SessionRetransmission *retransmission
             pending->initialSent = true;
             pending->lastSendMs = nowMs;
             pending->lastSendTimestamp = header->sendTimestamp;
+            pending->packet.header.sendTimestamp = header->sendTimestamp;
+            pending->nextWireCount = header->retransmitCount;
+            if (sent && pending->nextWireCount < UINT8_MAX) pending->nextWireCount++;
             if (!sent || pending->nackPending) {
                 pending->nextRetryMs = nowMs;
             } else {
@@ -246,63 +263,106 @@ bool IHS_RetransmissionIsTracked(const IHS_SessionRetransmission *retransmission
     return false;
 }
 
-size_t IHS_RetransmissionProcessAt(IHS_SessionRetransmission *retransmission, uint64_t nowMs,
-                                   IHS_RetransmissionSendFunction send, void *context) {
-    size_t dueCount = 0;
+static bool PendingDue(IHS_RetransmissionPending *p, uint64_t nowMs, bool ticks,
+                        uint32_t nowTicks, uint32_t delay) {
+    if (!p->initialSent) return false;
+    /* Connect has a different official scheduler; preserve its existing path
+     * until connection-level connect retries are moved out of this window. */
+    if (!ticks || (p->packet.header.type != IHS_SessionPacketTypeReliable &&
+                   p->packet.header.type != IHS_SessionPacketTypeReliableFrag))
+        return p->nextRetryMs <= nowMs;
+    return p->nackPending || !p->nextWireCount || !p->lastSendTimestamp ||
+           (int32_t)(p->lastSendTimestamp + delay - nowTicks) < 0;
+}
+static size_t Process(IHS_SessionRetransmission *retransmission, uint64_t nowMs,
+                       bool ticks, uint32_t nowTicks,
+                       IHS_RetransmissionSendFunction send, void *context) {
+    typedef struct {
+        IHS_RetransmissionPending *pending;
+        IHS_SessionPacket packet;
+        uint64_t feedbackGeneration;
+    } Attempt;
+    IHS_MutexLock(retransmission->sendLock);
+    /* Snapshot the estimate once: clock feedback has its own lock, so using a
+     * changing estimate between count and fill could exceed the allocation. */
+    uint32_t delay = retransmission->session ?
+        IHS_StreamClockRetryTicks(&retransmission->session->clock) : 1638;
     IHS_MutexLock(retransmission->lock);
-
-    for (IHS_RetransmissionPending *pending = retransmission->head; pending != NULL;
-         pending = pending->next) {
-        if (pending->initialSent && pending->nextRetryMs <= nowMs) {
-            dueCount++;
-        }
-    }
-    if (dueCount == 0) {
+    size_t dueCount = 0;
+    for (IHS_RetransmissionPending *p = retransmission->head; p; p = p->next)
+        if (PendingDue(p, nowMs, ticks, nowTicks, delay)) dueCount++;
+    Attempt *due = dueCount ? calloc(dueCount, sizeof(*due)) : NULL;
+    if (!due) {
         IHS_MutexUnlock(retransmission->lock);
-
-        return 0;
-    }
-
-    IHS_SessionPacket *due = calloc(dueCount, sizeof(*due));
-    if (due == NULL) {
-        IHS_MutexUnlock(retransmission->lock);
-
+        IHS_MutexUnlock(retransmission->sendLock);
         return 0;
     }
     size_t index = 0;
-    for (IHS_RetransmissionPending *pending = retransmission->head; pending != NULL;
-         pending = pending->next) {
-        if (!pending->initialSent || pending->nextRetryMs > nowMs) {
-            continue;
-        }
-        PacketClone(&due[index], &pending->packet);
-        pending->retryCount++;
-        due[index].header.retransmitCount = pending->retryCount > UINT8_MAX
-                                           ? UINT8_MAX : (uint8_t) pending->retryCount;
-        pending->lastSendMs = nowMs;
-        pending->lastSendTimestamp = IHS_SessionPacketTimestamp();
-        pending->nextRetryMs = nowMs + RetryDelayMs(retransmission);
-        retransmission->stats.retries++;
-        index++;
+    for (IHS_RetransmissionPending *p = retransmission->head; p; p = p->next) {
+        if (!PendingDue(p, nowMs, ticks, nowTicks, delay)) continue;
+        Attempt *a = &due[index++];
+        a->pending = p;
+        atomic_fetch_add(&p->references, 1);
+        a->feedbackGeneration = p->feedbackGeneration;
+        PacketClone(&a->packet, &p->packet);
+        a->packet.header.retransmitCount = p->nextWireCount;
     }
     IHS_MutexUnlock(retransmission->lock);
 
-
-
-    /* Pending is newest-first; visit retries oldest-first, as the official
-     * SendReliablePackets walks forward from the outgoing window head. */
+    size_t attempted = 0;
+    bool failed[256] = {false};
+    /* The official sender walks oldest-first and stops this channel on the
+     * first nonzero transport result (0x7f8b94..d4). Other channels still run.
+     * Snapshot references allow ACK to unlink/free its ownership during I/O;
+     * skipped/acknowledged entries never have counters or deadlines advanced. */
     for (size_t remaining = dueCount; remaining > 0;) {
-        index = --remaining;
-        bool sent = send(&due[index], context);
-        if (!sent) {
+        Attempt *a = &due[--remaining];
+        IHS_RetransmissionPending *p = a->pending;
+        unsigned channel = a->packet.header.channelId;
+        IHS_MutexLock(retransmission->lock);
+        bool eligible = p->tracked && !failed[channel];
+        IHS_MutexUnlock(retransmission->lock);
+        if (eligible) {
+            bool sent = send(&a->packet, context);
+            attempted++;
+            failed[channel] = !sent;
             IHS_MutexLock(retransmission->lock);
-            retransmission->stats.sendFailures++;
+            retransmission->stats.retries++;
+            if (!sent) retransmission->stats.sendFailures++;
+            if (p->tracked) {
+                p->lastSendMs = nowMs;
+                p->lastSendTimestamp = a->packet.header.sendTimestamp;
+                p->packet.header.sendTimestamp = a->packet.header.sendTimestamp;
+                /* Socket stamps even a rejected/failed attempt. Only success
+                 * increments the stored wire count; it saturates at 255. */
+                if (sent) {
+                    p->retryCount = a->packet.header.retransmitCount;
+                    if (p->nextWireCount < UINT8_MAX) p->nextWireCount++;
+                }
+                if (p->feedbackGeneration == a->feedbackGeneration) {
+                    p->nackPending = false;
+                    p->nextRetryMs = !p->nextWireCount ? nowMs :
+                        nowMs + RetryDelayMs(retransmission);
+                }
+            }
             IHS_MutexUnlock(retransmission->lock);
         }
-        IHS_SessionPacketClear(&due[index], true);
+        IHS_SessionPacketClear(&a->packet, true);
+        PendingDestroy(p);
     }
     free(due);
-    return dueCount;
+    IHS_MutexUnlock(retransmission->sendLock);
+    return attempted;
+}
+
+size_t IHS_RetransmissionProcessAt(IHS_SessionRetransmission *r, uint64_t nowMs,
+                                   IHS_RetransmissionSendFunction send, void *context) {
+    return Process(r, nowMs, false, 0, send, context);
+}
+size_t IHS_RetransmissionProcessTicks(IHS_SessionRetransmission *r, uint64_t nowMs,
+                                      uint32_t nowTicks, IHS_RetransmissionSendFunction send,
+                                      void *context) {
+    return Process(r, nowMs, true, nowTicks, send, context);
 }
 
 void IHS_RetransmissionGetStats(IHS_SessionRetransmission *retransmission,
@@ -357,6 +417,7 @@ size_t IHS_RetransmissionAcknowledgeThrough(IHS_SessionRetransmission *retransmi
             continue;
         }
         *link = pending->next;
+        pending->tracked = false;
         retransmission->stats.acknowledged++;
         if (pending->packet.header.hidReport) retransmission->stats.hidAcknowledged++;
         retransmission->stats.outstanding--;
@@ -389,9 +450,11 @@ size_t IHS_RetransmissionNackAllThrough(IHS_SessionRetransmission *retransmissio
         }
         if (pending->initialSent) {
             pending->nextRetryMs = nowMs;
+            pending->nackPending = true;
         } else {
             pending->nackPending = true;
         }
+        pending->feedbackGeneration++;
         retransmission->stats.nacks++;
         nudged++;
     }
@@ -411,6 +474,8 @@ size_t IHS_RetransmissionNackBefore(IHS_SessionRetransmission *r, IHS_SessionCha
          * the combined age/peer-observation cutoff (0x7f976c..80). */
         if (!p->initialSent || (int32_t)(p->lastSendTimestamp - cutoff) > 0) continue;
         p->nextRetryMs = nowMs;
+        p->nackPending = true;
+        p->feedbackGeneration++;
         r->stats.nacks++; count++;
     }
     IHS_MutexUnlock(r->lock);
