@@ -354,8 +354,9 @@ static void OnControlReceived(IHS_SessionChannel *channel, IHS_SessionPacket *pa
 void IHS_SessionChannelControlReceiveFrame(IHS_SessionChannel *channel, IHS_SessionFrame *frame) {
     IHS_SessionChannelControl *control = (void *)channel;
     int phase = channel->session->state.connectionState;
-    if (phase == IHS_SessionConnectionStateUnconnected || phase == 7 ||
-        atomic_load(&channel->session->transport.shutdown)) return;
+    if (phase == IHS_SessionConnectionStateUnconnected ||
+        phase == IHS_SessionConnectionStateStopping || channel->session->base.interrupted ||
+        channel->session->transport.detached) return;
     /* Frame::SetPacket without a message byte leaves type zero; the original
      * still consumes a decrypt attempt and rejects the missing cipher. */
     EStreamControlMessage type = frame->body.size ? *IHS_BufferPointer(&frame->body) : 0;

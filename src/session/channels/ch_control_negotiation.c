@@ -317,6 +317,9 @@ static void OnNegotiationSetConfig(IHS_SessionChannel *channel, const CNegotiati
 void IHS_SessionChannelControlUpdateStage(IHS_SessionChannel *channel, uint32_t now) {
     IHS_Session *session = channel->session;
     switch (session->state.connectionState) {
+    case IHS_SessionConnectionStateStopping:
+        IHS_SessionClientStopStreaming(session);
+        break;
     case IHS_SessionConnectionStateStarting: {
         IHS_SessionChannelControl *control = (void *)channel;
         /* Publish the live phase and enqueue Complete under the existing

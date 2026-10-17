@@ -79,6 +79,9 @@ int main(int argc,char **argv) {
             IHS_SessionChannelControlReceiveFrame(session->channels[1],&frame);
             IHS_SessionFrameClear(&frame,true);
         } else if(sscanf(line,"S %u",&state)==1) session->state.connectionState=state;
+        else if(sscanf(line,"T %u",&state)==1) {
+            assert(state==2||state==3);atomic_store(&session->transport.shutdown,state-1);
+        }
         else {assert(line[0]=='D');phase="drain";IHS_SessionChannelControlDrainIncoming(session->channels[1]);}
         report();
     }

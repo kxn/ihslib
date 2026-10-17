@@ -83,8 +83,8 @@ static void disconnected(IHS_Session *s, void *ctx) {
     assert(atomic_fetch_add(&notices, 1) == 0);
     if (mode == Peer || mode == Timeout) {
         assert(!s->transport.detached);
-        assert(IHS_SessionTransportState(s) == IHS_TransportClosing);
-        assert(s->state.hostConnectionId == 34);
+        assert(IHS_SessionTransportState(s) == IHS_TransportClosed);
+        assert(s->state.hostConnectionId == 0);
     }
 }
 static void *close_session(void *ctx) {

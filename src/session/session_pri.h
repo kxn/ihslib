@@ -53,6 +53,7 @@
  * SetConfig.
  *   Starting      - Host SetConfig copied; next RX update starts the stream.
  *   Connected     - NegotiationComplete queued, the stream is live.
+ *   Stopping      - Transport delegate retired; drain then stop consumers.
  */
 typedef enum IHS_SessionConnectionState {
     IHS_SessionConnectionStateUnconnected,
@@ -62,6 +63,7 @@ typedef enum IHS_SessionConnectionState {
     IHS_SessionConnectionStateNegotiating,
     IHS_SessionConnectionStateStarting,
     IHS_SessionConnectionStateConnected,
+    IHS_SessionConnectionStateStopping,
 } IHS_SessionConnectionState;
 
 typedef enum IHS_TransportState {
@@ -104,6 +106,7 @@ struct IHS_Session {
         atomic_uint lifecycleGeneration;
         atomic_uint shutdown; /* 0: live phase, 1: closing, 2: closed */
         atomic_bool detached, notified, addressCleared;
+        atomic_bool closeRequested; /* Public cancellation; RX owner closes after consumer stop. */
         bool active, clientPaused, connectionPaused, timedOut;
     } transport;
     /* Negotiated codec preference and capture size; StartVideoData supplies
@@ -171,6 +174,9 @@ void IHS_SessionTransportDisconnect(IHS_Session *session);
 void IHS_SessionTransportClose(IHS_Session *session);
 bool IHS_SessionTransportFinish(IHS_Session *session);
 void IHS_SessionNotifyDisconnected(IHS_Session *session);
+/* Connection delegate and client stage are distinct from the app callback. */
+void IHS_SessionClientTransportClosed(IHS_Session *session);
+void IHS_SessionClientStopStreaming(IHS_Session *session);
 CStreamingClientConfig *IHS_SessionClientConfigCopy(IHS_Session *session);
 bool IHS_SessionClientConfigStore(IHS_Session *session, const CStreamingClientConfig *config);
 bool IHS_SessionClientConfigApply(IHS_Session *session, const CStreamingClientConfig *config,

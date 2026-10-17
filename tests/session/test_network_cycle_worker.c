@@ -52,8 +52,8 @@ static void disconnected(IHS_Session *s, void *context) {
     (void)context;
     if (!withTimeout)
         return;
-    assert(atomic_load(&goodbyes) == 1 && IHS_SessionTransportState(s) == IHS_TransportClosing);
-    assert(s->state.connectionId == originalLocal && s->state.hostConnectionId == 34);
+    assert(atomic_load(&goodbyes) == 1 && IHS_SessionTransportState(s) == IHS_TransportClosed);
+    assert(s->state.connectionId != originalLocal && s->state.hostConnectionId == 0);
     atomic_store(&closedNotice, true);
 }
 static int incoming(IHS_UDPPacket *rx, unsigned type, unsigned channel, unsigned id,

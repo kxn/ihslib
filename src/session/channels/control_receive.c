@@ -66,7 +66,7 @@ void IHS_SessionChannelControlDrainIncoming(IHS_SessionChannel *channel) {
     IHS_SessionChannelControl *control = (void *)channel;
     IHS_IncomingControl *message;
     while ((message = Pop(control))) {
-        if (!atomic_load(&channel->session->transport.shutdown) &&
+        if (!channel->session->base.interrupted && !channel->session->transport.detached &&
             CanDispatch(channel->session->state.connectionState, message->type))
             IHS_SessionChannelControlOnMessageReceived(channel, message->type, &message->body,
                                                        &message->header);

@@ -72,12 +72,14 @@ static unsigned txSeedCount;
 static struct { unsigned state, local, peer, tick; } notices[4];
 static unsigned noticeCount;
 uint8_t __wrap_IHS_SessionNextConnectionId(void) { return 12; }
-static void disconnected(IHS_Session *s, void *context) {
-    (void)context; assert(noticeCount < 4);
+void __real_IHS_SessionClientTransportClosed(IHS_Session *);
+void __wrap_IHS_SessionClientTransportClosed(IHS_Session *s) {
+    assert(noticeCount < 4);
     notices[noticeCount].state=IHS_SessionTransportState(s);
     notices[noticeCount].local=s->state.connectionId;
     notices[noticeCount].peer=s->state.hostConnectionId;
     notices[noticeCount++].tick=now;
+    __real_IHS_SessionClientTransportClosed(s);
 }
 static void save_initial_wires(void) {
     for (unsigned i=0;i<cycleWireCount;++i) { assert(initialWireCount < 256); initialWires[initialWireCount++]=cycleWires[i]; }
@@ -338,8 +340,6 @@ int main(int argc, char **argv) {
             session->transport.clientPaused=session->transport.connectionPaused=paused;
             session->transport.appliedGeneration=paused;
             atomic_store(&session->transport.lifecycleGeneration,paused);
-            static const IHS_StreamSessionCallbacks cb={.disconnected=disconnected};
-            IHS_SessionSetSessionCallbacks(session,&cb,NULL);
             continue;
         }
         if (deadlineMode && line[0] == 'D') {

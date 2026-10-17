@@ -92,6 +92,7 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig,
     atomic_init(&session->state.crcRequired, false);
     atomic_init(&session->transport.lifecycleGeneration, 0);
     atomic_init(&session->transport.shutdown, 0);
+    atomic_init(&session->transport.closeRequested, false);
     atomic_init(&session->transport.detached, false);
     atomic_init(&session->transport.notified, false);
     atomic_init(&session->transport.addressCleared, false);
@@ -136,9 +137,14 @@ bool IHS_SessionConnect(IHS_Session *session) {
 /* Transport disconnect preserves the host game. StopRequest(129) is the
  * separate official "stop game" action; never send it during generic cleanup. */
 void IHS_SessionDisconnect(IHS_Session *session) {
-    /* Client::Disconnect -> ResetConnection -> Close. The first close attempts
-     * one goodbye synchronously; later requests cannot resend it. */
-    IHS_SessionTransportClose(session);
+    /* Client::Disconnect attempts one goodbye first, then Stopping and
+     * ResetConnection/Close. The RX owner performs joins/Close; a producer
+     * requesting cancellation must never join its own consumer thread. */
+    atomic_store(&session->transport.closeRequested, true);
+    if (session->base.worker)
+        IHS_SessionTransportDisconnect(session);
+    else
+        IHS_SessionTransportClose(session);
     IHS_SessionInterrupt(session);
     if (!session->base.worker)
         IHS_SessionNotifyDisconnected(session);
@@ -215,14 +221,19 @@ void IHS_SessionDestroy(IHS_Session *session) {
  * Private functions
  */
 
+static void SessionStopChannels(IHS_Session *session) {
+    for (int i = session->numChannels - 1; i >= 0; --i)
+        IHS_SessionChannelStop(session->channels[i]);
+}
 void IHS_SessionInterrupt(IHS_Session *session) {
     IHS_BaseInterruptWorker(&session->base);
     IHS_MutexLock(session->sendQueueMutex);
     IHS_CondSignal(session->sendQueueCond);
     IHS_MutexUnlock(session->sendQueueMutex);
-    for (int i = session->numChannels - 1; i >= 0; --i) {
-        IHS_SessionChannelStop(session->channels[i]);
-    }
+    /* The RX owner mutates the consumer table. Other threads only request
+     * stop; iterating here could race a queued consumer removal and free. */
+    if (!session->base.worker)
+        SessionStopChannels(session);
 }
 
 bool IHS_SessionSendPacket(IHS_Session *session, IHS_SessionPacket *packet) {
@@ -688,10 +699,17 @@ static void SessionFinalized(IHS_Base *base, void *context) {
     if (session->sendThread)
         IHS_ThreadJoin(session->sendThread);
     session->sendThread = NULL;
+    /* This RX-owner path also handles explicit local cancellation. */
+    if (session->state.connectionState == IHS_SessionConnectionStateConnected ||
+        session->state.connectionState == IHS_SessionConnectionStateStopping)
+        IHS_SessionClientStopStreaming(session);
+    SessionStopChannels(session);
     /* Joining producers never occurs under Base/socket or timer locks. */
     IHS_HIDManagerCloseAll(session->hidManager);
-    bool requested = session->transport.detached || atomic_load(&session->transport.shutdown);
+    bool requested = session->transport.detached || atomic_load(&session->transport.shutdown) ||
+                     atomic_load(&session->transport.closeRequested);
     IHS_SessionTransportClose(session);
+    IHS_SessionChannelControlClearIncoming(session->channels[IHS_SessionChannelIdControl]);
     IHS_SessionTransportFinish(session);
     if (requested)
         IHS_SessionNotifyDisconnected(session);
@@ -732,15 +750,15 @@ static void SessionUpdateAt(IHS_Base *base, void *context, uint32_t tick) {
     IHS_Session *session = (IHS_Session *)base;
     IHS_SessionTransportPrepareUpdate(session, tick);
     IHS_BaseLock(base);
-    bool updateControl = !base->interrupted && !session->transport.detached &&
+    bool updateNetwork = !base->interrupted && !session->transport.detached &&
         IHS_SessionTransportState(session) == IHS_TransportConnected;
     IHS_BaseUnlock(base);
-    if (updateControl)
+    if (updateNetwork)
         IHS_SessionNetworkUpdateAt(session, tick);
     /* Original 7fc43c checks the receive lease after channel RX/feedback/TX,
      * with the same captured batch tick, before the later client stage. */
     IHS_SessionTransportCheckTimeout(session, tick);
-    if (updateControl) {
+    if (!base->interrupted && !session->transport.detached) {
         /* Official OnThink consumes ordinary control only after network
          * updates, outside the network lock; handlers can join consumers. */
         if (!base->interrupted && !session->transport.detached)
@@ -749,6 +767,13 @@ static void SessionUpdateAt(IHS_Base *base, void *context, uint32_t tick) {
         if (!base->interrupted && !session->transport.detached)
             IHS_SessionChannelControlUpdateStage(session->channels[IHS_SessionChannelIdControl],
                                                   IHS_SessionPacketTimestamp());
+        if (IHS_SessionTransportState(session) == IHS_TransportClosed &&
+            !base->interrupted && !session->transport.detached) {
+            /* Project completion notice for failures before Streaming as well
+             * as the Stopping path. Notify is once-only and outside Base. */
+            IHS_SessionNotifyDisconnected(session);
+            IHS_SessionInterrupt(session);
+        }
     }
 }
 

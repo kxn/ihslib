@@ -2,6 +2,7 @@ target_sources(ihslib PRIVATE
         session.c
         lifecycle.c
         shutdown.c
+        client_shutdown.c
         connection_id.c
         client_config.c
         packet.c

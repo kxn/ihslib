@@ -100,9 +100,8 @@ void IHS_SessionTransportPrepareUpdate(IHS_Session *s, uint32_t now) {
     }
     s->transport.updateTime = now;
     if (IHS_SessionTransportFinish(s)) {
-        /* The official main client subsequently stops consumers and closes.
-         * Wake existing workers; their owners perform the actual joins. */
-        IHS_SessionInterrupt(s);
+        /* OnThink still drains queued controls and chooses the resulting
+         * client stage. Transport retirement does not interrupt that handoff. */
         return;
     }
     if (!s->transport.active || s->transport.timedOut || s->transport.detached ||

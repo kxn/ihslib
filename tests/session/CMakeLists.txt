@@ -11,6 +11,15 @@ ihs_add_test(video_control test_video_control.c)
 target_link_libraries(ihstest_video_control PRIVATE ihs-test-session)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ihs-client-shutdown-oracle client_shutdown_oracle.c)
+    target_include_directories(ihs-client-shutdown-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-client-shutdown-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-client-shutdown-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-client-shutdown-oracle PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
+        -Wl,--wrap=IHS_BaseSend -Wl,--wrap=IHS_UDPSocketWaitReadable -Wl,--wrap=IHS_UDPSocketReceive
+        -Wl,--wrap=IHS_SessionNextConnectionId -Wl,--wrap=IHS_SessionClientTransportClosed
+        -Wl,--wrap=IHS_SessionChannelControlUpdateStage -Wl,--wrap=IHS_HIDManagerCloseAll
+        -Wl,--wrap=IHS_SessionChannelControlOnMessageReceived)
     add_executable(ihs-control-handoff-oracle control_handoff_oracle.c)
     target_include_directories(ihs-control-handoff-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-control-handoff-oracle PRIVATE ihs-test-session ihslib)
@@ -61,7 +70,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_include_directories(ihs-network-wire-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-network-wire-oracle PRIVATE ihs-test-session ihslib)
     target_compile_options(ihs-network-wire-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
-    target_link_options(ihs-network-wire-oracle PRIVATE -Wl,--wrap=IHS_SessionNextConnectionId
+    target_link_options(ihs-network-wire-oracle PRIVATE -Wl,--wrap=IHS_SessionClientTransportClosed
+        -Wl,--wrap=IHS_SessionNextConnectionId
         -Wl,--wrap=IHS_SessionPacketTimestamp
         -Wl,--wrap=IHS_BaseSend -Wl,--wrap=IHS_SessionPacketParse
         -Wl,--wrap=IHS_SessionDeliverReliableFrame
@@ -226,7 +236,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_include_directories(ihs-disconnect-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-disconnect-oracle PRIVATE ihs-test-session ihslib)
     target_compile_options(ihs-disconnect-oracle PRIVATE -UNDEBUG)
-    target_link_options(ihs-disconnect-oracle PRIVATE -Wl,--wrap=IHS_BaseSend
+    target_link_options(ihs-disconnect-oracle PRIVATE -Wl,--wrap=IHS_SessionClientTransportClosed
+        -Wl,--wrap=IHS_BaseSend
         -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_SessionNextConnectionId
         -Wl,--wrap=IHS_CryptoRandomUInt32)
     add_executable(ihs-connect-oracle connect_oracle.c)
@@ -309,6 +320,12 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     ihs_add_test(outgoing test_outgoing.c)
     target_link_libraries(ihstest_outgoing PRIVATE ihs-test-session)
+    ihs_add_test(client_shutdown_worker test_client_shutdown_worker.c)
+    target_link_libraries(ihstest_client_shutdown_worker PRIVATE ihs-test-session)
+    target_link_options(ihstest_client_shutdown_worker PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
+        -Wl,--wrap=IHS_BaseSend -Wl,--wrap=IHS_UDPSocketWaitReadable -Wl,--wrap=IHS_UDPSocketReceive
+        -Wl,--wrap=IHS_SessionReliableUpdateChannelAt)
+    set_tests_properties(client_shutdown_worker PROPERTIES TIMEOUT 30)
     ihs_add_test(network_cycle_worker test_network_cycle_worker.c)
     target_link_libraries(ihstest_network_cycle_worker PRIVATE ihs-test-session)
     target_link_options(ihstest_network_cycle_worker PRIVATE -Wl,--wrap=IHS_BaseSend

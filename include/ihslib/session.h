@@ -132,6 +132,10 @@ typedef struct IHS_StreamSessionCallbacks {
 
     void (*connected)(IHS_Session *session, void *context);
 
+    /** App completion notice. For peer/timeout stream shutdown, queued controls
+     * and audio/video stop run first; local cancellation discards queued controls.
+     * Transport IDs may already be retired. This is
+     * not the connection delegate; do not use it to observe pre-retirement IDs. */
     void (*disconnected)(IHS_Session *session, void *context);
 
     /**

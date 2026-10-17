@@ -45,17 +45,15 @@ bool __wrap_IHS_BaseSend(IHS_Base *b, IHS_SocketAddress addr, const IHS_Buffer *
     errno = udpError ? udpError : result == 1 ? EAGAIN : EIO;
     return !result && !udpError;
 }
-static void disconnected(IHS_Session *s, void *ctx) {
-    (void)ctx;
-    if (applicationClose) {
-        ++appNotices;
-        return;
-    }
+static void disconnected(IHS_Session *s, void *ctx) { (void)s; (void)ctx; ++appNotices; }
+void __real_IHS_SessionClientTransportClosed(IHS_Session *);
+void __wrap_IHS_SessionClientTransportClosed(IHS_Session *s) {
     size_t offset = strlen(actions);
     snprintf(actions + offset, sizeof(actions) - offset,
              "%s{\"action\":\"closed\",\"state\":%d,\"local\":%u,\"peer\":%u}", offset ? "," : "",
              IHS_SessionTransportState(s), (unsigned)s->state.connectionId,
              (unsigned)s->state.hostConnectionId);
+    __real_IHS_SessionClientTransportClosed(s);
 }
 static void print(IHS_Session *s) {
     printf("{\"state\":%d,\"last_connect\":%u,\"actions\":[%s],\"crc_required\":%s,"
@@ -97,7 +95,6 @@ int main(int argc, char **argv) {
     result = (unsigned)atoi(argv[3]);
     IHS_SessionTransportBegin(s, now);
     const IHS_StreamSessionCallbacks cb = {.disconnected = disconnected};
-    IHS_SessionSetSessionCallbacks(s, &cb, NULL);
     char line[512], hex[512];
     unsigned matches, value;
     while (fgets(line, sizeof(line), stdin)) {
@@ -120,6 +117,7 @@ int main(int argc, char **argv) {
             IHS_SessionTransportClose(s);
         } else if (!strncmp(line, "CLIENT", 6)) {
             applicationClose = true;
+            IHS_SessionSetSessionCallbacks(s, &cb, NULL);
             IHS_SessionDisconnect(s);
         } else if (sscanf(line, "UPDATE %u", &now) == 1) {
             s->base.callbacks.run->update(&s->base, NULL);

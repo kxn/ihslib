@@ -66,7 +66,7 @@ bool IHS_SessionTransportFinish(IHS_Session *s) {
     }
     /* Original delegate observes state 2 and old IDs before their reset. */
     if (!s->transport.detached)
-        IHS_SessionNotifyDisconnected(s);
+        IHS_SessionClientTransportClosed(s);
     s->state.hostConnectionId = 0;
     s->state.connectionId = IHS_SessionNextConnectionId();
     s->transport.addressCleared = true;
