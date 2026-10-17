@@ -56,6 +56,15 @@ typedef struct IHS_StreamAudioFrameInfo {
     uint32_t timestamp; /* local 16.16 seconds, captured before the decoder FIFO */
 } IHS_StreamAudioFrameInfo;
 
+/* start runs synchronously on the control-dispatch caller, before pending
+ * media is replayed. A nonzero result disables this audio decoder, preserving
+ * the session and configured media endpoint; stop is not called for failure.
+ * If OS worker creation fails after backend success, retain the backend and
+ * bounded pending queue until stop, matching the original decoder lifecycle.
+ * submit/submitFrame run on the joined audio worker. stop runs on the teardown
+ * caller only after that worker has stopped and its queued frames are purged.
+ * These callbacks must not synchronously destroy the session or reconfigure
+ * the same media endpoint. */
 typedef struct IHS_StreamAudioCallbacks {
     int (*start)(IHS_Session *session, const IHS_StreamAudioConfig *config, void *context);
 

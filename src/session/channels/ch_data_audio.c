@@ -57,6 +57,7 @@ static const IHS_SessionChannelDataClass ChannelClass = {
     .start = DataStart,
     .dataFrame = DataReceived,
     .stop = DataStop,
+    .startOnCaller = true,
 };
 
 IHS_SessionChannel *IHS_SessionChannelDataAudioCreate(IHS_Session *session,
@@ -98,6 +99,9 @@ static void ChannelAudioDeinit(IHS_SessionChannel *channel) {
 static bool DataStart(struct IHS_SessionChannel *channel) {
     ChannelAudio *audioCh = (ChannelAudio *)channel;
     IHS_Session *session = channel->session;
+    if (audioCh->config.codec != IHS_StreamAudioCodecRaw &&
+        audioCh->config.codec != IHS_StreamAudioCodecOpus)
+        return false; /* Original factory leaves decoder null for other codecs. */
     const IHS_StreamAudioCallbacks *callbacks = session->callbacks.audio;
     if (!callbacks || !callbacks->start)
         return true;

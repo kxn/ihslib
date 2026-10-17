@@ -51,6 +51,7 @@ typedef struct IHS_SessionChannelData {
 
     IHS_Thread *worker;
     atomic_bool interrupted;
+    bool callerStarted, discardFrames; /* Startup completes before publishing an audio endpoint. */
     IHS_Mutex *lock;
 
     /* All accepted complete payloads cross to the decoder worker through this
@@ -69,6 +70,8 @@ typedef struct IHS_SessionChannelDataClass {
                       IHS_Buffer *body);
 
     void (*stop)(struct IHS_SessionChannel *channel);
+
+    bool startOnCaller; /* Audio: start synchronously, then stop after joining the worker (§75). */
 } IHS_SessionChannelDataClass;
 
 #define IHS_SESSION_DATA_FRAME_HEADER_SIZE 12

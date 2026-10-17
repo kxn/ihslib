@@ -131,9 +131,25 @@ bool IHS_SessionChannelDataInit(IHS_SessionChannel *channel, uint16_t windowCapa
         channel->initFailed = true;
         return false;
     }
+    const IHS_SessionChannelDataClass *cls = (const void *)channel->cls;
+    if (cls->startOnCaller) {
+        dataCh->callerStarted = cls->start(channel);
+        if (!dataCh->callerStarted) {
+            /* Official player-start failure keeps the media channel mapping,
+             * replays pending packets, and drops them without a decoder. */
+            dataCh->discardFrames = true;
+            return true;
+        }
+    }
     char threadName[16];
     snprintf(threadName, 16, "IHS%s", DataChannelName(channel->type));
     dataCh->worker = IHS_ThreadCreate((IHS_ThreadFunction *)DataThreadWorker, threadName, dataCh);
+    if (!dataCh->worker && cls->startOnCaller) {
+        /* Original OnStreamStarted ignores OS Thread::Start failure. Retain
+         * the initialized backend and queue until Stop; the existing FIFO
+         * memory bound still applies. Teardown purges before backend stop. */
+        return true;
+    }
     channel->initFailed = !dataCh->worker;
     if (channel->initFailed)
         DataThreadInterrupt(dataCh);
@@ -150,6 +166,13 @@ void IHS_SessionChannelDataDeinit(IHS_SessionChannel *channel) {
     IHS_SessionFrame remaining = {0};
     while (PollFEC(dataCh, &remaining))
         IHS_BufferClear(&remaining.body, true);
+    const IHS_SessionChannelDataClass *cls = (const void *)channel->cls;
+    if (dataCh->callerStarted) {
+        assert(cls && cls->startOnCaller);
+        /* Original OnStreamStopped joins/purges before virtual StopDecoding. */
+        cls->stop(channel);
+        dataCh->callerStarted = false;
+    }
     if (dataCh->windowLock)
         IHS_MutexDestroy(dataCh->windowLock);
     if (dataCh->windowCond)
@@ -195,7 +218,7 @@ void IHS_SessionChannelDataReceiveReliableFrame(IHS_SessionChannel *channel,
                                                  IHS_SessionFrame *frame) {
     IHS_SessionChannelData *data = (void *)channel;
     IHS_MutexLock(data->windowLock);
-    if (!data->interrupted) {
+    if (!data->interrupted && !data->discardFrames) {
         IHS_SessionFrame owned = {.header = frame->header, .mediaOffset = frame->mediaOffset,
                                    .mediaPrepared = frame->mediaPrepared};
         IHS_BufferTransferOwnership(&frame->body, &owned.body);
@@ -218,7 +241,7 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
     const char *channelName = DataChannelName(channel->base.type);
     IHS_SessionLog(channel->base.session, IHS_LogLevelInfo, "Data", "Starting %s channel",
                    channelName);
-    if (!cls->start((IHS_SessionChannel *)channel)) {
+    if (!cls->startOnCaller && !cls->start((IHS_SessionChannel *)channel)) {
         IHS_SessionLog(channel->base.session, IHS_LogLevelError, "Data",
                        "Failed to start %s channel", channelName);
         IHS_SessionDisconnect(channel->base.session);
@@ -252,7 +275,8 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
     IHS_SessionLog(channel->base.session, IHS_LogLevelInfo, "Data", "Stopping %s channel",
                    channelName);
     IHS_BufferClear(&frame.body, true);
-    cls->stop((IHS_SessionChannel *)channel);
+    if (!cls->startOnCaller)
+        cls->stop((IHS_SessionChannel *)channel);
 }
 
 static void DataThreadInterrupt(IHS_SessionChannelData *channel) {

@@ -351,3 +351,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         -Wl,--wrap=IHS_UDPSocketReceive -Wl,--wrap=IHS_UDPSocketWaitReadable -Wl,--wrap=IHS_SessionPacketTimestamp)
     set_tests_properties(outgoing outgoing_worker PROPERTIES TIMEOUT 20)
 endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ihs-audio-start-oracle audio_start_oracle.c)
+    target_include_directories(ihs-audio-start-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-audio-start-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-audio-start-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-audio-start-oracle PRIVATE
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_ThreadCreate -Wl,--wrap=IHS_ThreadJoin
+        -Wl,--wrap=IHS_SessionChannelDataAudioCreate -Wl,--wrap=IHS_SessionUnreliableSetDelay
+        -Wl,--wrap=IHS_SessionDrainPendingData -Wl,--wrap=IHS_SessionChannelDataReceiveReliableFrame)
+endif()
