@@ -299,6 +299,13 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
 
     if (vhead.flags & VideoFrameFlagKeyFrame) {
         DiscardPending(videoCh);
+        const IHS_StreamVideoCallbacks *callbacks = channel->session->callbacks.video;
+        if (videoCh->tracked && callbacks->flushTracked) {
+            callbacks->flushTracked(channel->session, &videoCh->epoch,
+                                     IHS_StreamVideoFlushDecoder,
+                                     channel->session->callbackContexts.video);
+            videoCh->frame.flags |= IHS_StreamVideoFrameFlushHandled;
+        }
         videoCh->states.waitingKeyFrame = false;
         videoCh->states.syncingBacklog = false;
         videoCh->states.overflowFrameSpan = 0;

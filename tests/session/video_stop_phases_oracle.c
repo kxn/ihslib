@@ -70,7 +70,7 @@ static void flush(IHS_Session *s, const IHS_VideoEpochInfo *e, IHS_StreamVideoFl
             assert(video->frame.buffer.size || video->frame.partial.head);
     } else {
         assert(!video->frame.buffer.size && !video->frame.partial.head);
-        if (haveBackend)
+        if (marking && haveBackend)
             tick += flushDelay;
         phase("decoder");
     }

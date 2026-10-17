@@ -11,6 +11,12 @@ ihs_add_test(video_control test_video_control.c)
 target_link_libraries(ihstest_video_control PRIVATE ihs-test-session)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ihs-video-keyframe-oracle video_keyframe_oracle.c)
+    target_include_directories(ihs-video-keyframe-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-video-keyframe-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-video-keyframe-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-video-keyframe-oracle PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
+        -Wl,--wrap=IHS_SessionSendControlMessage -Wl,--wrap=IHS_SessionChannelDataLost)
     add_executable(ihs-video-stop-phases-oracle video_stop_phases_oracle.c)
     target_include_directories(ihs-video-stop-phases-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-video-stop-phases-oracle PRIVATE ihs-test-session ihslib)

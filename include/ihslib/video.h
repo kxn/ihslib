@@ -46,6 +46,9 @@ typedef enum IHS_StreamVideoCodec {
 typedef enum IHS_StreamVideoFrameFlag {
     IHS_StreamVideoFrameNone = 0x00,
     IHS_StreamVideoFrameKeyFrame = 0x01,
+    /* Local metadata: Decoder flush callback handled the first key fragment.
+     * A complete-frame consumer must not repeat that flush at submission. */
+    IHS_StreamVideoFrameFlushHandled = 0x02,
 } IHS_StreamVideoFrameFlag;
 
 typedef struct IHS_StreamVideoConfig {
@@ -157,6 +160,8 @@ typedef struct IHS_StreamVideoCallbacks {
     int (*prepare)(IHS_Session *, const IHS_StreamVideoConfig *, void *);
     /* Optional tracked Stop phases, after the worker joins: Player, protocol
      * partial purge, Decoder, recovery mark, then stopTracked retirement.
+     * Decoder also runs on the decoder worker at a key fragment, after partial
+     * purge and before any complete submit. It must not join/reset this worker.
      * Flush drops internal references; caller/GPU leases must remain valid.
      * Requires all three tracked callbacks. This is a rebuilt source ABI. */
     void (*flushTracked)(IHS_Session *, const IHS_VideoEpochInfo *,
