@@ -152,14 +152,15 @@ const char *IHS_LogLevelName(IHS_LogLevel level) {
 bool IHS_BaseStartWorker(IHS_Base *base, const char *name) {
     assert(base != NULL);
     IHS_BaseLock(base);
-    if (base->worker != NULL) {
+    if (base->worker != NULL || base->started || base->interrupted) {
         IHS_BaseUnlock(base);
         return false;
     }
     base->worker = IHS_ThreadCreate((IHS_ThreadFunction *)BaseWorker, name, base);
+    base->started = base->worker != NULL;
     IHS_BaseLog(base, IHS_LogLevelInfo, "Worker", "Worker thread %s created", name);
     IHS_BaseUnlock(base);
-    return true;
+    return base->started;
 }
 
 void IHS_BaseInterruptWorker(IHS_Base *base) {
@@ -192,7 +193,9 @@ bool IHS_BaseSend(IHS_Base *base, IHS_SocketAddress address, const IHS_Buffer *d
     // socket the worker has agreed to keep alive.
     IHS_BaseLock(base);
     bool ret = false;
-    if (base->socket != NULL) {
+    if (base->transportActive) {
+        ret = base->transport.send(base->transportContext, IHS_BufferPointer(data), data->size);
+    } else if (base->socket != NULL) {
         IHS_UDPPacket packet = {.address = address, .buffer = *data};
         ret = IHS_UDPSocketSend(base->socket, &packet);
     }
@@ -212,9 +215,11 @@ void IHS_BaseUnlock(IHS_Base *base) {
 
 static void BaseWorker(IHS_Base *base) {
     assert(base != NULL);
-    IHS_UDPSocket *socket = IHS_UDPSocketOpen(base->broadcast);
+    const bool external = base->transport.receive != NULL;
+    IHS_UDPSocket *socket = external ? NULL : IHS_UDPSocketOpen(base->broadcast);
     IHS_BaseLock(base);
     base->socket = socket;
+    base->transportActive = external;
     IHS_BaseUnlock(base);
     if (base->callbacks.run && base->callbacks.run->initialized) {
         base->callbacks.run->initialized(base, base->callbackContexts.run);
@@ -227,8 +232,25 @@ static void BaseWorker(IHS_Base *base) {
         IHS_BaseUnlock(base);
         if (interrupted)
             break;
+        if (base->callbacks.run && base->callbacks.run->update)
+            base->callbacks.run->update(base, base->callbackContexts.run);
+        if (base->interrupted)
+            break;
         int ret;
-        if ((ret = IHS_UDPSocketReceive(socket, &recv)) < 0) {
+        if (external) {
+            IHS_BufferEnsureMaxSize(&recv.buffer, 2048);
+            ret = base->transport.receive(base->transportContext,
+                IHS_BufferPointer(&recv.buffer), 2048, 10000);
+            if (ret > 2048)
+                ret = -1;
+            if (ret > 0) {
+                recv.buffer.size = (size_t)ret;
+                recv.address = base->transportPeer;
+            }
+        } else {
+            ret = IHS_UDPSocketReceive(socket, &recv);
+        }
+        if (ret < 0) {
             break;
         }
         if (ret) {
@@ -237,6 +259,12 @@ static void BaseWorker(IHS_Base *base) {
         IHS_BufferClear(&recv.buffer, false);
     }
     IHS_BufferClear(&recv.buffer, true);
+    /* A failed provider must also stop the send worker before finalized joins
+     * it. Close the send gate while context and all dependencies are alive. */
+    IHS_BaseLock(base);
+    base->interrupted = true;
+    base->transportActive = false;
+    IHS_BaseUnlock(base);
     if (base->callbacks.run && base->callbacks.run->finalized) {
         base->callbacks.run->finalized(base, base->callbackContexts.run);
     }
@@ -247,5 +275,6 @@ static void BaseWorker(IHS_Base *base) {
     IHS_BaseLock(base);
     base->socket = NULL;
     IHS_BaseUnlock(base);
-    IHS_UDPSocketClose(socket);
+    if (socket)
+        IHS_UDPSocketClose(socket);
 }
