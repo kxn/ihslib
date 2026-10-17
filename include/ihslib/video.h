@@ -66,6 +66,9 @@ typedef enum IHS_StreamVideoSubmitResult {
     /* Backend absent: request an actor-owned rebuild on the next client cycle.
      * Unlike ReportLost, no immediate DataLost is produced by this result. */
     IHS_StreamVideoSubmitReset = 2,
+    /* Official AVCodec can request a reset after send failure AND report
+     * DataLost after receive failure during the same synchronous submission. */
+    IHS_StreamVideoSubmitResetAndReportLost = 3,
     IHS_StreamVideoSubmitError = -1,
 } IHS_StreamVideoSubmitResult;
 
@@ -88,6 +91,13 @@ typedef struct IHS_FrameTicket IHS_FrameTicket;
 typedef struct IHS_VideoEpochInfo {
     uint64_t session_id, video_epoch;
 } IHS_VideoEpochInfo;
+
+/* Synchronous submitTracked callback only, with its borrowed session/epoch.
+ * Applies decoder feedback before the backend hands an object to the player.
+ * Return SubmitOK afterwards to avoid repeating the same feedback on return.
+ * No ownership or background use of session is transferred to the backend. */
+bool IHS_SessionVideoDecodeFeedback(IHS_Session *, const IHS_VideoEpochInfo *,
+                                    IHS_StreamVideoSubmitResult);
 
 /* Set before starting session workers. Identity cannot be reassigned. */
 bool IHS_SessionSetVideoTrackingIdentity(IHS_Session *, uint64_t session_id);

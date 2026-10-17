@@ -712,12 +712,13 @@ static IHS_StreamVideoSubmitResult SubmitFrame(IHS_SessionChannel *channel, uint
     } else
         result = videoCh->backendReady ? callbacks->submit(session, frameId, data, flags, context)
                                       : IHS_StreamVideoSubmitReset;
-    if (result == IHS_StreamVideoSubmitReset) {
+    if (result == IHS_StreamVideoSubmitReset || result == IHS_StreamVideoSubmitResetAndReportLost) {
         atomic_store(&videoCh->resetRequested, true);
-    } else if (result == IHS_StreamVideoSubmitReportLost) {
-        /* FinalDecode 0x7b1158..68 requests recovery without an unconditional
-         * backend reset or strict keyframe wait. The backend may still decode
-         * subsequent frames; damaged output is rejected by the application. */
+    }
+    if (result == IHS_StreamVideoSubmitReportLost || result == IHS_StreamVideoSubmitResetAndReportLost) {
+        /* Official loss feedback is independent of an SDK reset: Android
+         * FinalDecode 0x7b1158..68 and Linux AVCodec 0x3244a4. Subsequent input
+         * remains admissible unless a separate reset request gates it. */
         IHS_SessionChannelDataLost(channel);
     } else if (result == IHS_StreamVideoSubmitError) {
         IHS_SessionLog(session, IHS_LogLevelError, "Video",
@@ -727,4 +728,20 @@ static IHS_StreamVideoSubmitResult SubmitFrame(IHS_SessionChannel *channel, uint
     if (videoCh->tracked && videoCh->assembly)
         IHS_FrameTicketVideoDecodeStage(videoCh->assembly, true);
     return result;
+}
+
+bool IHS_SessionVideoDecodeFeedback(IHS_Session *session, const IHS_VideoEpochInfo *epoch,
+                                    IHS_StreamVideoSubmitResult result) {
+    if (!session || !epoch || result < IHS_StreamVideoSubmitOK ||
+        result > IHS_StreamVideoSubmitResetAndReportLost) return false;
+    IHS_SessionChannel *ch = IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataVideo);
+    if (!ch || ch->cls != &ChannelClass.base) return false;
+    IHS_SessionChannelVideo *video = (void *)ch;
+    if (video->epoch.session_id != epoch->session_id ||
+        video->epoch.video_epoch != epoch->video_epoch) return false;
+    /* Invoked by this channel's worker inside submitTracked. The actor joins
+     * it before channel/epoch replacement; do not recursively lock stateMutex. */
+    if (result & IHS_StreamVideoSubmitReset) atomic_store(&video->resetRequested, true);
+    if (result & IHS_StreamVideoSubmitReportLost) IHS_SessionChannelDataLost(ch);
+    return true;
 }
