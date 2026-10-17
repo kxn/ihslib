@@ -341,20 +341,15 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
         const IHS_SessionInfo *config = &channel->session->info;
         IHS_Buffer plain;
         IHS_BufferInit(&plain, 0, 0);
-        IHS_BufferEnsureMaxSizeExact(&plain, body->size);
+        IHS_BufferEnsureMaxSizeExact(&plain, body->size ? body->size : 1);
+        IHS_BufferAppendMem(&plain, IHS_BufferPointer(body), body->size);
         size_t outLen = body->size;
-        int decryptRet = IHS_CryptoSymmetricDecryptWithIV(
-            IHS_BufferPointer(body), body->size, EmptyIV, sizeof(EmptyIV), config->sessionKey,
+        /* DecodeFrame 7b223c..224c ignores the bool. Preserve the original
+         * in-place bytes/length, including committed prefix on bad padding;
+         * crypto failure alone does not enter strict wait or send DataLost. */
+        (void)IHS_CryptoSymmetricDecryptWithIV(
+            IHS_BufferPointer(&plain), plain.size, EmptyIV, sizeof(EmptyIV), config->sessionKey,
             config->sessionKeyLen, IHS_BufferPointer(&plain), &outLen);
-        if (decryptRet != 0) {
-            IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Video",
-                           "Failed to decrypt video frame: %d, request keyframe", decryptRet);
-            IHS_BufferClear(&plain, true);
-            IHS_SessionChannelDataLost(channel);
-            videoCh->states.waitingKeyFrame = true;
-            videoCh->states.lastRecoveryRequest = IHS_SessionPacketTimestamp();
-            goto unlock;
-        }
         plain.size = outLen;
         AddPartialFrame(videoCh, header->id, header->timestamp, &vhead, &plain);
         IHS_BufferClear(&plain, true);
@@ -640,8 +635,10 @@ static void DiscardPending(IHS_SessionChannelVideo *channel) {
 
 static bool AppendToFrameBuffer(IHS_SessionChannelVideo *channel, const IHS_Buffer *data,
                                 const IHS_VideoFrameHeader *header) {
-    if (!data->size || data->size > channel->frame.buffer.maxCapacity)
-        return false;
+    if (data->size > channel->frame.buffer.maxCapacity ||
+        (!data->size && (header->flags & VideoFrameFlagNeedEscape) &&
+         (header->flags & VideoFrameFlagNeedStartSequence)))
+        return false; /* Source asserts on an empty NAL needing its first byte. */
     size_t required =
         (header->flags & VideoFrameFlagNeedEscape) ? data->size * 3 / 2 + 5 : data->size;
     if (required > channel->frame.buffer.maxCapacity - channel->frame.buffer.size)
@@ -684,7 +681,11 @@ static IHS_StreamVideoSubmitResult SubmitFrame(IHS_SessionChannel *channel, uint
             ? callbacks->submitTracked(session, &videoCh->epoch, frameId, videoCh->assembly,
                                         data, flags, &taken, context)
             : IHS_StreamVideoSubmitReset;
-        if (!taken && videoCh->assembly) {
+        /* A successful empty input has no platform pixel/token. Keep its
+         * endpoint metadata pending, as opposed to inventing decode corruption;
+         * normal endpoint expiration/epoch close still owns its retirement. */
+        if (!taken && videoCh->assembly &&
+            !(result == IHS_StreamVideoSubmitOK && data->size == 0)) {
             IHS_FrameOutcome outcome = {.result = IHS_VideoFrameResultDroppedDecodeCorrupt,
                                         .completionUs = IHS_TimerNow() * 1000};
             IHS_FrameTicketComplete(videoCh->assembly, &outcome);
