@@ -37,15 +37,18 @@ struct IHS_UDPSocket {
     UDPsocket unblock;
     Uint16 interrupt_port;
     UDPpacket *packet;
+    int receiveWaitMs;
 };
 
 static void AddressFromSDL(IHS_SocketAddress *ihs, const IPaddress *sdl);
 
 static void AddressToSDL(const IHS_SocketAddress *ihs, IPaddress *sdl);
 
-IHS_UDPSocket *IHS_UDPSocketOpen() {
+IHS_UDPSocket *IHS_UDPSocketOpen(bool broadcast) {
+    (void)broadcast;
     IHS_UDPSocket *socket = SDL_malloc(sizeof(IHS_UDPSocket));
     SDL_zerop(socket);
+    socket->receiveWaitMs = -1;
     socket->sockets = SDLNet_AllocSocketSet(2);
     socket->packet = SDLNet_AllocPacket(2048);
     socket->socket = SDLNet_UDP_Open(0);
@@ -76,9 +79,22 @@ void IHS_UDPSocketClose(IHS_UDPSocket *socket) {
     SDL_free(socket);
 }
 
+int IHS_UDPSocketWaitReadable(IHS_UDPSocket *socket, uint32_t timeoutMs) {
+    int result = SDLNet_CheckSockets(socket->sockets, timeoutMs);
+    return result <= 0 ? result : !!SDLNet_SocketReady(socket->socket);
+}
+bool IHS_UDPSocketSetBlocking(IHS_UDPSocket *socket, bool blocking) {
+    socket->receiveWaitMs = blocking ? -1 : 0;
+    return true;
+}
+bool IHS_UDPSocketSetRecvTimeout(IHS_UDPSocket *socket, uint32_t timeoutUs) {
+    socket->receiveWaitMs = (timeoutUs + 999u) / 1000u;
+    return true;
+}
+
 int IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *packet) {
     int ret;
-    if ((ret = SDLNet_CheckSockets(socket->sockets, -1)) <= 0) {
+    if ((ret = SDLNet_CheckSockets(socket->sockets, socket->receiveWaitMs)) <= 0) {
         return ret;
     }
     if (SDLNet_SocketReady(socket->unblock)) {
@@ -96,7 +112,7 @@ int IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *packet) {
     return ret;
 }
 
-int IHS_UDPSocketSend(IHS_UDPSocket *socket, IHS_UDPPacket *packet) {
+bool IHS_UDPSocketSend(IHS_UDPSocket *socket, const IHS_UDPPacket *packet) {
     UDPpacket sdlPacket;
     SDL_memset(&sdlPacket, 0, sizeof(UDPpacket));
     AddressToSDL(&packet->address, &sdlPacket.address);
@@ -118,7 +134,7 @@ int IHS_UDPSocketUnblock(IHS_UDPSocket *socket) {
 }
 
 static void AddressFromSDL(IHS_SocketAddress *ihs, const IPaddress *sdl) {
-    ihs->ip.v4.family = IHS_IPAddressFamilyIPv4;
+    ihs->ip.family = IHS_IPAddressFamilyIPv4;
     SDL_memcpy(&ihs->ip.v4.data, &sdl->host, 4);
     ihs->port = SDL_SwapBE16(sdl->port);
 }

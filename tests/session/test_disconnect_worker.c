@@ -59,7 +59,7 @@ static int incoming(IHS_UDPPacket *received, unsigned type, bool hasCrc) {
     IHS_SessionPacketClear(&packet, true);
     return 1;
 }
-int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) {
+static int ScriptReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) {
     (void)socket;
     if (mode == Early) {
         usleep(1000);
@@ -100,6 +100,18 @@ static void *produce(void *ctx) {
                                       (const ProtobufCMessage *)&message);
     return NULL;
 }
+static bool endBatch;
+int __wrap_IHS_UDPSocketWaitReadable(IHS_UDPSocket *socket, uint32_t timeoutMs) {
+    (void)socket; (void)timeoutMs;
+    return 1;
+}
+int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *packet) {
+    if (endBatch) { endBatch = false; return 0; }
+    int result = ScriptReceive(socket, packet);
+    endBatch = result > 0;
+    return result;
+}
+
 int main(void) {
     IHS_Init();
     for (unsigned run = 0; run < 12; ++run) {

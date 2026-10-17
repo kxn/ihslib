@@ -46,8 +46,6 @@
 
 #include "hid/manager.h"
 
-/* Bounded receive wait lets the existing worker advance transport deadlines. */
-#define SESSION_RECV_TIMEOUT_US 1000
 
 typedef struct IHS_QueueItem {
     IHS_SessionPacket packet;
@@ -64,6 +62,9 @@ static void SessionInitialized(IHS_Base *base, void *context);
 
 static void SessionFinalized(IHS_Base *base, void *context);
 static void SessionUpdate(IHS_Base *base, void *context);
+static void SessionUpdateAt(IHS_Base *, void *, uint32_t tick);
+static bool SessionReceiveCycle(IHS_Base *, void *, IHS_UDPPacket *);
+static void SessionRecvAt(IHS_Base *, const IHS_SocketAddress *, IHS_Buffer *, uint32_t);
 
 static void SessionSendWorker(void *context);
 
@@ -75,6 +76,7 @@ static const IHS_BaseRunCallbacks SessionRunCallbacks = {
     .initialized = SessionInitialized,
     .finalized = SessionFinalized,
     .update = SessionUpdate,
+    .receiveCycle = SessionReceiveCycle,
 };
 
 IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig,
@@ -436,6 +438,11 @@ void IHS_SessionHostStopped(IHS_Session *session) {
 
 static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
                                 IHS_Buffer *data) {
+    SessionRecvAt(base, address, data, IHS_SessionPacketTimestamp());
+}
+
+static void SessionRecvAt(IHS_Base *base, const IHS_SocketAddress *address,
+                           IHS_Buffer *data, uint32_t received) {
     IHS_Session *session = (IHS_Session *)base;
     if (session->transport.detached)
         return;
@@ -466,7 +473,7 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
         IHS_SessionPacketClear(&packet, true);
         return;
     }
-    packet.header.receiveTimestamp = IHS_SessionPacketTimestamp();
+    packet.header.receiveTimestamp = received;
     packet.header.receiveBegin = packet.header.receiveTimestamp;
     IHS_SessionChannelId channelId = packet.header.channelId;
     IHS_SessionPacketType packetType = packet.header.type;
@@ -515,7 +522,7 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
         uint32_t echo =
             (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
         IHS_StreamClockFeedback(&session->clock, echo, packet.header.sendTimestamp,
-                                IHS_SessionPacketTimestamp());
+                                packet.header.receiveTimestamp);
     }
     if (packetType == IHS_SessionPacketTypeACK) {
         /* Official ACK semantics: the value is the contiguous delivery point —
@@ -641,12 +648,12 @@ static void SessionInitialized(IHS_Base *base, void *context) {
     IHS_Session *session = (IHS_Session *)base;
     if (base->interrupted || session->transport.detached)
         return;
-    /* Interrupting a worker only changes base.interrupted; it cannot wake a
-     * blocking recvfrom(). Once StopRequest makes the host go quiet, join must
-     * still observe the interrupt without waiting for another datagram. */
-    if (!IHS_UDPSocketSetRecvTimeout(base->socket, SESSION_RECV_TIMEOUT_US)) {
-        IHS_SessionLog(session, IHS_LogLevelWarn, "Session",
-                       "Failed to set session receive timeout");
+    /* Socket Wait is bounded; reads drain without blocking, as the original
+     * TransportUDP O_NONBLOCK + Socket::Wait/Update contract (§60). */
+    if (!IHS_UDPSocketSetBlocking(base->socket, false)) {
+        IHS_SessionLog(session, IHS_LogLevelError, "Session", "Failed to set nonblocking receive");
+        IHS_SessionInterrupt(session);
+        return;
     }
     session->sendThread = IHS_ThreadCreate(SessionSendWorker, "IHSSessSend", session);
 
@@ -693,16 +700,43 @@ static void SessionFinalized(IHS_Base *base, void *context) {
     }
 }
 
+static bool SessionReceiveCycle(IHS_Base *base, void *context, IHS_UDPPacket *packet) {
+    IHS_Session *session = (IHS_Session *)base;
+    IHS_BaseLock(base);
+    unsigned waitMs = session->outgoing.blocked ? 0 : 2;
+    IHS_BaseUnlock(base);
+    int readable = IHS_UDPSocketWaitReadable(base->socket, waitMs);
+    if (readable < 0 || base->interrupted) return false;
+    uint32_t tick = IHS_SessionPacketTimestamp();
+    if (readable) {
+        for (;;) {
+            int result = IHS_UDPSocketReceive(base->socket, packet);
+            if (result < 0) return false; /* local fatal-I/O shutdown protection */
+            if (!result) break;
+            SessionRecvAt(base, &packet->address, &packet->buffer, tick);
+            IHS_BufferClear(&packet->buffer, false);
+            tick = IHS_SessionPacketTimestamp();
+            if (base->interrupted) return false;
+        }
+    }
+    IHS_BufferClear(&packet->buffer, false);
+    SessionUpdateAt(base, context, tick);
+    return !base->interrupted;
+}
+
 static void SessionUpdate(IHS_Base *base, void *context) {
+    SessionUpdateAt(base, context, IHS_SessionPacketTimestamp());
+}
+static void SessionUpdateAt(IHS_Base *base, void *context, uint32_t tick) {
     (void)context;
     IHS_Session *session = (IHS_Session *)base;
-    IHS_SessionTransportUpdate(session, IHS_SessionPacketTimestamp());
+    IHS_SessionTransportUpdate(session, tick);
     IHS_BaseLock(base);
     bool updateControl = !base->interrupted && !session->transport.detached &&
         IHS_SessionTransportState(session) == IHS_TransportConnected;
     IHS_BaseUnlock(base);
     if (updateControl) {
-        IHS_SessionReliableUpdate(session);
+        IHS_SessionReliableUpdateAt(session, tick);
         /* Drain incoming reliable frames before choosing one client stage. */
         if (!base->interrupted && !session->transport.detached)
             IHS_SessionChannelControlUpdateStage(session->channels[IHS_SessionChannelIdControl],

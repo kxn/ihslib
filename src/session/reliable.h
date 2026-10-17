@@ -26,3 +26,6 @@ typedef enum IHS_ReliableDisposition {
     IHS_ReliableData,
 } IHS_ReliableDisposition;
 IHS_ReliableDisposition IHS_SessionDeliverReliableFrame(IHS_Session *, IHS_SessionFrame *);
+
+void IHS_SessionReliableUpdateChannelAt(IHS_Session *, uint8_t channel, uint32_t tick);
+void IHS_SessionReliableUpdateAt(IHS_Session *, uint32_t tick);

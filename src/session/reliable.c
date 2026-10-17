@@ -33,6 +33,9 @@ static uint32_t ReliableDrainFrames(IHS_Session *s, IHS_ReliableChannel *state) 
 /* Original Channel::UpdateReliableState; see protocol reference §45. Run on
  * the receive worker so frame/decrypt callbacks keep their existing thread. */
 void IHS_SessionReliableUpdateChannel(IHS_Session *session, uint8_t channelId) {
+    IHS_SessionReliableUpdateChannelAt(session, channelId, IHS_SessionPacketTimestamp());
+}
+void IHS_SessionReliableUpdateChannelAt(IHS_Session *session, uint8_t channelId, uint32_t now) {
     if (channelId >= 32)
         return;
     IHS_ReliableChannel *state = &session->reliable[channelId];
@@ -44,7 +47,6 @@ void IHS_SessionReliableUpdateChannel(IHS_Session *session, uint8_t channelId) {
         return;
     }
     state->feedbackDirty = false;
-    uint32_t now = IHS_SessionPacketTimestamp();
     IHS_MutexUnlock(session->reliableLock);
     /* Application delegates retain their existing lock domain. Only feedback
      * state + Socket attempts need Base -> reliableLock serialization. */
@@ -210,11 +212,14 @@ static void ReliableOnNackPacket(IHS_Session *session, IHS_ReliableChannel *stat
 }
 
 void IHS_SessionReliableUpdate(IHS_Session *s) {
+    IHS_SessionReliableUpdateAt(s, IHS_SessionPacketTimestamp());
+}
+void IHS_SessionReliableUpdateAt(IHS_Session *s, uint32_t tick) {
     IHS_MutexLock(s->sendQueueMutex);
     unsigned count = s->outgoing.count;
     IHS_MutexUnlock(s->sendQueueMutex);
     for (unsigned ch = 0; ch < count; ++ch)
-        IHS_SessionReliableUpdateChannel(s, ch);
+        IHS_SessionReliableUpdateChannelAt(s, ch, tick);
 }
 void IHS_SessionReliableDeinit(IHS_Session *s) {
     for (unsigned ch = 0; ch < 32; ++ch)

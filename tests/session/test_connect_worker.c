@@ -45,23 +45,20 @@ static int connected(IHS_UDPPacket *received, unsigned size) {
     IHS_SessionPacketClear(&packet, true);
     return 1;
 }
-int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) {
+static int ScriptReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) {
     (void)socket;
     switch (receives++) {
     case 0:
-        assert(atomic_load(&attempts) == 2); /* initial failure + immediate Update failure */
-        atomic_store(&tick, start + 6552);
+        assert(atomic_load(&attempts) == 1); /* initial send; first Update follows the empty read */
         return 0;
     case 1:
         assert(atomic_load(&attempts) == 2);
-        atomic_store(&tick, start + 6553);
         return 0;
     case 2:
-        assert(atomic_load(&attempts) == 3);
+        assert(atomic_load(&attempts) == 2);
         return connected(received, 3); /* valid CRC; body guard must reject */
     case 3:
         assert(session->state.connectionState == IHS_SessionConnectionStateConnecting);
-        atomic_store(&tick, start + 13106);
         return 0;
     case 4:
         assert(atomic_load(&attempts) == 4);
@@ -69,7 +66,6 @@ int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) 
     case 5:
         assert(session->state.connectionState == IHS_SessionConnectionStateHandshaking);
         assert(session->state.crcRequired);
-        atomic_store(&tick, start + 19659);
         return 0;
     default:
         assert(atomic_load(&attempts) == 4); /* accepted Connected stops retries */
@@ -77,6 +73,20 @@ int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) 
         return -1;
     }
 }
+static bool endBatch;
+int __wrap_IHS_UDPSocketWaitReadable(IHS_UDPSocket *socket, uint32_t timeoutMs) {
+    (void)socket; (void)timeoutMs;
+    static const uint32_t delta[] = {0,6552,6553,13106,13106,19659};
+    if (receives < sizeof(delta)/sizeof(delta[0])) atomic_store(&tick, start + delta[receives]);
+    return 1;
+}
+int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *packet) {
+    if (endBatch) { endBatch = false; return 0; }
+    int result = ScriptReceive(socket, packet);
+    endBatch = result > 0;
+    return result;
+}
+
 int main(void) {
     IHS_Init();
     for (unsigned run = 0; run < 2; ++run) {

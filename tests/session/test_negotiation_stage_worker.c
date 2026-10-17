@@ -82,7 +82,7 @@ static int incoming(IHS_UDPPacket *rx, unsigned type, unsigned id) {
     IHS_SessionPacketClear(&p, true);
     return 1;
 }
-int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *rx) {
+static int ScriptReceive(IHS_UDPSocket *socket, IHS_UDPPacket *rx) {
     (void)socket;
     switch (phase) {
     case 0:
@@ -145,6 +145,18 @@ static void onConnected(IHS_Session *session, void *ctx) {
     assert(!atomic_exchange(&connected, true));
     assert(s->state.connectionState == IHS_SessionConnectionStateConnected);
 }
+static bool endBatch;
+int __wrap_IHS_UDPSocketWaitReadable(IHS_UDPSocket *socket, uint32_t timeoutMs) {
+    (void)socket; (void)timeoutMs;
+    return 1;
+}
+int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *packet) {
+    if (endBatch) { endBatch = false; return 0; }
+    int result = ScriptReceive(socket, packet);
+    endBatch = result > 0;
+    return result;
+}
+
 int main(void) {
     IHS_Init();
     for (unsigned c = 0; c < 2; ++c)

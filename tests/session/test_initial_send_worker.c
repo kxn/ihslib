@@ -60,7 +60,7 @@ static int incoming(IHS_UDPPacket *received, unsigned type, unsigned channel, un
     IHS_SessionPacketClear(&p, true);
     return 1;
 }
-int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) {
+static int ScriptReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) {
     (void)socket;
     if (receives++ == 0)
         return incoming(received, 2, 0, 0);
@@ -81,6 +81,18 @@ int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) 
     usleep(1000);
     return 0;
 }
+static bool endBatch;
+int __wrap_IHS_UDPSocketWaitReadable(IHS_UDPSocket *socket, uint32_t timeoutMs) {
+    (void)socket; (void)timeoutMs;
+    return 1;
+}
+int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *packet) {
+    if (endBatch) { endBatch = false; return 0; }
+    int result = ScriptReceive(socket, packet);
+    endBatch = result > 0;
+    return result;
+}
+
 int main(void) {
     IHS_Init();
     for (unsigned c = 0; c < 2; ++c)

@@ -18,7 +18,7 @@ static const uint32_t start = 1000000;
 uint32_t __wrap_IHS_SessionPacketTimestamp(void) {
     return atomic_load(&tick);
 }
-int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) {
+static int ScriptReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) {
     (void)socket;
     if (receives++ == 0) {
         IHS_SessionPacket packet = {.header = {.type = IHS_SessionPacketTypeConnectACK,
@@ -55,6 +55,18 @@ static void on_disconnected(IHS_Session *s, void *context) {
     (void)context;
     atomic_fetch_add(&disconnected, 1);
 }
+static bool endBatch;
+int __wrap_IHS_UDPSocketWaitReadable(IHS_UDPSocket *socket, uint32_t timeoutMs) {
+    (void)socket; (void)timeoutMs;
+    return 1;
+}
+int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *packet) {
+    if (endBatch) { endBatch = false; return 0; }
+    int result = ScriptReceive(socket, packet);
+    endBatch = result > 0;
+    return result;
+}
+
 int main(void) {
     IHS_Init();
     for (unsigned i = 0; i < 3; ++i) {

@@ -24,17 +24,23 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     ihs_add_test(reliable_feedback_worker test_reliable_feedback_worker.c)
     target_link_libraries(ihstest_reliable_feedback_worker PRIVATE ihs-test-session)
     target_link_options(ihstest_reliable_feedback_worker PRIVATE -Wl,--wrap=IHS_BaseSend
-        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive -Wl,--wrap=IHS_UDPSocketWaitReadable
         -Wl,--wrap=IHS_SessionPacketsWindowPoll)
     set_tests_properties(reliable_feedback_worker PROPERTIES TIMEOUT 20)
     ihs_add_test(negotiation_stage_worker test_negotiation_stage_worker.c)
     target_link_libraries(ihstest_negotiation_stage_worker PRIVATE ihs-test-session)
     target_link_options(ihstest_negotiation_stage_worker PRIVATE -Wl,--wrap=IHS_BaseSend
-        -Wl,--wrap=IHS_UDPSocketReceive -Wl,--wrap=IHS_SessionPacketTimestamp)
+        -Wl,--wrap=IHS_UDPSocketReceive -Wl,--wrap=IHS_UDPSocketWaitReadable -Wl,--wrap=IHS_SessionPacketTimestamp)
     set_tests_properties(negotiation_stage_worker PROPERTIES TIMEOUT 20)
     add_executable(ihs-frame-events-loop-oracle frame_events_loop_oracle.c)
     add_executable(ihs-network-collectors-oracle network_collectors_oracle.c)
     add_executable(ihs-network-wire-oracle network_wire_oracle.c)
+    ihs_add_test(receive_cycle_worker test_receive_cycle_worker.c)
+    target_link_libraries(ihstest_receive_cycle_worker PRIVATE ihs-test-session)
+    target_link_options(ihstest_receive_cycle_worker PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
+        -Wl,--wrap=IHS_UDPSocketWaitReadable -Wl,--wrap=IHS_UDPSocketReceive
+        -Wl,--wrap=IHS_SessionPacketParse -Wl,--wrap=IHS_BaseSend -Wl,--wrap=IHS_SessionDeliverReliableFrame)
+    set_tests_properties(receive_cycle_worker PROPERTIES TIMEOUT 20)
     ihs_add_test(video_network_workers test_video_network_workers.c)
     target_link_libraries(ihstest_video_network_workers PRIVATE ihs-test-session)
     target_link_options(ihstest_video_network_workers PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
@@ -52,6 +58,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         -Wl,--wrap=IHS_BaseSend -Wl,--wrap=IHS_SessionPacketParse
         -Wl,--wrap=IHS_SessionDeliverReliableFrame
         -Wl,--wrap=IHS_SessionChannelDataInit
+        -Wl,--wrap=IHS_UDPSocketReceive -Wl,--wrap=IHS_UDPSocketWaitReadable
         -Wl,--wrap=IHS_SessionChannelQueueFrameResult)
     target_include_directories(ihs-network-collectors-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-network-collectors-oracle PRIVATE ihslib)
@@ -109,7 +116,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     ihs_add_test(initial_send_worker test_initial_send_worker.c)
     target_link_libraries(ihstest_initial_send_worker PRIVATE ihs-test-session)
     target_link_options(ihstest_initial_send_worker PRIVATE -Wl,--wrap=IHS_BaseSend
-        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive)
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive -Wl,--wrap=IHS_UDPSocketWaitReadable)
     set_tests_properties(initial_send initial_send_worker PROPERTIES TIMEOUT 20)
     ihs_add_test(video_tracked test_video_tracked.c)
     target_link_libraries(ihstest_video_tracked PRIVATE ihs-test-session)
@@ -187,7 +194,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     ihs_add_test(send_admission_worker test_send_admission_worker.c)
     target_link_libraries(ihstest_send_admission_worker PRIVATE ihs-test-session)
     target_link_options(ihstest_send_admission_worker PRIVATE -Wl,--wrap=IHS_BaseSend
-        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive)
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive -Wl,--wrap=IHS_UDPSocketWaitReadable)
     set_tests_properties(send_admission send_admission_worker PROPERTIES TIMEOUT 20)
     add_executable(ihs-send-admission-oracle send_admission_oracle.c)
     target_include_directories(ihs-send-admission-oracle PRIVATE ${TEST_INCLUDES})
@@ -221,17 +228,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     ihs_add_test(connect_worker test_connect_worker.c)
     target_link_libraries(ihstest_connect_worker PRIVATE ihs-test-session)
     target_link_options(ihstest_connect_worker PRIVATE -Wl,--wrap=IHS_BaseSend
-        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive)
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive -Wl,--wrap=IHS_UDPSocketWaitReadable)
     set_tests_properties(connect_worker PROPERTIES TIMEOUT 10)
     ihs_add_test(disconnect_worker test_disconnect_worker.c)
     target_link_libraries(ihstest_disconnect_worker PRIVATE ihs-test-session)
     target_link_options(ihstest_disconnect_worker PRIVATE -Wl,--wrap=IHS_BaseSend
-        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive)
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive -Wl,--wrap=IHS_UDPSocketWaitReadable)
     set_tests_properties(disconnect_worker PROPERTIES TIMEOUT 20)
     ihs_add_test(transport_worker test_transport_worker.c)
     target_link_libraries(ihstest_transport_worker PRIVATE ihs-test-session)
     target_link_options(ihstest_transport_worker PRIVATE
-        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive)
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive -Wl,--wrap=IHS_UDPSocketWaitReadable)
     set_tests_properties(transport_worker PROPERTIES TIMEOUT 10)
     ihs_add_test(client_config test_client_config.c)
     target_link_libraries(ihstest_client_config PRIVATE ihs-test-session)
@@ -294,6 +301,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     ihs_add_test(outgoing_worker test_outgoing_worker.c)
     target_link_libraries(ihstest_outgoing_worker PRIVATE ihs-test-session)
     target_link_options(ihstest_outgoing_worker PRIVATE -Wl,--wrap=IHS_BaseSend
-        -Wl,--wrap=IHS_UDPSocketReceive -Wl,--wrap=IHS_SessionPacketTimestamp)
+        -Wl,--wrap=IHS_UDPSocketReceive -Wl,--wrap=IHS_UDPSocketWaitReadable -Wl,--wrap=IHS_SessionPacketTimestamp)
     set_tests_properties(outgoing outgoing_worker PROPERTIES TIMEOUT 20)
 endif()

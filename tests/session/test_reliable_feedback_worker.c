@@ -82,7 +82,7 @@ static int incoming(IHS_UDPPacket *received, unsigned type, unsigned channel, un
     IHS_SessionPacketClear(&p, true);
     return 1;
 }
-int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) {
+static int ScriptReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) {
     (void)socket;
     switch (phase) {
     case 0:
@@ -95,62 +95,50 @@ int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) 
         ++phase;
         return incoming(received, 7, 1, 0);
     case 2:
-        atomic_store(&now, 1000100);
         ++phase;
         return incoming(received, 5, target, 0);
     case 3:
         assert(frames == 1 && ackCount == 0); /* initial watermark is already zero */
-        atomic_store(&now, 1000101);
         ++phase;
         return incoming(received, 5, target, 1);
     case 4:
         assert(frames == 2 && ackCount == 1);
-        atomic_store(&now, 1000102);
         ++phase;
         return incoming(received, 5, target, 2);
     case 5:
         assert(frames == 3 && ackCount == 1);
-        atomic_store(&now, 1000165);
         ++phase;
         return 0;
     case 6:
         assert(ackCount == 1);
-        atomic_store(&now, 1000166);
         ++phase;
         return 0;
     case 7:
         assert(ackCount == 2);
-        atomic_store(&now, 1000200);
         ++phase;
         return incoming(received, 5, target, 4);
     case 8:
         assert(frames == 3 && nackCount == 0);
-        atomic_store(&now, 1000265);
         ++phase;
         return 0;
     case 9:
         assert(nackCount == 0);
-        atomic_store(&now, 1000266);
         ++phase;
         return 0;
     case 10:
         assert(nackCount == 1);
-        atomic_store(&now, 1000400);
         ++phase;
         return 0;
     case 11:
         assert(nackCount == 1 && ackCount == 2); /* no automatic feedback retry */
-        atomic_store(&now, 1000500);
         ++phase;
         return incoming(received, 5, target, 4);
     case 12:
         assert(nackCount == 2);
-        atomic_store(&now, 1000600);
         ++phase;
         return incoming(received, 5, target, 3);
     case 13:
         assert(frames == 5 && ackCount == 3);
-        atomic_store(&now, 1000700);
         ++phase;
         return incoming(received, 5, target, 0);
     case 14:
@@ -164,6 +152,22 @@ int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) 
     usleep(1000);
     return 0;
 }
+static bool endBatch;
+int __wrap_IHS_UDPSocketWaitReadable(IHS_UDPSocket *socket, uint32_t timeoutMs) {
+    (void)socket; (void)timeoutMs;
+    /* Clock advances before the read, matching Socket::Wait -> Update. */
+    static const uint32_t times[] = {1000000,1000000,1000100,1000101,1000102,
+        1000165,1000166,1000200,1000265,1000266,1000400,1000500,1000600,1000700};
+    if (phase < sizeof(times)/sizeof(times[0])) atomic_store(&now, times[phase]);
+    return 1;
+}
+int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *packet) {
+    if (endBatch) { endBatch = false; return 0; }
+    int result = ScriptReceive(socket, packet);
+    endBatch = result > 0;
+    return result;
+}
+
 int main(void) {
     IHS_Init();
     const unsigned targets[] = {0, 1, 2, 3, 31};

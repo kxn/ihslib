@@ -227,6 +227,11 @@ static void BaseWorker(IHS_Base *base) {
         IHS_BaseUnlock(base);
         if (interrupted)
             break;
+        if (base->callbacks.run && base->callbacks.run->receiveCycle) {
+            if (!base->callbacks.run->receiveCycle(base, base->callbackContexts.run, &recv))
+                break;
+            continue;
+        }
         if (base->callbacks.run && base->callbacks.run->update)
             base->callbacks.run->update(base, base->callbackContexts.run);
         if (base->interrupted)

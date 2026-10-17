@@ -18,12 +18,12 @@
 static IHS_Session *session;
 static uint32_t now;
 static bool receiving, sending;
-static unsigned resultCode, entryCount, writeCount, entries[8];
-static bool reportMetadata, lossMode, videoMode;
+static unsigned resultCode, entryCount, writeCount, entries[512];
+static bool reportMetadata, lossMode, videoMode, cycleMode;
 static IHS_SessionChannelData mediaStorage, *media = &mediaStorage;
 static unsigned deliveredCount;
-static char *delivered[16];
-static IHS_SessionPacketHeader deliveredMetadata[16];
+static char *delivered[256];
+static IHS_SessionPacketHeader deliveredMetadata[256];
 static bool initialize_media(IHS_SessionChannel *ch, uint16_t capacity) {
     IHS_SessionChannelData *d = (void *)ch;
     d->window = IHS_SessionPacketsWindowCreateMedia(capacity);
@@ -44,7 +44,7 @@ bool __wrap_IHS_SessionChannelDataInit(IHS_SessionChannel *ch, uint16_t capacity
     return __real_IHS_SessionChannelDataInit(ch, capacity);
 }
 static void deliver(IHS_SessionFrame *f) {
-    assert(deliveredCount < 16);
+    assert(deliveredCount < 256);
     char *hex = malloc(f->body.size * 2 + 1);
     assert(hex);
     hex[0] = 0;
@@ -60,10 +60,31 @@ IHS_ReliableDisposition __wrap_IHS_SessionDeliverReliableFrame(IHS_Session *s, I
     return __real_IHS_SessionDeliverReliableFrame(s, f);
 }
 static const IHS_SessionChannelClass mediaClass = {.received = IHS_SessionChannelDataReceived};
+static struct { IHS_Buffer wire; unsigned cost, work; } cycleRows[256];
+static unsigned cycleCount, cycleIndex, cycleEOF, cycleWork;
+static bool cycleReady;
+static unsigned waits[8], waitCount;
+static char *cycleWires[256];
+static unsigned cycleWireCount;
+int __real_IHS_UDPSocketWaitReadable(IHS_UDPSocket *, uint32_t);
+int __wrap_IHS_UDPSocketWaitReadable(IHS_UDPSocket *socket, uint32_t milliseconds) {
+    if (!cycleMode) return __real_IHS_UDPSocketWaitReadable(socket, milliseconds);
+    waits[waitCount++] = milliseconds; return cycleReady;
+}
+int __real_IHS_UDPSocketReceive(IHS_UDPSocket *, IHS_UDPPacket *);
+int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *packet) {
+    if (!cycleMode) return __real_IHS_UDPSocketReceive(socket, packet);
+    if (cycleIndex == cycleCount) { now += cycleEOF; return 0; }
+    unsigned i = cycleIndex++;
+    now += cycleRows[i].cost; cycleWork = cycleRows[i].work;
+    packet->address = session->info.address;
+    IHS_BufferAppend(&packet->buffer, &cycleRows[i].wire);
+    return 1;
+}
 static unsigned frameCount;
 static uint64_t producedSequence;
 static struct { unsigned channel; char *body; } frames[8];
-static struct { unsigned size, wireSize; bool crc; } writes[8];
+static struct { unsigned size, wireSize; bool crc; } writes[256];
 IHS_SendAdmission __real_IHS_SessionChannelQueueFrameResult(IHS_SessionChannel *, IHS_SessionFrame *, bool);
 IHS_SendAdmission __wrap_IHS_SessionChannelQueueFrameResult(IHS_SessionChannel *ch,
                                                             IHS_SessionFrame *frame, bool reliable) {
@@ -90,16 +111,24 @@ uint32_t __wrap_IHS_SessionPacketTimestamp(void) { return now; }
 IHS_SessionPacketReturn __real_IHS_SessionPacketParse(IHS_SessionPacket *, IHS_Buffer *);
 IHS_SessionPacketReturn __wrap_IHS_SessionPacketParse(IHS_SessionPacket *packet, IHS_Buffer *wire) {
     IHS_SessionPacketReturn result = __real_IHS_SessionPacketParse(packet, wire);
+    if (receiving && cycleMode) now += cycleWork;
     if (receiving && result == IHS_SessionPacketResultOK) {
-        assert(entryCount < 8);
+        assert(entryCount < 512);
         entries[entryCount++] = IHS_PACKET_HEADER_SIZE + packet->body.size;
     }
     return result;
 }
 bool __wrap_IHS_BaseSend(IHS_Base *base, IHS_SocketAddress address, const IHS_Buffer *wire) {
     (void)base; (void)address;
-    if (!sending) { errno = EAGAIN; return false; }
-    assert(writeCount < 8);
+    if (!sending && !cycleMode) { errno = EAGAIN; return false; }
+    assert(writeCount < 256);
+    if (cycleMode) {
+        assert(cycleWireCount < 256);
+        char *hex = malloc(wire->size * 2 + 1); assert(hex); hex[0] = 0;
+        for (size_t i = 0; i < wire->size; ++i)
+            sprintf(hex + i * 2, "%02x", IHS_BufferPointer(wire)[i]);
+        cycleWires[cycleWireCount++] = hex;
+    }
     bool crc = (*IHS_BufferPointer(wire) & 128) != 0;
     writes[writeCount].wireSize = wire->size;
     writes[writeCount].size = wire->size - (crc ? 4 : 0);
@@ -149,7 +178,7 @@ static void report(void) {
             free(delivered[i]);
         }
         printf("]");
-        if (videoMode) {
+        if (videoMode || cycleMode) {
             printf(",\"metadata\":[");
             for (unsigned i = 0; i < deliveredCount; ++i) {
                 const IHS_SessionPacketHeader *h = &deliveredMetadata[i];
@@ -157,13 +186,32 @@ static void report(void) {
                     i ? "," : "", h->receiveBegin, h->receiveTimestamp, h->sendTimestamp,
                     (uint16_t)h->fragmentId);
             }
+            printf("]");
+        }
+        if (videoMode) {
             IHS_NetworkVideoStats *v = &session->networkVideo;
-            printf("],\"video\":{\"frame\":%u,\"pending\":[%u,%u,%u],\"totals\":[%u,%u,%u,%u],\"bits\":[%u,%u],\"samples\":",
+            printf(",\"video\":{\"frame\":%u,\"pending\":[%u,%u,%u],\"totals\":[%u,%u,%u,%u],\"bits\":[%u,%u],\"samples\":",
                 v->frame, v->firstSent, v->lastReceived, v->frameBytes,
                 v->totals[0], v->totals[1], v->totals[2], v->totals[3], bits(v->bitrate), bits(v->link));
             samples(&v->queue, 4); printf("}");
         }
         deliveredCount = 0;
+    }
+    if (cycleMode) {
+        printf(",\"waits\":[");
+        for (unsigned i = 0; i < waitCount; ++i) printf("%s%u", i ? "," : "", waits[i]);
+        printf("],\"wires\":[");
+        for (unsigned i = 0; i < cycleWireCount; ++i) {
+            printf("%s\"%s\"", i ? "," : "", cycleWires[i]); free(cycleWires[i]);
+        }
+        cycleWireCount = waitCount = 0;
+        printf("],\"now\":%u,\"update_tick\":%u,\"last_receive\":%u,\"ping\":{\"sum\":%u,\"bits\":%u,\"samples\":",
+            now, session->transport.updateTime, session->transport.lastReceive,
+            session->clock.ping.sum, bits(session->clock.ping.milliseconds));
+        samples(&session->clock.ping.queue, 1);
+        printf("},\"clock\":{\"echo\":%u,\"minimum\":%u,\"smooth\":%u,\"next_min_update\":%u,\"offset\":%u}",
+            session->clock.lastEcho, session->clock.minRTT, session->clock.smoothedRTT,
+            session->clock.minRTTUpdate, (uint32_t)session->clock.offset);
     }
     if (reportMetadata) {
         printf(",\"frames\":[");
@@ -191,11 +239,12 @@ static IHS_SessionPacket packet(unsigned type, unsigned channel, unsigned crc,
 int main(int argc, char **argv) {
     assert(argc >= 3 && argc <= 6);
     videoMode = argc == 6 && !strcmp(argv[5], "video");
-    lossMode = videoMode || (argc == 6 && !strcmp(argv[5], "loss"));
+    cycleMode = argc == 6 && !strcmp(argv[5], "cycle");
+    lossMode = videoMode || cycleMode || (argc == 6 && !strcmp(argv[5], "loss"));
     IHS_Init();
     session = IHS_TestSessionCreate();
     IHS_TimerTaskStopImmediate(session->retransmission.timer);
-    session->state.connectionState = IHS_SessionConnectionStateConnected;
+    session->state.connectionState = cycleMode ? IHS_SessionConnectionStateHandshaking : IHS_SessionConnectionStateConnected;
     session->state.connectionId = 12;
     session->state.hostConnectionId = argc >= 5 ? atoi(argv[4]) : 34;
     session->state.crcRequired = atoi(argv[1]);
@@ -217,10 +266,42 @@ int main(int argc, char **argv) {
         }
         IHS_SessionChannelAdd(session, &media->base);
     }
+    bool initializedCycle = false;
     char line[8192];
     while (fgets(line, sizeof(line), stdin)) {
         unsigned type, ch, crc, source, dest, size, bad;
-        if (line[0] == 'W') {
+        if (line[0] == 'B') {
+            unsigned ready, blocked;
+            assert(cycleMode && sscanf(line, "B %u %u %u %u %u", &now, &ready, &blocked,
+                &cycleEOF, &cycleCount) == 5 && cycleCount <= 256);
+            cycleReady = ready; cycleIndex = 0;
+            session->outgoing.blocked = blocked;
+            if (!initializedCycle) {
+                initializedCycle = true;
+                session->transport.lastReceive = now;
+                session->clock.lastEcho = now; session->clock.haveEcho = true;
+            }
+            for (unsigned n = 0; n < cycleCount; ++n) {
+                unsigned id, retry, fragment, sent; char hex[4096];
+                assert(fgets(line, sizeof(line), stdin));
+                assert(sscanf(line, "P %u %u %u %u %u %u %4095s %u %u", &type, &ch,
+                    &id, &retry, &fragment, &sent, hex, &cycleRows[n].cost, &cycleRows[n].work) == 9);
+                size = strlen(hex)/2;
+                IHS_SessionPacket p = packet(type, ch, session->state.crcRequired, 34, 12, size);
+                p.header.packetId=id; p.header.fragmentId=fragment; p.header.retransmitCount=retry; p.header.sendTimestamp=sent;
+                for (unsigned i=0;i<size;++i) { unsigned v; assert(sscanf(hex+i*2,"%2x",&v)==1); IHS_BufferPointer(&p.body)[i]=v; }
+                IHS_SessionPacketPopulateBuffer(&p);
+                IHS_BufferInit(&cycleRows[n].wire, 2048, 2048);
+                IHS_BufferAppendMem(&cycleRows[n].wire,p.body.data,IHS_SessionPacketSize(&p));
+                IHS_SessionPacketClear(&p,true);
+            }
+            IHS_UDPPacket rx = {.buffer = IHS_BUFFER_INIT(2048,2048)};
+            receiving = true;
+            assert(session->base.callbacks.run->receiveCycle(&session->base, NULL, &rx));
+            receiving = false;
+            IHS_BufferClear(&rx.buffer, true);
+            for (unsigned n=0;n<cycleCount;++n) IHS_BufferClear(&cycleRows[n].wire,true);
+        } else if (line[0] == 'W') {
             unsigned id, retry, fragment, sent;
             char hex[4096];
             assert(lossMode);

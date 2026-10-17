@@ -43,7 +43,7 @@ bool __wrap_IHS_BaseSend(IHS_Base *base, IHS_SocketAddress addr, const IHS_Buffe
     }
     return true;
 }
-int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *sock, IHS_UDPPacket *received) {
+static int ScriptReceive(IHS_UDPSocket *sock, IHS_UDPPacket *received) {
     (void)sock;
     unsigned request = atomic_exchange(&nackRequest, 0);
     if (!connected || request) {
@@ -74,6 +74,18 @@ static void wait_attempts(unsigned n) {
         usleep(1000);
     assert(atomic_load(&attempts) == n);
 }
+static bool endBatch;
+int __wrap_IHS_UDPSocketWaitReadable(IHS_UDPSocket *socket, uint32_t timeoutMs) {
+    (void)socket; (void)timeoutMs;
+    return 1;
+}
+int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *packet) {
+    if (endBatch) { endBatch = false; return 0; }
+    int result = ScriptReceive(socket, packet);
+    endBatch = result > 0;
+    return result;
+}
+
 int main(void) {
     IHS_Init();
     for (unsigned launch = 0; launch < 2; ++launch) {
