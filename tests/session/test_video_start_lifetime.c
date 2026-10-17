@@ -4,8 +4,8 @@
 #include "ihslib.h"
 #include "session/channels/channel.h"
 #include "session/channels/video/ch_data_video.h"
-#include "session/session_pri.h"
 #include "session/frame_stats.h"
+#include "session/session_pri.h"
 #include "test_session.h"
 #include <assert.h>
 #include <stdlib.h>
@@ -142,8 +142,36 @@ static void stats_construction_failures(void) {
     }
     assert(failures >= 4); /* aggregator/scratch, two locks, tracked scratch */
 }
+static void invalid_flush(IHS_Session *s, const IHS_VideoEpochInfo *e, IHS_StreamVideoFlushPhase p,
+                          void *ctx) {
+    (void)s;
+    (void)e;
+    (void)p;
+    (void)ctx;
+    assert(false);
+}
+static void flush_requires_tracked_callbacks(void) {
+    IHS_Session *s = IHS_TestSessionCreate();
+    assert(s);
+    IHS_StreamVideoCallbacks cb = {.flushTracked = invalid_flush};
+    IHS_SessionSetVideoCallbacks(s, &cb, NULL);
+    assert(s->invalidVideoCallbacks);
+    CStartVideoDataMsg msg = CSTART_VIDEO_DATA_MSG__INIT;
+    msg.channel = 3;
+    msg.codec = k_EStreamVideoCodecH264;
+    msg.width = 1280;
+    msg.height = 720;
+    IHS_SessionChannel *ch = IHS_SessionChannelDataVideoCreate(s, &msg);
+    assert(s->base.interrupted);
+    if (ch) {
+        IHS_SessionChannelStop(ch);
+        IHS_SessionChannelDestroy(ch);
+    }
+    IHS_SessionDestroy(s);
+}
 int main(void) {
     IHS_Init();
+    flush_requires_tracked_callbacks();
     stats_construction_failures();
     construction_failures();
     for (int i = SUCCESS; i <= NO_START; ++i)

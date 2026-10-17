@@ -89,6 +89,11 @@ typedef struct IHS_VideoEpochInfo {
 /* Set before starting session workers. Identity cannot be reassigned. */
 bool IHS_SessionSetVideoTrackingIdentity(IHS_Session *, uint64_t session_id);
 
+typedef enum IHS_StreamVideoFlushPhase {
+    IHS_StreamVideoFlushPlayer,
+    IHS_StreamVideoFlushDecoder,
+} IHS_StreamVideoFlushPhase;
+
 typedef struct IHS_StreamVideoCallbacks {
     int (*start)(IHS_Session *session, const IHS_StreamVideoConfig *config, void *context);
 
@@ -150,4 +155,10 @@ typedef struct IHS_StreamVideoCallbacks {
      * Stop releases the decoder; player/window ownership stays with the app.
      * Zero-initialize and rebuild callback tables when upgrading this source ABI. */
     int (*prepare)(IHS_Session *, const IHS_StreamVideoConfig *, void *);
+    /* Optional tracked Stop phases, after the worker joins: Player, protocol
+     * partial purge, Decoder, recovery mark, then stopTracked retirement.
+     * Flush drops internal references; caller/GPU leases must remain valid.
+     * Requires all three tracked callbacks. This is a rebuilt source ABI. */
+    void (*flushTracked)(IHS_Session *, const IHS_VideoEpochInfo *,
+                          IHS_StreamVideoFlushPhase, void *);
 } IHS_StreamVideoCallbacks;

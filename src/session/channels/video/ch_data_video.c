@@ -387,10 +387,25 @@ static void DataStop(IHS_SessionChannel *channel) {
         if (session->frameStats)
             IHS_FrameStatsCollectTracked(session->frameStats, session->frameTracker);
         IHS_FrameTrackerCloseEpoch(session->frameTracker, videoCh->epoch.video_epoch);
+        if (callbacks->flushTracked)
+            callbacks->flushTracked(session, &videoCh->epoch, IHS_StreamVideoFlushPlayer,
+                                     session->callbackContexts.video);
+    }
+    DiscardPending(videoCh);
+    if (videoCh->tracked && callbacks->flushTracked)
+        callbacks->flushTracked(session, &videoCh->epoch, IHS_StreamVideoFlushDecoder,
+                                 session->callbackContexts.video);
+    /* Base Stop 7b1fe8..f0 records recovery after flush, before the standalone
+     * Stop retires its backend. Destruction/next initialization count as time
+     * already spent waiting for recovery, including uint32 clock wrap. */
+    videoCh->states.waitingKeyFrame = true;
+    videoCh->states.syncingBacklog = false;
+    videoCh->states.lastRecoveryRequest = IHS_SessionPacketTimestamp();
+    if (videoCh->tracked) {
         callbacks->stopTracked(session, &videoCh->epoch, session->callbackContexts.video);
     } else if (callbacks && callbacks->stop)
         callbacks->stop(session, session->callbackContexts.video);
-    DiscardPending(videoCh);
+    videoCh->backendReady = false;
 }
 
 void IHS_SessionVideoHandlePendingReset(IHS_Session *session) {
@@ -406,9 +421,6 @@ void IHS_SessionVideoHandlePendingReset(IHS_Session *session) {
      * replacement cannot race this section. New complete data is excluded. */
     IHS_SessionChannelDataJoinAndPurge(&video->base);
     DataStop(ch);
-    video->states.waitingKeyFrame = true;
-    video->states.syncingBacklog = false;
-    video->states.lastRecoveryRequest = IHS_SessionPacketTimestamp();
     atomic_store(&video->resetRequested, false); /* Coalesce old-worker requests. */
     if (session->base.interrupted || session->transport.detached) return;
     if (video->tracked) {
@@ -573,7 +585,7 @@ static void DiscardPending(IHS_SessionChannelVideo *channel) {
     size_t clearedCount = IHS_VideoPartialFramesClear(&channel->frame.partial);
     if (clearedCount > 0) {
         IHS_SessionLog(((IHS_SessionChannel *)channel)->session, IHS_LogLevelWarn, "Video",
-                       "%u partial frames was cleared", clearedCount);
+                       "%zu partial frames were cleared", clearedCount);
     }
     channel->frame.flags = 0;
     channel->frame.expectedSubFrameStart = 0;
