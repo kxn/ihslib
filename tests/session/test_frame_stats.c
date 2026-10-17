@@ -31,7 +31,7 @@
 #include "ihslib.h"
 #include "session/frame_stats.h"
 
-/* EFrameAccumulatedStat slot ids that this MVP populates. */
+/* EFrameAccumulatedStat slot ids from official client AddFrameSample. */
 enum {
     SLOT_NETWORK = 6,
     SLOT_DECODE = 7,
@@ -82,8 +82,8 @@ int main(void) {
     /*   UploadEnd (17)                            at 25 ms */
     IHS_FrameStatsRecordStage(agg, 1, IHS_VideoFrameStageUploadEnd, MS_TICKS(25));
     /* Complete stamps event 18 itself; the explicit clock makes this test
-     * independent of wall time. The partial accumulator below is local-only;
-     * official ring/Save expectations come from frame_stats_official_vectors. */
+     * independent of wall time. Official expectations, including accumulator bytes, also come from
+     * frame_stats_official_vectors. */
     IHS_FrameStatsRecordCompleteAt(agg, 1, IHS_VideoFrameResultDisplayed, MS_TICKS(30));
 
     /* Frame 2: inter-frame interval test. Complete at 50 ms (20 ms after frame 1). */
@@ -103,15 +103,14 @@ int main(void) {
 
     /* Decode: each frame is 10 ms (10→20 and 30→40). avg ≈ 10 ms. */
     expect_slot(agg, SLOT_DECODE, 2, 10.0f);
-    /* Display/upload: 5 ms each (20→25 and 40→45). avg ≈ 5 ms. */
-    expect_slot(agg, SLOT_DISPLAY, 2, 5.0f);
+    /* Display: UploadBegin to Complete, 10 ms each. */
+    expect_slot(agg, SLOT_DISPLAY, 2, 10.0f);
     /* Network: event 12→13 — same timestamp seeded, delta = 0 ms. avg ≈ 0. */
     expect_slot(agg, SLOT_NETWORK, 2, 0.0f);
     /* Client end-to-end: 13→18 — 30 ms each (0→30 and 20→50). avg ≈ 30 ms. */
     expect_slot(agg, SLOT_CLIENT, 2, 30.0f);
-    /* Frame duration: only one inter-frame interval (frame 1's 18 → frame 2's 18 = 20 ms).
-     * Frame 1 itself has no predecessor so it doesn't add a sample. count=1. */
-    expect_slot(agg, SLOT_FRAME_DURATION, 1, 20.0f);
+    /* Frame duration: each displayed frame Start to Complete, 30 ms. */
+    expect_slot(agg, SLOT_FRAME_DURATION, 2, 30.0f);
 
     /* Frames between lastSent and lastDisplayed that NEVER received Complete must
      * be folded as DroppedLate so the slot is reset and not leaked. Inject a

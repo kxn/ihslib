@@ -59,15 +59,16 @@ typedef struct IHS_FrameStatsSlot {
 } IHS_FrameStatsSlot;
 
 /**
- * Local partial accumulator. Its double sums/population-variance representation
- * differs from the original float sample vectors/two-pass sample variance.
+ * Float32 sample vectors, matching original AddSample/Calculate. The report
+ * snapshot owns moved vectors; resetting one accumulator never frees another's.
  */
 #define IHS_FRAME_STATS_ACCUM_SLOTS 19
 
 typedef struct IHS_FrameStatsAccumSlot {
     uint32_t count;
-    double sum;
-    double sumSquares;
+    float sum;
+    float *samples;
+    uint32_t capacity;
 } IHS_FrameStatsAccumSlot;
 
 typedef struct IHS_FrameStatsAccumulator {
@@ -80,7 +81,7 @@ typedef struct IHS_FrameStatsAccumulator {
  * invoking them to avoid lock-order inversion.
  */
 #define IHS_FRAME_STATS_RING_SIZE 240
-#define IHS_FRAME_REPORT_CAPACITY 256
+#define IHS_FRAME_REPORT_CAPACITY IHS_FRAME_STATS_RING_SIZE
 
 typedef struct IHS_FrameStatsReport {
     uint64_t serial;
@@ -91,13 +92,28 @@ typedef struct IHS_FrameStatsReport {
     bool fullReporting;
 } IHS_FrameStatsReport;
 
+/* Allocate outside the report hot path, one per report consumer. */
+typedef struct IHS_FrameStatsMessage {
+    CFrameStatsListMsg message;
+    CFrameStats frames[IHS_FRAME_REPORT_CAPACITY];
+    CFrameStats *framePointers[IHS_FRAME_REPORT_CAPACITY];
+    CFrameEvent events[IHS_FRAME_REPORT_CAPACITY * IHS_FRAME_STATS_EVENT_COUNT];
+    CFrameEvent *eventPointers[IHS_FRAME_REPORT_CAPACITY * IHS_FRAME_STATS_EVENT_COUNT];
+    CFrameStatAccumulatedValue accumulated[IHS_FRAME_STATS_ACCUM_SLOTS];
+    CFrameStatAccumulatedValue *accumulatedPointers[IHS_FRAME_STATS_ACCUM_SLOTS];
+} IHS_FrameStatsMessage;
+void IHS_FrameStatsEncodeReport(const IHS_FrameStatsReport *, int32_t offset,
+                                 IHS_FrameStatsMessage *);
+bool IHS_SessionSendFrameEvents(IHS_Session *, IHS_FrameStatsMessage *);
+
 typedef struct IHS_FrameStatsAggregator {
     IHS_Mutex *lock;
+    IHS_Mutex *collectorLock;
+    struct IHS_TrackedFrame *trackedScratch;
     IHS_FrameStatsSlot ring[IHS_FRAME_STATS_RING_SIZE];
     IHS_FrameStatsAccumulator accumulator;
     uint16_t lastSentFrameId;
     uint16_t lastDisplayedFrameId;
-    uint32_t lastFrameTimestamp; /* legacy accumulator cursor, separate from protocol times */
     uint32_t previousFrameStart, previousDisplay;
     uint16_t lastInputMark;
     struct {
@@ -105,18 +121,15 @@ typedef struct IHS_FrameStatsAggregator {
         uint32_t begin, sent;
     } inputMarks[1024];
     bool fullReporting;          /* mirrors CStreamClient::sendFullFrameStats */
+    /* Latest collector output, consumed once per nonempty report. Values are
+     * already in the original AddNetworkSample units, not packet timestamps. */
+    float networkSample[5];
 
     IHS_FrameStatsReport pendingReport;
     uint64_t reportSerial;
     bool reportPending;
     uint16_t lastQueuedFrameId; /* queue acceptance, separate from ring drain */
     uint64_t closedUnsentFrames;
-    bool trackedMode, trackedDisplayed;
-    uint64_t lastPresentationSerial;
-    uint16_t trackedLatest;
-    IHS_FrameStatsSlot trackedFrames[IHS_FRAME_REPORT_CAPACITY];
-    size_t trackedCount;
-
 } IHS_FrameStatsAggregator;
 
 IHS_FrameStatsAggregator *IHS_FrameStatsAggregatorCreate(void);
@@ -183,18 +196,21 @@ uint16_t IHS_FrameStatsCreateInputMark(IHS_FrameStatsAggregator *, uint32_t begi
 size_t IHS_FrameStatsAggregatorDrain(IHS_FrameStatsAggregator *agg, uint16_t *outLatestFrameId);
 
 void IHS_FrameStatsAccumulatorReset(IHS_FrameStatsAccumulator *accum);
+bool IHS_FrameStatsAccumulatorAdd(IHS_FrameStatsAccumulator *, unsigned stat, float value);
+size_t IHS_FrameStatsAccumulatorEncode(const IHS_FrameStatsAccumulator *,
+                                       CFrameStatAccumulatedValue *, CFrameStatAccumulatedValue **);
+void IHS_FrameStatsSetNetworkSample(IHS_FrameStatsAggregator *, const float values[5]);
 
-/* One report consumer, excluded from destruction. The borrowed snapshot stays
- * immutable until that consumer commits it; failed enqueue retries the same
- * serial. Receive/settle continue accumulating in the next interval. Do not mix
- * legacy Drain/Reset with this transactional reporting API. */
+/* One report consumer, excluded from destruction. Begin retires protocol data;
+ * Finish releases the immutable snapshot after ONE send attempt, including
+ * rejection. Receive/settle continue accumulating in the next interval. */
 const IHS_FrameStatsReport *IHS_FrameStatsReportBegin(IHS_FrameStatsAggregator *);
-bool IHS_FrameStatsReportCommit(IHS_FrameStatsAggregator *, uint64_t serial);
+bool IHS_FrameStatsReportFinish(IHS_FrameStatsAggregator *, uint64_t serial, bool accepted);
 /* Exclude the report consumer first (stop its timer); never replay an old
  * channel's failed report from a replacement channel. */
 void IHS_FrameStatsReportAbandon(IHS_FrameStatsAggregator *);
 
 struct IHS_FrameTracker;
-void IHS_FrameStatsBeginTrackedEpoch(IHS_FrameStatsAggregator *);
+void IHS_FrameStatsCollectTracked(IHS_FrameStatsAggregator *, struct IHS_FrameTracker *);
 void IHS_FrameStatsSettleTracked(IHS_FrameStatsAggregator *, struct IHS_FrameTracker *,
                                  uint64_t nowUs);

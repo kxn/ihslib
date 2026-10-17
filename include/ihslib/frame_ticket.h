@@ -29,4 +29,6 @@ bool IHS_FrameTicketComplete(IHS_FrameTicket *, const IHS_FrameOutcome *);
 
 /* Decoder-side only; these take the endpoint short lock. */
 bool IHS_FrameTicketDecodeStage(IHS_FrameTicket *, bool end, uint64_t us);
+/* Renderer-side stage capture; short endpoint lock, no session/GPU access. */
+bool IHS_FrameTicketUploadStage(IHS_FrameTicket *, bool end, uint64_t us);
 void IHS_FrameTicketSetSize(IHS_FrameTicket *, uint32_t bytes);

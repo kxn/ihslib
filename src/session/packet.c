@@ -136,9 +136,9 @@ uint32_t IHS_SessionPacketTimestamp() {
      * client's GetStreamTimestamp (libmain.so 0x802a88: Plat_RelativeTicks is
      * clock_gettime(MONOTONIC) scaled by 1e9; Plat_RelativeTickFrequency
      * returns 1e9; result = (sec<<16) | frac). All on-wire timestamps —
-     * packet headers, ACK echoes, frame-stats events — use this unit. The
-     * earlier epoch-ms formats put the host's stream clock arithmetic out of
-     * base and inflated SessionStats network time to ~58.5M ms. */
+     * packet headers, ACK echoes, frame-stats events — use this unit. Older
+     * epoch-ms formats violate this contract; this alone does not prove the
+     * cause of historical abnormal latency reports (protocol reference §9c). */
     struct timespec tp;
     clock_gettime(CLOCK_MONOTONIC, &tp);
     uint64_t secs = (uint64_t) tp.tv_sec;

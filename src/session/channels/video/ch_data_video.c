@@ -46,12 +46,7 @@
 #include "frame_hevc.h"
 
 /* Reserved once per channel, before registering the report timer. */
-typedef struct VideoReportScratch {
-    CFrameStats frames[IHS_FRAME_REPORT_CAPACITY];
-    CFrameStats *framePointers[IHS_FRAME_REPORT_CAPACITY];
-    CFrameEvent events[IHS_FRAME_REPORT_CAPACITY * IHS_FRAME_STATS_EVENT_COUNT];
-    CFrameEvent *eventPointers[IHS_FRAME_REPORT_CAPACITY * IHS_FRAME_STATS_EVENT_COUNT];
-} VideoReportScratch;
+typedef IHS_FrameStatsMessage VideoReportScratch;
 
 typedef struct IHS_SessionChannelVideo {
     IHS_SessionChannelData base;
@@ -230,8 +225,6 @@ static bool DataStart(IHS_SessionChannel *channel) {
         return false;
     }
     videoCh->appStarted = true;
-    if (videoCh->tracked)
-        IHS_FrameStatsBeginTrackedEpoch(session->frameStats);
     CVideoDecoderInfoMsg message = CVIDEO_DECODER_INFO_MSG__INIT;
     message.info = (char *)session->clientCapabilities.decoderInfo;
     if (session->clientCapabilities.decoderThreads)
@@ -271,7 +264,9 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
      * the aggregator's own lock orders independently. Mirrors Steam's
      * RecordFrameReceived: translate the frame and transport-send timestamps
      * from the peer clock; preserve the original transport receive timestamp. */
-    if (!videoCh->tracked && channel->session->frameStats != NULL) {
+    if (channel->session->frameStats != NULL) {
+        if (videoCh->tracked)
+            IHS_FrameStatsCollectTracked(channel->session->frameStats, channel->session->frameTracker);
         int32_t offset = IHS_StreamClockOffset(&channel->session->clock);
         IHS_FrameStatsRecordReceivedInput(channel->session->frameStats, header->id,
                                      header->timestamp - offset, header->sendTimestamp - offset,
@@ -289,7 +284,9 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
                                      .senderFrameTimestamp = header->timestamp - offset,
                                      .senderSendTimestamp = header->sendTimestamp - offset,
                                      .receiveTimestamp = header->receiveTimestamp,
-                                     .inputMark = header->inputMark};
+                                     .inputMark = header->inputMark,
+                                     .inputReceived = header->inputRecvTimestamp ? header->inputRecvTimestamp - offset : 0,
+                                     .frameSize = receivedPayloadSize};
         IHS_FrameBeginResult result =
             IHS_FrameTrackerBegin(channel->session->frameTracker, videoCh->epoch.video_epoch,
                                   header->id, &received, &videoCh->incoming);
@@ -396,6 +393,8 @@ static void DataStop(IHS_SessionChannel *channel) {
     if (session->frameStats)
         IHS_FrameStatsReportAbandon(session->frameStats);
     if (videoCh->tracked) {
+        if (session->frameStats)
+            IHS_FrameStatsCollectTracked(session->frameStats, session->frameTracker);
         IHS_FrameTrackerCloseEpoch(session->frameTracker, videoCh->epoch.video_epoch);
         callbacks->stopTracked(session, &videoCh->epoch, session->callbackContexts.video);
     } else if (callbacks && callbacks->stop)
@@ -641,84 +640,13 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
     videoCh->states.lastStatsTime = now;
 
     /* Local report producer. The detail encoder follows original Save (protocol
-     * reference §52); this timer, partial accumulator and enqueue-retry policy
-     * are separate from original OnThink/SendFrameEvents 0x7a82e8. */
+     * reference §52); this timer/tracked collection remain separate from original OnThink.
+     * Snapshot data retires once per attempt, independent of enqueue success. */
     if (session->frameStats == NULL) {
         return 1000;
     }
-    IHS_SessionChannel *stats = IHS_SessionChannelFor(session, IHS_SessionChannelIdStats);
-    if (stats == NULL)
-        return 1000;
+    IHS_SessionSendFrameEvents(session, videoCh->reportScratch);
     if (videoCh->tracked)
         IHS_FrameStatsSettleTracked(session->frameStats, session->frameTracker, now * 1000);
-    const IHS_FrameStatsReport *report = IHS_FrameStatsReportBegin(session->frameStats);
-    if (!report)
-        return 1000;
-    CFrameStatsListMsg message = CFRAME_STATS_LIST_MSG__INIT;
-    message.data_type = k_EStreamingVideoData;
-    message.latest_frame_id = report->latestFrameId;
-    bool fullReporting = report->fullReporting;
-    size_t folded = report->count;
-    const IHS_FrameStatsSlot *drained = report->frames;
-    const IHS_FrameStatsAccumulator *accum = &report->accumulator;
-    CFrameStatAccumulatedValue accumRows[IHS_FRAME_STATS_ACCUM_SLOTS];
-    CFrameStatAccumulatedValue *accumPtrs[IHS_FRAME_STATS_ACCUM_SLOTS];
-    size_t rowCount = 0;
-    for (int i = 0; i < IHS_FRAME_STATS_ACCUM_SLOTS; i++) {
-        if (accum->slots[i].count == 0) {
-            continue;
-        }
-        CFrameStatAccumulatedValue *row = &accumRows[rowCount];
-        cframe_stat_accumulated_value__init(row);
-        row->stat_type = (EFrameAccumulatedStat)i;
-        row->count = (int32_t)accum->slots[i].count;
-        double average = accum->slots[i].sum / accum->slots[i].count;
-        row->average = (float)average;
-        /* Local population variance. Original uses float sample vectors and
-         * two-pass sample variance, not this closed-form calculation (§52). */
-        if (accum->slots[i].count > 1) {
-            double meanSq = accum->slots[i].sumSquares / accum->slots[i].count;
-            double variance = meanSq - average * average;
-            if (variance > 0) {
-                row->has_stddev = 1;
-                row->stddev = (float)sqrt(variance);
-            }
-        }
-        accumPtrs[rowCount] = row;
-        rowCount++;
-    }
-    message.n_accumulated_stats = rowCount;
-    message.accumulated_stats = accumPtrs;
-
-    /* Save(stats, true, clockOffset), 0x7a8470: first event translated to
-     * peer time, subsequent events delta-coded against the last emitted event. */
-    int32_t clockOffset = IHS_StreamClockOffset(&session->clock);
-    VideoReportScratch *scratch = videoCh->reportScratch;
-    CFrameStats *frameRows = scratch->frames;
-    CFrameEvent *eventRows = scratch->events;
-    CFrameEvent **eventPtrs = scratch->eventPointers;
-    CFrameStats **framePtrs = scratch->framePointers;
-    size_t frameCount = 0;
-    size_t eventCount = 0;
-    if (fullReporting) {
-        for (size_t i = 0; i < folded; i++) {
-            const IHS_FrameStatsSlot *slot = &drained[i];
-            CFrameStats *row = &frameRows[frameCount];
-            IHS_FrameStatsEncodeFrame(slot, clockOffset, row, &eventRows[eventCount],
-                                       &eventPtrs[eventCount]);
-            eventCount += row->n_events;
-            frameCount++;
-        }
-        for (size_t r = 0; r < frameCount; r++) {
-            framePtrs[r] = &frameRows[r];
-        }
-        message.n_stats = frameCount;
-        message.stats = framePtrs;
-    }
-
-    if (IHS_SessionChannelStatsSend(stats, k_EStreamStatsFrameEvents,
-                                    (const ProtobufCMessage *)&message, IHS_PACKET_ID_NEXT)) {
-        IHS_FrameStatsReportCommit(session->frameStats, report->serial);
-    }
     return 1000;
 }
