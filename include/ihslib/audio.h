@@ -49,12 +49,25 @@ typedef struct IHS_StreamAudioConfig {
     size_t codecDataLen;
 } IHS_StreamAudioConfig;
 
+/* Extended media header, after the receive-time clock conversion. The payload
+ * remains encoded codec data. Values are valid only during submitFrame. */
+typedef struct IHS_StreamAudioFrameInfo {
+    uint16_t id;
+    uint32_t timestamp; /* local 16.16 seconds, captured before the decoder FIFO */
+} IHS_StreamAudioFrameInfo;
+
 typedef struct IHS_StreamAudioCallbacks {
     int (*start)(IHS_Session *session, const IHS_StreamAudioConfig *config, void *context);
 
     int (*submit)(IHS_Session *session, IHS_Buffer *data, void *context);
 
     void (*stop)(IHS_Session *session, void *context);
+
+    /* Initialize this callbacks struct to zero and rebuild callers with this
+     * header. Preferred when supplied; otherwise the original submit is used.
+     * IDs allow the application decoder to reproduce official Opus PLC/FEC. */
+    int (*submitFrame)(IHS_Session *session, const IHS_StreamAudioFrameInfo *info,
+                       IHS_Buffer *data, void *context);
 } IHS_StreamAudioCallbacks;
 
 /**

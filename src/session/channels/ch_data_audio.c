@@ -29,6 +29,7 @@
 #include "ch_data.h"
 #include "ch_data_audio.h"
 
+#include "session/clock.h"
 #include "session/session_pri.h"
 
 typedef struct ChannelAudio {
@@ -107,9 +108,16 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
                          IHS_Buffer *body) {
     IHS_Session *session = channel->session;
     const IHS_StreamAudioCallbacks *callbacks = session->callbacks.audio;
-    if (!callbacks || !callbacks->submit)
+    if (!callbacks)
         return;
-    callbacks->submit(session, body, session->callbackContexts.audio);
+    if (callbacks->submitFrame) {
+        IHS_StreamAudioFrameInfo info = {.id = header->id, .timestamp = header->timestamp};
+        if (!header->timestampsLocal)
+            info.timestamp -= IHS_StreamClockOffset(&session->clock);
+        callbacks->submitFrame(session, &info, body, session->callbackContexts.audio);
+    } else if (callbacks->submit) {
+        callbacks->submit(session, body, session->callbackContexts.audio);
+    }
 }
 
 static void DataStop(IHS_SessionChannel *channel) {
