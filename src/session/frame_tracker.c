@@ -5,6 +5,7 @@
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <time.h>
 
 enum publication { OPEN, CLAIMED, READY, EXPIRED, CLOSED };
 struct IHS_FrameTicket {
@@ -17,6 +18,9 @@ struct IHS_FrameTicket {
     uint64_t completionSerial;
     uint32_t completionTimestamp;
     bool statsConsumed; /* owner lock */
+    bool hasVideoTimestamp; /* owner lock, independent of receive statistics */
+    uint32_t videoTimestamp;
+    bool videoDecodeActive, videoDecodeEnded; /* owner lock */
 };
 struct IHS_FrameTracker {
     IHS_Mutex *lock;
@@ -231,6 +235,9 @@ IHS_FrameBeginResult IHS_FrameTrackerBegin(IHS_FrameTracker *t, uint64_t epoch, 
     uint64_t version = freeRecord->frame.identity.slotVersion + 1;
     freeRecord->frame = (IHS_TrackedFrame){
         .identity = {t->sessionId, epoch, ++t->serial, version, seq, frameId}, .receive = *receive};
+    freeRecord->hasVideoTimestamp = false;
+    freeRecord->videoTimestamp = 0;
+    freeRecord->videoDecodeActive = freeRecord->videoDecodeEnded = false;
     freeRecord->occupied = true;
     freeRecord->settled = false;
     freeRecord->statsConsumed = false;
@@ -336,10 +343,52 @@ size_t IHS_FrameTrackerSettle(IHS_FrameTracker *t, uint64_t nowUs, uint64_t time
 bool IHS_FrameTicketDecodeStage(IHS_FrameTicket *r, bool end, uint64_t us) {
     return IHS_FrameTrackerDecodeStage(r->owner, r, end, us);
 }
+bool IHS_FrameTicketVideoDecodeStage(IHS_FrameTicket *r, bool end) {
+    IHS_FrameTracker *t = r->owner;
+    IHS_MutexLock(t->lock);
+    bool ok = t->accepting && r->frame.identity.epoch == t->epoch && !r->settled;
+    if (end) ok = ok && r->videoDecodeActive && !r->videoDecodeEnded;
+    if (ok) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        uint64_t us = (uint64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
+        if (end) {
+            r->frame.decodeEndUs = us;
+            r->frame.hasDecodeEnd = r->videoDecodeEnded = true;
+        } else {
+            r->videoDecodeActive = true;
+            r->videoDecodeEnded = false;
+            if (!r->frame.hasDecodeBegin) {
+                r->frame.decodeBeginUs = us;
+                r->frame.hasDecodeBegin = true;
+            }
+        }
+    }
+    IHS_MutexUnlock(t->lock);
+    return ok;
+}
 void IHS_FrameTicketSetSize(IHS_FrameTicket *r, uint32_t bytes) {
     IHS_FrameTracker *t = r->owner;
     IHS_MutexLock(t->lock);
     if (!r->settled)
         r->frame.receive.frameSize = bytes;
     IHS_MutexUnlock(t->lock);
+}
+
+void IHS_FrameTicketSetVideoTimestamp(IHS_FrameTicket *r, uint32_t timestamp) {
+    IHS_FrameTracker *t = r->owner;
+    IHS_MutexLock(t->lock);
+    if (t->accepting && r->frame.identity.epoch == t->epoch && !r->settled) {
+        r->videoTimestamp = timestamp;
+        r->hasVideoTimestamp = true;
+    }
+    IHS_MutexUnlock(t->lock);
+}
+bool IHS_FrameTicketVideoTimestamp(IHS_FrameTicket *r, uint32_t *timestamp) {
+    IHS_FrameTracker *t = r->owner;
+    IHS_MutexLock(t->lock);
+    bool have = r->hasVideoTimestamp;
+    if (have && timestamp) *timestamp = r->videoTimestamp;
+    IHS_MutexUnlock(t->lock);
+    return have;
 }

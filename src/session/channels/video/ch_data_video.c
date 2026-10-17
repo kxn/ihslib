@@ -352,10 +352,10 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
             IHS_BufferPointer(&plain), plain.size, EmptyIV, sizeof(EmptyIV), config->sessionKey,
             config->sessionKeyLen, IHS_BufferPointer(&plain), &outLen);
         plain.size = outLen;
-        AddPartialFrame(videoCh, header->id, header->timestamp, &vhead, &plain);
+        AddPartialFrame(videoCh, header->id, header->timestamp - offset, &vhead, &plain);
         IHS_BufferClear(&plain, true);
     } else {
-        AddPartialFrame(videoCh, header->id, header->timestamp, &vhead, body);
+        AddPartialFrame(videoCh, header->id, header->timestamp - offset, &vhead, body);
     }
 
     while (!videoCh->base.interrupted && AssembleFrame(channel)) {
@@ -523,6 +523,8 @@ static bool AssembleFrame(IHS_SessionChannel *channel) {
                 videoCh->assembly = partial->ticket;
             }
             videoCh->assemblyId = partial->frameId;
+            if (videoCh->assembly)
+                IHS_FrameTicketSetVideoTimestamp(videoCh->assembly, partial->timestamp);
             videoCh->frame.contentMode = (partial->header.flags & VideoFrameFlagContentMode) != 0;
             videoCh->states.frameFinished = true;
         }
@@ -693,6 +695,7 @@ static IHS_StreamVideoSubmitResult SubmitFrame(IHS_SessionChannel *channel, uint
         bool taken = false;
         if (videoCh->assembly)
             IHS_FrameTicketSetSize(videoCh->assembly, data->size);
+        if (videoCh->assembly) IHS_FrameTicketVideoDecodeStage(videoCh->assembly, false);
         result = videoCh->backendReady
             ? callbacks->submitTracked(session, &videoCh->epoch, frameId, videoCh->assembly,
                                         data, flags, &taken, context)
@@ -721,5 +724,7 @@ static IHS_StreamVideoSubmitResult SubmitFrame(IHS_SessionChannel *channel, uint
                        "Decoder reported unrecoverable error.");
         IHS_SessionDisconnect(session);
     }
+    if (videoCh->tracked && videoCh->assembly)
+        IHS_FrameTicketVideoDecodeStage(videoCh->assembly, true);
     return result;
 }
