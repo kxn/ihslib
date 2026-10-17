@@ -99,10 +99,14 @@ static void ChannelAudioDeinit(IHS_SessionChannel *channel) {
 static bool DataStart(struct IHS_SessionChannel *channel) {
     ChannelAudio *audioCh = (ChannelAudio *)channel;
     IHS_Session *session = channel->session;
+    const IHS_StreamAudioCallbacks *callbacks = session->callbacks.audio;
+    /* BStartAudioStream precedes the Raw/Opus factory even for codec=None. */
+    if (callbacks && callbacks->prepare &&
+        callbacks->prepare(session, &audioCh->config, session->callbackContexts.audio) != 0)
+        return false;
     if (audioCh->config.codec != IHS_StreamAudioCodecRaw &&
         audioCh->config.codec != IHS_StreamAudioCodecOpus)
         return false; /* Original factory leaves decoder null for other codecs. */
-    const IHS_StreamAudioCallbacks *callbacks = session->callbacks.audio;
     if (!callbacks || !callbacks->start)
         return true;
     return callbacks->start(session, &audioCh->config, session->callbackContexts.audio) == 0;

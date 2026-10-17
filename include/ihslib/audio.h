@@ -77,6 +77,15 @@ typedef struct IHS_StreamAudioCallbacks {
      * IDs allow the application decoder to reproduce official Opus PLC/FEC. */
     int (*submitFrame)(IHS_Session *session, const IHS_StreamAudioFrameInfo *info,
                        IHS_Buffer *data, void *context);
+
+    /* Optional player/device stage. Runs synchronously before codec factory dispatch,
+     * including unsupported codecs. Nonzero skips decoder creation; the player
+     * owns any retained device/jitter state until the next prepare or its own
+     * shutdown. When present, start/stop manage the decoder only; stop follows
+     * worker join/purge and must preserve the player's queued audio tail.
+     * Without prepare, the legacy combined start/stop contract is retained.
+     * Zero-initialize this struct and rebuild callers with this header. */
+    int (*prepare)(IHS_Session *session, const IHS_StreamAudioConfig *config, void *context);
 } IHS_StreamAudioCallbacks;
 
 /**
