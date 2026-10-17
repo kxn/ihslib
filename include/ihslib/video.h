@@ -69,6 +69,9 @@ typedef enum IHS_StreamVideoSubmitResult {
     /* Official AVCodec can request a reset after send failure AND report
      * DataLost after receive failure during the same synchronous submission. */
     IHS_StreamVideoSubmitResetAndReportLost = 3,
+    /* Bit to combine with Reset for AVCodec send EIO. Directly set config
+     * field 7 false before reset; no config delegate, save or message 99. */
+    IHS_StreamVideoSubmitDisableHardware = 4,
     IHS_StreamVideoSubmitError = -1,
 } IHS_StreamVideoSubmitResult;
 
@@ -98,6 +101,9 @@ typedef struct IHS_VideoEpochInfo {
  * No ownership or background use of session is transferred to the backend. */
 bool IHS_SessionVideoDecodeFeedback(IHS_Session *, const IHS_VideoEpochInfo *,
                                     IHS_StreamVideoSubmitResult);
+/* Effective config field 7, including its true default. Backend selection
+ * reads this again for every epoch, including actor-owned decoder rebuilds. */
+bool IHS_SessionVideoHardwareDecodingEnabled(IHS_Session *);
 
 /* Set before starting session workers. Identity cannot be reassigned. */
 bool IHS_SessionSetVideoTrackingIdentity(IHS_Session *, uint64_t session_id);

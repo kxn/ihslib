@@ -179,6 +179,7 @@ void IHS_SessionNotifyDisconnected(IHS_Session *session);
 void IHS_SessionClientTransportClosed(IHS_Session *session);
 void IHS_SessionClientStopStreaming(IHS_Session *session);
 CStreamingClientConfig *IHS_SessionClientConfigCopy(IHS_Session *session);
+bool IHS_SessionClientConfigDisableHardware(IHS_Session *session);
 bool IHS_SessionClientConfigStore(IHS_Session *session, const CStreamingClientConfig *config);
 bool IHS_SessionClientConfigApply(IHS_Session *session, const CStreamingClientConfig *config,
                                   bool localOnly);

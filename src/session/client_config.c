@@ -1,9 +1,36 @@
 /* Official client: SetStreamingClientConfig 0x7b01c4, incoming 0x7af08c.
  * A config is a complete protobuf value, including presence/unknown fields. */
 #include "session_pri.h"
+#include "ihslib/video.h"
 #include <stdlib.h>
 
 static const CStreamingClientConfig defaults = CSTREAMING_CLIENT_CONFIG__INIT;
+
+bool IHS_SessionVideoHardwareDecodingEnabled(IHS_Session *s) {
+    if (!s) return false;
+    IHS_BaseLock(&s->base);
+    bool enabled = (s->clientConfig ? s->clientConfig : &defaults)->enable_hardware_decoding;
+    IHS_BaseUnlock(&s->base);
+    return enabled;
+}
+
+bool IHS_SessionClientConfigDisableHardware(IHS_Session *s) {
+    IHS_BaseLock(&s->base);
+    /* Production negotiation already owns the complete value. The lazy default
+     * also supports a standalone decoder before an explicit config is stored. */
+    if (!s->clientConfig)
+        s->clientConfig = cstreaming_client_config__unpack(NULL, 0, NULL);
+    bool ok = s->clientConfig != NULL;
+    if (ok) {
+        /* Original Linux FinalDecode 3245da/3245e4: protobuf has bit 28/value.
+         * Bypass Apply's delegate/save/99 and preserve all other fields.
+         * Actor joins are outside Base (protocol reference §95). */
+        s->clientConfig->has_enable_hardware_decoding = true;
+        s->clientConfig->enable_hardware_decoding = false;
+    }
+    IHS_BaseUnlock(&s->base);
+    return ok;
+}
 
 static uint8_t *Pack(const CStreamingClientConfig *config, size_t *size) {
     *size = cstreaming_client_config__get_packed_size(config);
