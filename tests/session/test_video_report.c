@@ -1,8 +1,9 @@
-/* Run the channel's real report callback with a controlled clock schedule;
+/* Run real session-stage reports alongside a video worker;
  * serialize and unpack every attempted wire message at the queue boundary. */
 #include "ihs_timer.h"
 #include "ihslib.h"
 #include "session/channels/channel.h"
+#include "session/channels/ch_control.h"
 #include "session/channels/video/ch_data_video.h"
 #include "session/frame_stats.h"
 #include "session/session_pri.h"
@@ -15,9 +16,6 @@
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ready = PTHREAD_COND_INITIALIZER;
 static bool started;
-static _Thread_local bool videoWorker;
-static IHS_TimerRunFunction *reportRun;
-static void *reportContext;
 static unsigned sends;
 static IHS_Session *activeSession;
 
@@ -30,11 +28,7 @@ bool __real_IHS_SessionChannelStatsSend(IHS_SessionChannel *, EStreamStatsMessag
 IHS_TimerTask *__wrap_IHS_TimerTaskStart(IHS_Timer *timer, IHS_TimerRunFunction *run,
                                          IHS_TimerEndFunction *end, uint64_t timeout,
                                          void *context) {
-    if (videoWorker && timeout == 1000) {
-        reportRun = run;
-        reportContext = context;
-        timeout = 60000; /* test drives report synchronously; CTest timeout < 60 s */
-    }
+    assert(timeout != 1000); /* only the session stage may trigger reports */
     return __real_IHS_TimerTaskStart(timer, run, end, timeout, context);
 }
 bool __wrap_IHS_SessionSendControlMessage(IHS_Session *session, EStreamControlMessage type,
@@ -104,7 +98,6 @@ static int on_start(IHS_Session *session, const IHS_StreamVideoConfig *config, v
     (void)session;
     (void)config;
     (void)context;
-    videoWorker = true;
     return 0;
 }
 static void on_stop(IHS_Session *session, void *context) {
@@ -127,28 +120,35 @@ int main(void) {
     while (!started)
         pthread_cond_wait(&ready, &lock);
     pthread_mutex_unlock(&lock);
-    assert(reportRun);
+    activeSession->state.connectionState = IHS_SessionConnectionStateStarting;
+    uint32_t tick = 1000000;
+    IHS_SessionChannelControlUpdateStage(activeSession->channels[1], tick);
     receive_frame(1);
-    assert(reportRun(0, reportContext) == 1000 && sends == 1);
+    IHS_SessionChannelControlUpdateStage(activeSession->channels[1], tick += 65537);
+    assert(sends == 1);
     assert(activeSession->frameStats->lastQueuedFrameId == 0);
     assert(!activeSession->frameStats->reportPending);
-    assert(reportRun(1, reportContext) == 1000 && sends == 2);
+    IHS_SessionChannelControlUpdateStage(activeSession->channels[1], tick += 65537);
+    assert(sends == 2);
     assert(activeSession->frameStats->lastQueuedFrameId == 2);
-    assert(reportRun(2, reportContext) == 1000 && sends == 2);
+    IHS_SessionChannelControlUpdateStage(activeSession->channels[1], tick += 65537);
+    assert(sends == 2);
     receive_frame(3);
-    assert(reportRun(3, reportContext) == 1000 && sends == 3);
+    IHS_SessionChannelControlUpdateStage(activeSession->channels[1], tick += 65537);
+    assert(sends == 3);
     assert(!activeSession->frameStats->reportPending);
-    assert(reportRun(4, reportContext) == 1000 && sends == 3);
-    /* Channel teardown also frees a captured, not-yet-attempted snapshot. */
+    IHS_SessionChannelControlUpdateStage(activeSession->channels[1], tick += 65537);
+    assert(sends == 3);
+    /* Video teardown cannot cancel a session-owned consumer borrow. */
     receive_frame(4);
     const IHS_FrameStatsReport *borrowed = IHS_FrameStatsReportBegin(activeSession->frameStats);
     assert(borrowed && borrowed->count == 1);
     uint64_t abandonedSerial = borrowed->serial;
     IHS_SessionChannelStop(channel);
     IHS_SessionChannelDestroy(channel);
-    assert(!activeSession->frameStats->reportPending);
-    assert(activeSession->frameStats->closedUnsentFrames == 1);
-    assert(!IHS_FrameStatsReportFinish(activeSession->frameStats, abandonedSerial, true));
+    assert(activeSession->frameStats->reportPending);
+    assert(borrowed->count == 1 && borrowed->frames[0].frameId == 4);
+    assert(IHS_FrameStatsReportFinish(activeSession->frameStats, abandonedSerial, false));
     assert(!IHS_FrameStatsReportBegin(activeSession->frameStats));
     IHS_SessionDestroy(activeSession);
     IHS_Quit();

@@ -32,6 +32,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(ihstest_negotiation_stage_worker PRIVATE -Wl,--wrap=IHS_BaseSend
         -Wl,--wrap=IHS_UDPSocketReceive -Wl,--wrap=IHS_SessionPacketTimestamp)
     set_tests_properties(negotiation_stage_worker PROPERTIES TIMEOUT 20)
+    add_executable(ihs-frame-events-loop-oracle frame_events_loop_oracle.c)
+    target_include_directories(ihs-frame-events-loop-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-frame-events-loop-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-frame-events-loop-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-frame-events-loop-oracle PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
+        -Wl,--wrap=IHS_SessionSendFrameEvents -Wl,--wrap=IHS_SessionChannelQueueFrameResult)
     add_executable(ihs-negotiation-stage-oracle negotiation_stage_oracle.c)
     target_include_directories(ihs-negotiation-stage-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-negotiation-stage-oracle PRIVATE ihs-test-session ihslib)
@@ -88,8 +94,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         -Wl,--wrap=calloc
         -Wl,--wrap=malloc
         -Wl,--wrap=IHS_SessionSendControlMessage
-        -Wl,--wrap=IHS_TimerTaskStart
-        -Wl,--wrap=IHS_TimerTaskStopImmediate)
+        -Wl,--wrap=IHS_TimerTaskStart)
     set_tests_properties(video_start_lifetime PROPERTIES TIMEOUT 20)
 endif()
 

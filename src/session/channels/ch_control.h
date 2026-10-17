@@ -50,6 +50,7 @@ typedef struct IHS_SessionChannelControl {
     uint64_t hidCoalesced;
     uint64_t hidSent;
     uint32_t keepAliveTimestamp; /* RX update ticks, not a millisecond timer. */
+    uint32_t frameEventsTimestamp;
 } IHS_SessionChannelControl;
 
 IHS_SessionChannel *IHS_SessionChannelControlCreate(IHS_Session *session);

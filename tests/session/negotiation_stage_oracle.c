@@ -187,10 +187,11 @@ static void report(void) {
     IHS_SessionGetStreamingClientConfig(s, p, n);
     encoded = hex(p, n);
     free(p);
-    printf("],\"sequence\":%llu,\"keepalive_time\":%u,\"client_config\":\"%s\","
+    printf("],\"sequence\":%llu,\"keepalive_time\":%u,\"frame_events_time\":%u,\"client_config\":\"%s\","
            "\"connected\":%u,\"priorities\":[%d,%d]}\n",
            (unsigned long long)((IHS_SessionChannelControl *)s->channels[1])->sendEncryptSequence,
-           ((IHS_SessionChannelControl *)s->channels[1])->keepAliveTimestamp, encoded, connected,
+           ((IHS_SessionChannelControl *)s->channels[1])->keepAliveTimestamp,
+           ((IHS_SessionChannelControl *)s->channels[1])->frameEventsTimestamp, encoded, connected,
            s->outgoing.priority[1], s->outgoing.priority[2]);
     free(encoded);
     connected = 0;

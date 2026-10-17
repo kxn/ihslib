@@ -327,6 +327,7 @@ void IHS_SessionChannelControlUpdateStage(IHS_SessionChannel *channel, uint32_t 
         IHS_OutgoingPriority(session, 1, 2);
         IHS_OutgoingPriority(session, 2, -1);
         control->keepAliveTimestamp = now;
+        control->frameEventsTimestamp = now;
         IHS_SendAdmission result = IHS_SessionChannelControlCompleteLocked(control);
         IHS_MutexUnlock(control->sendLock);
         /* Closing may stop workers that also send control. Never do so while
@@ -338,9 +339,25 @@ void IHS_SessionChannelControlUpdateStage(IHS_SessionChannel *channel, uint32_t 
             session->callbacks.session->connected(session, session->callbackContexts.session);
         break; /* The same update must not also run Streaming. */
     }
-    case IHS_SessionConnectionStateConnected:
+    case IHS_SessionConnectionStateConnected: {
+        IHS_SessionChannelControl *control = (void *)channel;
+        uint32_t last = control->frameEventsTimestamp;
+        /* Original HandleStreaming 0x7a717c–0x7a71ac, protocol §55.
+         * Match sub/cmn/b.mi, including zero and signed half-domain edges.
+         * This consumer must run outside the control producer lock: a local
+         * StatsSend failure can synchronously close the session. */
+        if (!last || (int32_t)(last - now + 0x10000u) < 0) {
+            if (session->frameStats) {
+                IHS_SessionSendFrameEvents(session, &session->frameStats->messageScratch);
+                if (session->frameTracker)
+                    IHS_FrameStatsSettleTracked(session->frameStats, session->frameTracker,
+                                               IHS_TimerNow() * 1000);
+            }
+            control->frameEventsTimestamp = now; /* attempt, even with no frames */
+        }
         IHS_SessionChannelControlUpdateHeartbeat(channel, now);
         break;
+    }
     default:
         break;
     }

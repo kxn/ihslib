@@ -2,6 +2,7 @@
  * Real StatsSend triggers synchronous disconnect after rejected preparation. */
 #include "ihslib.h"
 #include "session/frame_stats.h"
+#include "session/channels/ch_control.h"
 #include "test_session.h"
 #include <assert.h>
 #include <stdlib.h>
@@ -33,15 +34,16 @@ int main(void) {
     agg->reportSerial = UINT64_MAX;
     IHS_FrameStatsRecordReceived(agg, 1, 100, 110, 120, 20, 0);
     IHS_FrameStatsRecordCompleteAt(agg, 1, IHS_VideoFrameResultDisplayed, 130);
-    IHS_FrameStatsMessage *scratch = calloc(1, sizeof(*scratch));
-    assert(scratch);
-    assert(IHS_SessionSendFrameEvents(active, scratch));
+    IHS_SessionChannelControl *control = (void *)active->channels[1];
+    uint32_t now = IHS_SessionPacketTimestamp();
+    control->keepAliveTimestamp = now;
+    IHS_SessionChannelControlUpdateStage(active->channels[1], now);
     assert(attempts == 1 && active->transport.shutdown);
+    assert(control->frameEventsTimestamp == now);
     assert(!agg->reportPending && agg->lastQueuedFrameId == 0);
     assert(agg->accumulator.slots[6].count == 1);
     assert(agg->accumulator.slots[6].samples[0] == 42);
     assert(!IHS_FrameStatsReportBegin(agg)); /* failed report is never replayed */
-    free(scratch);
     IHS_SessionDestroy(active);
     IHS_Quit();
     return 0;

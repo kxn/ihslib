@@ -110,6 +110,9 @@ typedef struct IHS_FrameStatsAggregator {
     IHS_Mutex *lock;
     IHS_Mutex *collectorLock;
     struct IHS_TrackedFrame *trackedScratch;
+    /* Session/RX-owned consumer scratch; allocated with the aggregator before
+     * workers start, released only after all workers have joined. */
+    IHS_FrameStatsMessage messageScratch;
     IHS_FrameStatsSlot ring[IHS_FRAME_STATS_RING_SIZE];
     IHS_FrameStatsAccumulator accumulator;
     uint16_t lastSentFrameId;

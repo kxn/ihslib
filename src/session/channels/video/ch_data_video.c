@@ -45,9 +45,6 @@
 #include "frame_h264.h"
 #include "frame_hevc.h"
 
-/* Reserved once per channel, before registering the report timer. */
-typedef IHS_FrameStatsMessage VideoReportScratch;
-
 typedef struct IHS_SessionChannelVideo {
     IHS_SessionChannelData base;
     IHS_StreamVideoConfig config;
@@ -57,7 +54,6 @@ typedef struct IHS_SessionChannelVideo {
         uint32_t lastRecoveryRequest;
         bool waitingKeyFrame, syncingBacklog;
         int32_t overflowFrameSpan;
-        uint64_t lastStatsTime;
         bool frameStarted;
         bool frameFinished;
     } states;
@@ -67,10 +63,7 @@ typedef struct IHS_SessionChannelVideo {
         IHS_Buffer buffer;
         IHS_StreamVideoFrameFlag flags;
     } frame;
-    IHS_TimerTask *statsTimer;
-    atomic_uint_fast64_t frameCounter;
     bool appStarted;
-    VideoReportScratch *reportScratch;
     IHS_VideoEpochInfo epoch;
     IHS_FrameTicket *incoming, *assembly;
     uint16_t assemblyId;
@@ -103,8 +96,6 @@ static bool AppendToFrameBuffer(IHS_SessionChannelVideo *channel, const IHS_Buff
 
 static IHS_StreamVideoSubmitResult SubmitFrame(IHS_SessionChannel *channel, uint16_t frameId,
                                                IHS_Buffer *data, IHS_StreamVideoFrameFlag flags);
-
-static uint64_t ReportVideoStats(int runCount, void *data);
 
 /**
  * Append one data frame into partial video frames list
@@ -178,7 +169,6 @@ static void ChannelVideoInit(IHS_SessionChannel *channel, const void *config) {
         return;
     }
     IHS_VideoPartialFramesInit(&videoCh->frame.partial);
-    atomic_init(&videoCh->frameCounter, 0);
     videoCh->tracked =
         channel->session->callbacks.video && channel->session->callbacks.video->startTracked;
     videoCh->epoch.session_id = channel->session->videoTrackingId;
@@ -230,17 +220,7 @@ static bool DataStart(IHS_SessionChannel *channel) {
     if (session->clientCapabilities.decoderThreads)
         PROTOBUF_C_SET_VALUE(message, threads, session->clientCapabilities.decoderThreads);
 
-    videoCh->reportScratch = calloc(1, sizeof(*videoCh->reportScratch));
-    if (!videoCh->reportScratch) {
-        DataStop(channel);
-        return false;
-    }
-    videoCh->states.lastStatsTime = IHS_TimerNow();
-    videoCh->statsTimer =
-        IHS_TimerTaskStart(session->timers, ReportVideoStats, NULL, 1000, videoCh);
-
-    if (!videoCh->statsTimer ||
-        !IHS_SessionSendControlMessage(session, k_EStreamControlVideoDecoderInfo,
+    if (!IHS_SessionSendControlMessage(session, k_EStreamControlVideoDecoderInfo,
                                        (const ProtobufCMessage *)&message)) {
         /* DataThreadWorker skips stop when start fails. Undo every successful
          * stage here, before channel/session destruction can begin. */
@@ -359,7 +339,6 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
         videoCh->frame.flags = 0;
         videoCh->states.frameFinished = false;
         videoCh->states.frameStarted = false;
-        atomic_fetch_add_explicit(&videoCh->frameCounter, 1, memory_order_relaxed);
         if (result == IHS_StreamVideoSubmitError)
             break;
     }
@@ -380,18 +359,10 @@ unlock:
 static void DataStop(IHS_SessionChannel *channel) {
     IHS_Session *session = channel->session;
     IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
-    if (videoCh->statsTimer != NULL) {
-        IHS_TimerTaskStopImmediate(videoCh->statsTimer);
-        videoCh->statsTimer = NULL;
-    }
     const IHS_StreamVideoCallbacks *callbacks = session->callbacks.video;
-    free(videoCh->reportScratch);
-    videoCh->reportScratch = NULL;
     if (!videoCh->appStarted)
         return;
     videoCh->appStarted = false;
-    if (session->frameStats)
-        IHS_FrameStatsReportAbandon(session->frameStats);
     if (videoCh->tracked) {
         if (session->frameStats)
             IHS_FrameStatsCollectTracked(session->frameStats, session->frameTracker);
@@ -621,32 +592,4 @@ static IHS_StreamVideoSubmitResult SubmitFrame(IHS_SessionChannel *channel, uint
         IHS_SessionDisconnect(session);
     }
     return result;
-}
-
-static uint64_t ReportVideoStats(int runCount, void *data) {
-    (void)runCount;
-    IHS_SessionChannel *channel = data;
-    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
-    IHS_Session *session = channel->session;
-
-    /* Timer callbacks run under timer locks. Never wait on the receive mutex:
-     * submit may wait for decoding/GPU work while holding that mutex.
-     * lastStatsTime belongs to this timer after DataStart publishes it. */
-    uint64_t now = IHS_TimerNow();
-    uint64_t elapsedMs = now - videoCh->states.lastStatsTime;
-    uint64_t frames = atomic_exchange_explicit(&videoCh->frameCounter, 0, memory_order_relaxed);
-    double fps = elapsedMs > 0 ? (frames * 1000.0) / (double)elapsedMs : 0.0;
-    IHS_SessionLog(channel->session, IHS_LogLevelVerbose, "Video", "%.2f FPS", fps);
-    videoCh->states.lastStatsTime = now;
-
-    /* Local report producer. The detail encoder follows original Save (protocol
-     * reference §52); this timer/tracked collection remain separate from original OnThink.
-     * Snapshot data retires once per attempt, independent of enqueue success. */
-    if (session->frameStats == NULL) {
-        return 1000;
-    }
-    IHS_SessionSendFrameEvents(session, videoCh->reportScratch);
-    if (videoCh->tracked)
-        IHS_FrameStatsSettleTracked(session->frameStats, session->frameTracker, now * 1000);
-    return 1000;
 }
