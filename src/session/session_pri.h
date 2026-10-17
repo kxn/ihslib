@@ -84,6 +84,11 @@ struct IHS_Session {
     IHS_Base base;
     IHS_SessionInfo info;
     IHS_SessionState state;
+    /* Receive-worker-owned connection activity (16.16 seconds). The public
+     * pause request is applied on that owner before touching channel objects. */
+    atomic_bool pauseRequested, disconnectRequested;
+    bool clientPaused, connectionPaused, inactivityClosing;
+    uint32_t lastPacketReceived;
     /* Negotiated codec preference and capture size; StartVideoData supplies
      * the actual decoder configuration. */
     int negotiatedVideoCodec;
@@ -159,3 +164,6 @@ bool IHS_SessionStreaming(IHS_Session *session);
 void IHS_SessionHostStopped(IHS_Session *session);
 
 void IHS_SessionDrainPendingData(IHS_Session *session, IHS_SessionChannel *channel);
+
+/* Internal owner tick; explicit timestamp also permits deterministic tests. */
+void IHS_SessionActivityUpdate(IHS_Session *session, uint32_t now);

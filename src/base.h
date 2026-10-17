@@ -48,6 +48,9 @@ typedef struct IHS_BaseRunCallbacks {
      * @param context
      */
     void (*finalized)(IHS_Base *base, void *context);
+
+    /* Optional owner-worker tick, including receive timeouts. No lock held. */
+    void (*update)(IHS_Base *base, void *context);
 } IHS_BaseRunCallbacks;
 
 struct IHS_Base {

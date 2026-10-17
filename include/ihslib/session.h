@@ -154,6 +154,11 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig, const IHS_S
  */
 bool IHS_SessionConnect(IHS_Session *session);
 
+/** Request whole-client Pause/Resume on the receive owner. This is independent
+ * of the host stopping video. Resume resets activity and requests fresh data;
+ * existing workers are used, without creating or detaching another thread. */
+void IHS_SessionSetPaused(IHS_Session *session, bool paused);
+
 /** Select an external datagram transport before the first Connect. NULL resets
  * to ordinary UDP. No socket is opened for an external transport. Receive uses
  * the sessionInfo address as the logical peer; SNS route changes do not change
