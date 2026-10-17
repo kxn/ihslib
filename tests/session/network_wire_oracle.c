@@ -19,7 +19,7 @@ static IHS_Session *session;
 static uint32_t now;
 static bool receiving, sending;
 static unsigned resultCode, entryCount, writeCount, entries[512];
-static bool reportMetadata, lossMode, videoMode, cycleMode, networkMode;
+static bool reportMetadata, lossMode, videoMode, cycleMode, networkMode, deadlineMode;
 static IHS_SessionChannelData mediaStorage, *media = &mediaStorage;
 static unsigned deliveredCount;
 static char *delivered[256];
@@ -69,6 +69,21 @@ static char *initialWires[256];
 static unsigned initialWireCount;
 static struct { unsigned kind, channel, id; } txSeeds[256];
 static unsigned txSeedCount;
+static struct { unsigned state, local, peer, tick; } notices[4];
+static unsigned noticeCount;
+uint8_t __wrap_IHS_SessionNextConnectionId(void) { return 12; }
+static void disconnected(IHS_Session *s, void *context) {
+    (void)context; assert(noticeCount < 4);
+    notices[noticeCount].state=IHS_SessionTransportState(s);
+    notices[noticeCount].local=s->state.connectionId;
+    notices[noticeCount].peer=s->state.hostConnectionId;
+    notices[noticeCount++].tick=now;
+}
+static void save_initial_wires(void) {
+    for (unsigned i=0;i<cycleWireCount;++i) { assert(initialWireCount < 256); initialWires[initialWireCount++]=cycleWires[i]; }
+    cycleWireCount=writeCount=entryCount=0;
+}
+
 static void report_tx(void) {
     printf(",\"tx\":{\"windows\":[");
     for (unsigned i = 0; i < txSeedCount; ++i) {
@@ -85,10 +100,14 @@ static void report_tx(void) {
                 p ? p->packet.header.retransmitCount : 0, p ? p->packet.header.sendTimestamp : 0);
         printf("}");
     }
-    printf("],\"order\":[");
-    for (unsigned i=0; i<session->outgoing.count; ++i)
-        printf("%s%u", i ? "," : "", session->outgoing.order[i]);
-    printf("],\"rotation\":%u,\"blocked\":%s,\"deadlines\":[%u,%u]},\"initial_wires\":[", session->outgoing.rotation,
+    printf("]");
+    if (!deadlineMode) {
+        printf(",\"order\":[");
+        for (unsigned i=0; i<session->outgoing.count; ++i)
+            printf("%s%u", i ? "," : "", session->outgoing.order[i]);
+        printf("]");
+    }
+    printf(",\"rotation\":%u,\"blocked\":%s,\"deadlines\":[%u,%u]},\"initial_wires\":[", session->outgoing.rotation,
         session->outgoing.blocked ? "true" : "false", session->outgoing.deadline[0], session->outgoing.deadline[1]);
     for (unsigned i=0; i<initialWireCount; ++i) {
         printf("%s\"%s\"", i ? "," : "", initialWires[i]); free(initialWires[i]);
@@ -245,6 +264,13 @@ static void report(void) {
             session->clock.minRTTUpdate, (uint32_t)session->clock.offset);
     }
     if (networkMode) report_tx();
+    if (deadlineMode) {
+        printf(",\"lifecycle\":{\"state\":%u,\"local\":%u,\"peer\":%u,\"notices\":[", IHS_SessionTransportState(session),
+            (unsigned)session->state.connectionId,(unsigned)session->state.hostConnectionId);
+        for (unsigned i=0;i<noticeCount;++i)
+            printf("%s{\"state\":%u,\"local\":%u,\"peer\":%u,\"tick\":%u}", i ? "," : "", notices[i].state,notices[i].local,notices[i].peer,notices[i].tick);
+        noticeCount=0; printf("]}");
+    }
     if (reportMetadata) {
         printf(",\"frames\":[");
         for (unsigned i = 0; i < frameCount; ++i)
@@ -271,7 +297,8 @@ static IHS_SessionPacket packet(unsigned type, unsigned channel, unsigned crc,
 int main(int argc, char **argv) {
     assert(argc >= 3 && argc <= 6);
     videoMode = argc == 6 && !strcmp(argv[5], "video");
-    networkMode = argc == 6 && !strcmp(argv[5], "network");
+    deadlineMode = argc == 6 && !strcmp(argv[5], "deadline");
+    networkMode = deadlineMode || (argc == 6 && !strcmp(argv[5], "network"));
     cycleMode = networkMode || (argc == 6 && !strcmp(argv[5], "cycle"));
     lossMode = videoMode || cycleMode || (argc == 6 && !strcmp(argv[5], "loss"));
     IHS_Init();
@@ -303,6 +330,21 @@ int main(int argc, char **argv) {
     char line[8192];
     while (fgets(line, sizeof(line), stdin)) {
         unsigned type, ch, crc, source, dest, size, bad;
+        if (deadlineMode && line[0] == 'L') {
+            unsigned last,paused;
+            assert(sscanf(line,"L %u %u",&last,&paused)==2 && paused<2);
+            session->transport.active=true;
+            session->transport.lastReceive=last;
+            session->transport.clientPaused=session->transport.connectionPaused=paused;
+            session->transport.appliedGeneration=paused;
+            atomic_store(&session->transport.lifecycleGeneration,paused);
+            static const IHS_StreamSessionCallbacks cb={.disconnected=disconnected};
+            IHS_SessionSetSessionCallbacks(session,&cb,NULL);
+            continue;
+        }
+        if (deadlineMode && line[0] == 'D') {
+            IHS_SessionTransportDisconnect(session); save_initial_wires(); continue;
+        }
         if (networkMode && line[0] == 'I') {
             unsigned cls, rate, deadline;
             assert(sscanf(line, "I %u %u %u", &cls, &rate, &deadline) == 3 && cls < 2);
@@ -323,8 +365,7 @@ int main(int argc, char **argv) {
             txSeeds[txSeedCount].kind=type; txSeeds[txSeedCount].channel=ch; txSeeds[txSeedCount++].id=p.header.packetId;
             assert(IHS_SessionDispatchQueued(session, false));
             IHS_SessionPacketClear(&p, true);
-            for (unsigned i=0;i<cycleWireCount;++i) { assert(initialWireCount < 256); initialWires[initialWireCount++]=cycleWires[i]; }
-            cycleWireCount=writeCount=entryCount=0;
+            save_initial_wires();
             continue;
         }
         if (line[0] == 'Q') {
@@ -342,7 +383,7 @@ int main(int argc, char **argv) {
             session->outgoing.blocked = blocked;
             if (!initializedCycle) {
                 initializedCycle = true;
-                session->transport.lastReceive = now;
+                if (!deadlineMode) session->transport.lastReceive = now;
                 session->clock.lastEcho = now; session->clock.haveEcho = true;
             }
             for (unsigned n = 0; n < cycleCount; ++n) {
@@ -361,7 +402,8 @@ int main(int argc, char **argv) {
             }
             IHS_UDPPacket rx = {.buffer = IHS_BUFFER_INIT(2048,2048)};
             receiving = true;
-            assert(session->base.callbacks.run->receiveCycle(&session->base, NULL, &rx));
+            bool keepRunning=session->base.callbacks.run->receiveCycle(&session->base, NULL, &rx);
+            assert(deadlineMode || keepRunning);
             receiving = false;
             for (;;) {
                 IHS_SessionFrame frame = {0}; uint16_t missing;

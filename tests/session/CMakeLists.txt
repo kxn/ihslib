@@ -61,7 +61,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_include_directories(ihs-network-wire-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-network-wire-oracle PRIVATE ihs-test-session ihslib)
     target_compile_options(ihs-network-wire-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
-    target_link_options(ihs-network-wire-oracle PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
+    target_link_options(ihs-network-wire-oracle PRIVATE -Wl,--wrap=IHS_SessionNextConnectionId
+        -Wl,--wrap=IHS_SessionPacketTimestamp
         -Wl,--wrap=IHS_BaseSend -Wl,--wrap=IHS_SessionPacketParse
         -Wl,--wrap=IHS_SessionDeliverReliableFrame
         -Wl,--wrap=IHS_SessionChannelDataInit

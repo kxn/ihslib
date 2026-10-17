@@ -91,7 +91,7 @@ static void ChangeForeground(IHS_Session *s, bool foreground) {
     }
 }
 
-void IHS_SessionTransportUpdate(IHS_Session *s, uint32_t now) {
+void IHS_SessionTransportPrepareUpdate(IHS_Session *s, uint32_t now) {
     unsigned requested = atomic_load(&s->transport.lifecycleGeneration);
     /* Bounded per tick while preserving every queued edge for later ticks. */
     for (unsigned count = 0; count < 32 && s->transport.appliedGeneration != requested; ++count) {
@@ -115,6 +115,15 @@ void IHS_SessionTransportUpdate(IHS_Session *s, uint32_t now) {
         IHS_SessionTransportSendConnect(s);
         s->transport.lastConnect = now;
     }
+    /* Connected channel work belongs between this prefix and the deadline
+     * check: original Connection::Update 7fc140..7fc43c. */
+}
+
+void IHS_SessionTransportCheckTimeout(IHS_Session *s, uint32_t now) {
+    IHS_TransportState state = IHS_SessionTransportState(s);
+    if (!s->transport.active || s->transport.timedOut || s->transport.detached ||
+        (state != IHS_TransportConnecting && state != IHS_TransportConnected))
+        return;
     uint32_t timeout = (s->transport.connectionPaused ? 180u : 15u) * 65536u;
     if ((uint32_t)(now - s->transport.lastReceive) >= timeout) {
         s->transport.timedOut = true;
@@ -124,4 +133,11 @@ void IHS_SessionTransportUpdate(IHS_Session *s, uint32_t now) {
         /* A local timeout is not evidence that the host stopped the game. */
         IHS_SessionTransportDisconnect(s);
     }
+}
+
+void IHS_SessionTransportUpdate(IHS_Session *s, uint32_t now) {
+    /* Component boundary without channel work. Production SessionUpdateAt
+     * inserts NetworkUpdateAt between these two connection-level steps. */
+    IHS_SessionTransportPrepareUpdate(s, now);
+    IHS_SessionTransportCheckTimeout(s, now);
 }

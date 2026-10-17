@@ -175,6 +175,9 @@ CStreamingClientConfig *IHS_SessionClientConfigCopy(IHS_Session *session);
 bool IHS_SessionClientConfigStore(IHS_Session *session, const CStreamingClientConfig *config);
 bool IHS_SessionClientConfigApply(IHS_Session *session, const CStreamingClientConfig *config,
                                   bool localOnly);
+void IHS_SessionTransportPrepareUpdate(IHS_Session *session, uint32_t now);
+void IHS_SessionTransportCheckTimeout(IHS_Session *session, uint32_t now);
+/* Component prefix + deadline, without intervening channel work. */
 void IHS_SessionTransportUpdate(IHS_Session *session, uint32_t now);
 
 bool IHS_SessionSendPacket(IHS_Session *session, IHS_SessionPacket *packet);

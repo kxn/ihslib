@@ -730,13 +730,17 @@ static void SessionUpdate(IHS_Base *base, void *context) {
 static void SessionUpdateAt(IHS_Base *base, void *context, uint32_t tick) {
     (void)context;
     IHS_Session *session = (IHS_Session *)base;
-    IHS_SessionTransportUpdate(session, tick);
+    IHS_SessionTransportPrepareUpdate(session, tick);
     IHS_BaseLock(base);
     bool updateControl = !base->interrupted && !session->transport.detached &&
         IHS_SessionTransportState(session) == IHS_TransportConnected;
     IHS_BaseUnlock(base);
-    if (updateControl) {
+    if (updateControl)
         IHS_SessionNetworkUpdateAt(session, tick);
+    /* Original 7fc43c checks the receive lease after channel RX/feedback/TX,
+     * with the same captured batch tick, before the later client stage. */
+    IHS_SessionTransportCheckTimeout(session, tick);
+    if (updateControl) {
         /* Official OnThink consumes ordinary control only after network
          * updates, outside the network lock; handlers can join consumers. */
         if (!base->interrupted && !session->transport.detached)
