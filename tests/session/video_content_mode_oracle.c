@@ -107,7 +107,7 @@ static void feed(IHS_SessionChannel *ch, unsigned fid, unsigned seq, unsigned fl
 }
 int main(int argc, char **argv) {
     bool capacity = argc == 2 && !strcmp(argv[1], "--capacity");
-    assert(capacity || argc == 5);
+    assert(capacity || argc == 5 || argc == 6);
     initialBackend = capacity ? true : atoi(argv[1]);
     int initial = capacity ? -1 : atoi(argv[2]);
     ready = capacity ? true : atoi(argv[3]);
@@ -121,7 +121,7 @@ int main(int argc, char **argv) {
                                    .submitTracked = submit, .stopTracked = stop, .flushTracked = flush};
     IHS_SessionSetVideoCallbacks(s, &cb, NULL);
     CStartVideoDataMsg c = CSTART_VIDEO_DATA_MSG__INIT;
-    c.channel = 3; c.codec = k_EStreamVideoCodecH264; c.width = 1280; c.height = 720;
+    c.channel = 3; c.codec = argc == 6 ? atoi(argv[5]) : k_EStreamVideoCodecH264; c.width = 1280; c.height = 720;
     IHS_SessionChannel *ch = IHS_SessionChannelDataVideoCreate(s, &c);
     assert(ch);
     IHS_SessionChannelAdd(s, ch);
@@ -153,9 +153,9 @@ int main(int argc, char **argv) {
         if (line[0] == 'F') {
             unsigned fid, seq, flags;
             assert(sscanf(line, "F %u %u %u %14999s", &fid, &seq, &flags, raw) == 4);
-            size_t len = strlen(raw) / 2;
+            size_t len = !strcmp(raw, "-") ? 0 : strlen(raw) / 2;
             uint8_t bytes[7500];
-            assert(strlen(raw) == 2 * len);
+            assert(!strcmp(raw, "-") || strlen(raw) == 2 * len);
             for (size_t n = 0; n < len; ++n) {
                 unsigned v; assert(sscanf(raw + 2 * n, "%2x", &v) == 1); bytes[n] = v;
             }

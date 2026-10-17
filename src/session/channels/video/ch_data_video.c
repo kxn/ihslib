@@ -65,6 +65,7 @@ typedef struct IHS_SessionChannelVideo {
         IHS_Buffer buffer;
         IHS_StreamVideoFrameFlag flags;
         bool contentMode;
+        bool hasPacketBuffers; /* Source raw owning references, including zero-size packets. */
         /* Pending-reset complete frames retain their ownership until the actor
          * or a key mark purges them. Capacity is a local tracker bound. */
         IHS_FrameTicket *deferred[IHS_FRAME_TRACKER_CAPACITY];
@@ -388,6 +389,7 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
             videoCh->assembly = NULL;
         }
         IHS_BufferClear(&videoCh->frame.buffer, false);
+        videoCh->frame.hasPacketBuffers = false;
         videoCh->frame.flags = 0;
         videoCh->states.frameFinished = false;
         videoCh->states.frameStarted = false;
@@ -629,6 +631,7 @@ static void DiscardPending(IHS_SessionChannelVideo *channel) {
                        "%zu partial frames were cleared", clearedCount);
     }
     channel->frame.flags = 0;
+    channel->frame.hasPacketBuffers = false;
     channel->frame.expectedSubFrameStart = 0;
     channel->states.overflowFrameSpan = 0;
 }
@@ -643,14 +646,21 @@ static bool AppendToFrameBuffer(IHS_SessionChannelVideo *channel, const IHS_Buff
         (header->flags & VideoFrameFlagNeedEscape) ? data->size * 3 / 2 + 5 : data->size;
     if (required > channel->frame.buffer.maxCapacity - channel->frame.buffer.size)
         return false;
+    bool escape = (header->flags & VideoFrameFlagNeedEscape) != 0;
+    /* Original encoded/raw storage cannot be mixed while still pending.
+     * Source asserts 82/191; reject within the port's bounded ownership domain. */
+    if ((escape && channel->frame.hasPacketBuffers) ||
+        (!escape && !channel->frame.hasPacketBuffers && channel->frame.buffer.size))
+        return false;
+    bool appended;
     switch (channel->config.codec) {
     case IHS_StreamVideoCodecH264:
-        IHS_SessionVideoFrameAppendH264(&channel->frame.buffer, IHS_BufferPointer(data), data->size,
-                                        header);
+        appended = IHS_SessionVideoFrameAppendH264(&channel->frame.buffer, IHS_BufferPointer(data),
+                                                  data->size, header);
         break;
     case IHS_StreamVideoCodecHEVC:
-        IHS_SessionVideoFrameAppendHEVC(&channel->frame.buffer, IHS_BufferPointer(data), data->size,
-                                        header);
+        appended = IHS_SessionVideoFrameAppendHEVC(&channel->frame.buffer, IHS_BufferPointer(data),
+                                                  data->size, header);
         break;
     default: {
         IHS_SessionLog(((IHS_SessionChannel *)channel)->session, IHS_LogLevelFatal, "Video",
@@ -658,6 +668,8 @@ static bool AppendToFrameBuffer(IHS_SessionChannelVideo *channel, const IHS_Buff
         abort();
     }
     }
+    if (!appended) return false;
+    if (!escape) channel->frame.hasPacketBuffers = true;
     if (header->flags & VideoFrameFlagKeyFrame) {
         channel->frame.flags |= IHS_StreamVideoFrameKeyFrame;
     }
