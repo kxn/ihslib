@@ -17,7 +17,7 @@
 #include <unistd.h>
 
 static IHS_Session *s;
-static atomic_uint now, work, phase, frames, handshakeId;
+static atomic_uint now, work, phase, frames, handshakeId, postBatchPolls;
 static atomic_bool scripted, handshake, acknowledged;
 static uint32_t start, batch;
 static bool crc;
@@ -29,7 +29,16 @@ static IHS_SessionPacketsWindow *dataWindow;
 bool __real_IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *, IHS_SessionFrame *);
 bool __wrap_IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionFrame *f) {
     bool result = __real_IHS_SessionPacketsWindowPoll(window, f);
-    if (ordinary && window == dataWindow) {
+    if (ordinary && window == dataWindow && atomic_load(&acknowledged)) {
+        /* Poll may retry an empty window within the same cycle, or run in a
+         * later BaseWorker cycle. Only the latter captures the post-drain
+         * clock. Main waits for two later empty polls before teardown. */
+        assert(!result && atomic_load(&phase) == 7 && atomic_load(&now) == batch + 136);
+        if (s->transport.updateTime != batch + 36) {
+            assert(s->transport.updateTime == batch + 136);
+            atomic_fetch_add(&postBatchPolls, 1);
+        }
+    } else if (ordinary && window == dataWindow) {
         assert(atomic_load(&phase) == 7 && atomic_load(&now) == batch + 136);
         assert(s->transport.updateTime == batch + 36);
         if (result) {
@@ -205,6 +214,7 @@ int main(void) {
         atomic_store(&controlAckSeen,false);
         crc=c;start=1000000;batch=start+1000;atomic_store(&now,start);
         atomic_store(&phase,0);atomic_store(&frames,0);atomic_store(&work,0);
+        atomic_store(&postBatchPolls,0);
         atomic_store(&handshake,false);atomic_store(&acknowledged,false);atomic_store(&scripted,true);
         s=IHS_TestSessionCreate();s->outgoing.rate[0]=s->outgoing.rate[1]=0;
         if (ordinary) {
@@ -215,6 +225,10 @@ int main(void) {
         assert(IHS_SessionConnect(s));uint64_t end=IHS_TimerNow()+2000;
         while(!atomic_load(&acknowledged)&&IHS_TimerNow()<end)usleep(1000);
         assert(atomic_load(&acknowledged));
+        if (ordinary) {
+            while (atomic_load(&postBatchPolls) < 2 && IHS_TimerNow() < end) usleep(1000);
+            assert(atomic_load(&postBatchPolls) >= 2);
+        }
         IHS_BaseLock(&s->base);assert(s->networkPackets.lost==(ordinary?0u:1u));
         bool found=false;for(size_t n=0;n<s->networkPackets.queue.count;++n){
             const IHS_NetworkSample *p=&s->networkPackets.queue.data[(s->networkPackets.queue.head+n)&(s->networkPackets.queue.capacity-1)];
