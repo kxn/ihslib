@@ -83,6 +83,10 @@ typedef struct IHS_StreamClientCapabilities {
     IHS_StreamDeviceFormFactor formFactor;
     bool hasSystemCanSuspend;
     bool systemCanSuspend;
+    /* Decoder availability is distinct from the requested HEVC preference.
+     * H264 is required by this library. Unset keeps legacy caller behavior. */
+    bool hasVideoDecoderCapabilities;
+    bool supportsVideoHevc;
 } IHS_StreamClientCapabilities;
 
 /** Set before Connect or creation of data channels. Strings are copied; the

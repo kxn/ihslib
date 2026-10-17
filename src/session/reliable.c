@@ -14,7 +14,7 @@ IHS_ReliableChannel *IHS_SessionReliableGet(IHS_Session *s, uint8_t channel) {
     return &s->reliable[channel];
 }
 static void ReliableDrainFrames(IHS_Session *s, IHS_ReliableChannel *state) {
-    IHS_SessionFrame frame = {.body = IHS_BUFFER_INIT(1024, 1024 * 1024)};
+    IHS_SessionFrame frame = {.body = IHS_BUFFER_INIT(1024, 0)};
     for (;;) {
         IHS_MutexLock(s->reliableLock);
         bool ready = state->framePacketWindow &&
@@ -110,7 +110,7 @@ void IHS_SessionReliableReceived(IHS_Session *session, IHS_SessionPacket *packet
             state->peerReceiveTime = packet->header.receiveTimestamp;
         }
         if (!state->framePacketWindow)
-            state->framePacketWindow = IHS_SessionPacketsWindowCreateReliable(16, 0);
+            state->framePacketWindow = IHS_SessionPacketsWindowCreateReliable(64, 0);
         IHS_SessionPacketsWindow *window = state->framePacketWindow;
         if (window) {
             if ((int16_t)(IHS_SessionPacketsWindowNextNeededPacketId(window) -

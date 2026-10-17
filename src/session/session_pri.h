@@ -105,6 +105,9 @@ struct IHS_Session {
     /* Negotiated codec preference and capture size; StartVideoData supplies
      * the actual decoder configuration. */
     int negotiatedVideoCodec;
+    /* OnNegotiationInit's true-only cached request flags (protocol §48). */
+    bool negotiationRemoteHid, negotiationTouchInput;
+    int32_t hostOsType, hostGamingDeviceType;
     uint32_t captureWidth, captureHeight;
     atomic_bool destroying;
     atomic_bool hostVideoStopped;

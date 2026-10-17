@@ -329,7 +329,7 @@ static void negotiation_capabilities(int preference, unsigned bitrate, int expec
     assert(IHS_SessionFrameDecrypt(s, &q->packet.body, &plain, 0, &sequence) == 0);
     CNegotiationSetConfigMsg *config = cnegotiation_set_config_msg__unpack(NULL, plain.size, IHS_BufferPointer(&plain));
     assert(config && config->config);
-    assert(config->config->has_reliable_data && !config->config->reliable_data);
+    assert(config->config->has_reliable_data && config->config->reliable_data);
     assert(config->config->enable_remote_hid && !config->config->enable_touch_input);
     assert(config->config->selected_video_codec == k_EStreamVideoCodecH264);
     CStreamingClientConfig *client = config->streaming_client_config;

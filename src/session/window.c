@@ -135,9 +135,9 @@ bool IHS_SessionPacketsWindowAdd(IHS_SessionPacketsWindow *window, IHS_SessionPa
         if (required > 16384)
             return true;
         if (required > window->capacity) {
-            unsigned capacity = window->capacity;
+            unsigned capacity = 64;
             while (capacity < required)
-                capacity = capacity > 8192 ? 16384 : capacity * 2;
+                capacity *= 2;
             WindowItem *data = calloc(capacity, sizeof(*data));
             if (!data)
                 return false;
@@ -286,6 +286,12 @@ uint16_t IHS_SessionPacketsWindowAvailable(const IHS_SessionPacketsWindow *windo
 uint16_t IHS_SessionPacketsWindowSize(const IHS_SessionPacketsWindow *window) {
     if (window->tail.pos < 0) {
         return 0;
+    } else if (window->tail.pos + 1 == window->head.pos &&
+               FrameItemIsUsed(&window->data[window->tail.pos])) {
+        /* The same physical cursors represent both empty and a full ring.
+         * The tail is always the highest observed, present packet; after an
+         * emptying poll its slot has been recycled. See protocol §48.1. */
+        return window->capacity;
     } else if (window->tail.pos + 1 >= window->head.pos) {
         /*
          * Head is before tail.pos, just calculate their distance

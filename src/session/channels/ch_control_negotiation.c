@@ -88,6 +88,9 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
     /* An explicitly supplied complete value includes all optional defaults.
      * Only unconfigured legacy callers receive the convenience defaults below. */
     CStreamingClientConfig clientConfig = *retained;
+    /* Official removes the per-session runtime limit before copying SetConfig.
+     * The retained clone still owns this pointer and frees it after sending. */
+    clientConfig.runtime_limit = NULL;
     uint32_t denominator = clientConfig.desired_framerate_denominator;
     uint32_t fps = clientConfig.desired_framerate_numerator;
     if (fps && denominator)
@@ -138,44 +141,29 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
                        message->supported_video_codecs[i] == k_EStreamVideoCodecH264 ? " (H264)" : "");
     }
 
+    const IHS_StreamClientCapabilities *caps = &session->clientCapabilities;
+    bool hevcAvailable = caps->hasVideoDecoderCapabilities ? caps->supportsVideoHevc : ihsConf.enableHevc;
     EStreamAudioCodec audioCodec = k_EStreamAudioCodecNone;
+    for (size_t i = 0; i < message->n_supported_audio_codecs; ++i) {
+        EStreamAudioCodec codec = message->supported_audio_codecs[i];
+        if (codec == k_EStreamAudioCodecRaw ||
+            (codec == k_EStreamAudioCodecOpus && !clientConfig.enable_audio_uncompressed)) {
+            audioCodec = codec;
+            break;
+        }
+    }
     EStreamVideoCodec videoCodec = k_EStreamVideoCodecNone;
-    if (ihsConf.enableAudio) {
-        for (int i = 0; i < message->n_supported_audio_codecs; i++) {
-            EStreamAudioCodec codec = message->supported_audio_codecs[i];
-            if (codec == k_EStreamAudioCodecOpus) {
-                audioCodec = codec;
-            }
+    for (size_t i = 0; i < message->n_supported_video_codecs; ++i) {
+        EStreamVideoCodec codec = message->supported_video_codecs[i];
+        if (codec == k_EStreamVideoCodecH264 || (codec == k_EStreamVideoCodecHEVC && hevcAvailable)) {
+            videoCodec = codec;
+            break;
         }
     }
-    if (ihsConf.enableHevc) {
-        for (int i = 0; i < message->n_supported_video_codecs; i++) {
-            EStreamVideoCodec codec = message->supported_video_codecs[i];
-            if (codec == k_EStreamVideoCodecHEVC) {
-                videoCodec = codec;
-                break;
-            }
-        }
-    }
-    if (videoCodec == IHS_StreamVideoCodecNone) {
-        if (ihsConf.enableHevc) {
-            /* Not a fallback verdict: a Windows host omitting HEVC from this
-             * announcement has been seen encoding HEVC anyway — our streaming
-             * request advertises supports_video_hevc, and the video channel's
-             * start message is what actually picks the codec. Warning that we
-             * are "falling back to H264" right before an HEVC decoder opens
-             * sends whoever reads the log down the wrong path. */
-            IHS_SessionLog(session, IHS_LogLevelInfo, "Negotiation",
-                           "HEVC absent from the host's announced codecs; the video start message decides");
-        }
-        for (int i = 0; i < message->n_supported_video_codecs; i++) {
-            EStreamVideoCodec codec = message->supported_video_codecs[i];
-            if (codec == k_EStreamVideoCodecH264) {
-                videoCodec = codec;
-                break;
-            }
-        }
-    }
+    if (message->has_os_type)
+        session->hostOsType = message->os_type;
+    if (message->has_gaming_device_type)
+        session->hostGamingDeviceType = message->gaming_device_type;
 
     /* Retain the negotiated preference for diagnostics. StartVideoData supplies
      * the actual decoder configuration; early media waits for that message. */
@@ -184,28 +172,20 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
     session->captureHeight = 1080;
 
     CNegotiatedConfig config = CNEGOTIATED_CONFIG__INIT;
-    /* Generic reliable reassembly/dispatch is separate from the negotiated
-     * platform media contract. See protocol §46 for the tested boundaries. */
-    PROTOBUF_C_SET_VALUE(config, reliable_data, false);
+    /* Original always emits all three scalar presences, even None/false. */
+    PROTOBUF_C_SET_VALUE(config, reliable_data, !!message->reliable_data);
+    PROTOBUF_C_SET_VALUE(config, selected_audio_codec, audioCodec);
+    PROTOBUF_C_SET_VALUE(config, selected_video_codec, videoCodec);
 
-    config.has_selected_audio_codec = audioCodec != k_EStreamAudioCodecNone;
-    config.selected_audio_codec = audioCodec;
-
-    config.has_selected_video_codec = videoCodec != k_EStreamVideoCodecNone;
-    config.selected_video_codec = videoCodec;
-
-    /* The official NegotiatedConfig carries no video modes (the OBSOLETE
-     * repeated field is never populated by the official client). */
-
-    /* enable_remote_hid/enable_touch_input mirror the host's announcements
-     * (0x7ad9cc/0x7ad9e8). Gamepads reach the host over the HID channel;
-     * advertise these capabilities only when the host offers them. */
-    if (message->has_supports_remote_hid && message->supports_remote_hid) {
-        PROTOBUF_C_SET_VALUE(config, enable_remote_hid, 1);
-    }
-    if (message->has_supports_touch_input && message->supports_touch_input) {
-        PROTOBUF_C_SET_VALUE(config, enable_touch_input, 1);
-    }
+    /* Raw video/AV1/Pyrowave are not supported by this platform pipeline. */
+    if (message->supports_remote_hid)
+        session->negotiationRemoteHid = true;
+    if (message->supports_touch_input)
+        session->negotiationTouchInput = true;
+    if (session->negotiationRemoteHid)
+        PROTOBUF_C_SET_VALUE(config, enable_remote_hid, true);
+    if (session->negotiationTouchInput)
+        PROTOBUF_C_SET_VALUE(config, enable_touch_input, true);
 
     /* Official Default omits field 25 (false). Explicit enabled settings and
      * presets request true before the video channel starts; never infer this
@@ -265,7 +245,6 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
 
     CStreamingClientCaps clientCaps = CSTREAMING_CLIENT_CAPS__INIT;
 
-    const IHS_StreamClientCapabilities *caps = &session->clientCapabilities;
     clientCaps.system_info = (char *)caps->systemInfo;
     if (caps->hasSystemCanSuspend)
         PROTOBUF_C_SET_VALUE(clientCaps, system_can_suspend, caps->systemCanSuspend);
@@ -275,19 +254,17 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
         PROTOBUF_C_SET_VALUE(clientCaps, maximum_burst_bitrate_kbps, caps->maximumBurstBitrateKbps);
     if (caps->formFactor != IHS_StreamDeviceFormFactorUnknown)
         PROTOBUF_C_SET_VALUE(clientCaps, form_factor, (EStreamDeviceFormFactor)caps->formFactor);
-    /* Current Steam reads the codec list; supports_video_hevc is obsoleted but still
-     * the only thing older hosts look at, so send both. */
-    EStreamVideoCodec supportedCodecs[] = {k_EStreamVideoCodecHEVC, k_EStreamVideoCodecH264};
-    clientCaps.supported_video_codecs = ihsConf.enableHevc ? supportedCodecs : &supportedCodecs[1];
-    clientCaps.n_supported_video_codecs = ihsConf.enableHevc ? 2 : 1;
-    EStreamAudioCodec supportedAudioCodecs[] = {k_EStreamAudioCodecOpus};
-    if (ihsConf.enableAudio) {
-        clientCaps.supported_audio_codecs = supportedAudioCodecs;
-        clientCaps.n_supported_audio_codecs = 1;
-    }
-    if (ihsConf.enableHevc) {
+    /* Preserve official capability order; request preference does not reorder
+     * it or make disabled audio decoders unavailable. Raw video is omitted
+     * because this library's video pipeline accepts H264/HEVC only. */
+    EStreamVideoCodec supportedCodecs[] = {k_EStreamVideoCodecH264, k_EStreamVideoCodecHEVC};
+    clientCaps.supported_video_codecs = supportedCodecs;
+    clientCaps.n_supported_video_codecs = hevcAvailable ? 2 : 1;
+    EStreamAudioCodec supportedAudioCodecs[] = {k_EStreamAudioCodecRaw, k_EStreamAudioCodecOpus};
+    clientCaps.supported_audio_codecs = supportedAudioCodecs;
+    clientCaps.n_supported_audio_codecs = clientConfig.enable_audio_uncompressed ? 1 : 2;
+    if (hevcAvailable)
         PROTOBUF_C_SET_VALUE(clientCaps, supports_video_hevc_obsolete, true);
-    }
 
     CNegotiationSetConfigMsg response = CNEGOTIATION_SET_CONFIG_MSG__INIT;
     response.config = &config;
