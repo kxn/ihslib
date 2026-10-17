@@ -17,6 +17,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive
         -Wl,--wrap=IHS_SessionPacketsWindowPoll)
     set_tests_properties(reliable_feedback_worker PROPERTIES TIMEOUT 20)
+    ihs_add_test(negotiation_stage_worker test_negotiation_stage_worker.c)
+    target_link_libraries(ihstest_negotiation_stage_worker PRIVATE ihs-test-session)
+    target_link_options(ihstest_negotiation_stage_worker PRIVATE -Wl,--wrap=IHS_BaseSend
+        -Wl,--wrap=IHS_UDPSocketReceive -Wl,--wrap=IHS_SessionPacketTimestamp)
+    set_tests_properties(negotiation_stage_worker PROPERTIES TIMEOUT 20)
+    add_executable(ihs-negotiation-stage-oracle negotiation_stage_oracle.c)
+    target_include_directories(ihs-negotiation-stage-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-negotiation-stage-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-negotiation-stage-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-negotiation-stage-oracle PRIVATE -Wl,--wrap=IHS_BaseSend
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_SessionChannelQueueFrameResult)
     add_executable(ihs-reliable-large-frame-oracle reliable_large_frame_oracle.c)
     target_include_directories(ihs-reliable-large-frame-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-reliable-large-frame-oracle PRIVATE ihs-test-session ihslib)

@@ -41,17 +41,15 @@
 
 typedef struct IHS_SessionChannelControl {
     IHS_SessionChannel base;
-    /** Serializes IHS_SessionChannelControlSend: it allocates a packet id and an
-     * encryption sequence, and the two must stay in step. Three threads send control
-     * messages — the receive thread answering HID requests, the timer thread's
-     * keepalive, and the application's per-frame HID report. */
+    /* Serializes encryption sequence and packet-ID assignment across RX
+     * responses/heartbeat, HID and application producers. */
     IHS_Mutex *sendLock;
     uint64_t sendEncryptSequence;
     uint64_t recvEncryptSequence;
     uint64_t hidSubmitted;
     uint64_t hidCoalesced;
     uint64_t hidSent;
-    IHS_TimerTask *keepAliveTimer;
+    uint32_t keepAliveTimestamp; /* RX update ticks, not a millisecond timer. */
 } IHS_SessionChannelControl;
 
 IHS_SessionChannel *IHS_SessionChannelControlCreate(IHS_Session *session);
@@ -99,9 +97,11 @@ void IHS_SessionChannelControlOnMicrophone(IHS_SessionChannel *channel, EStreamC
 void IHS_SessionChannelControlOnCursor(IHS_SessionChannel *channel, EStreamControlMessage type,
                                        IHS_Buffer *payload, const IHS_SessionPacketHeader *header);
 
-void IHS_SessionChannelControlStartHeartbeat(IHS_SessionChannel *channel);
-
-void IHS_SessionChannelControlStopHeartbeat(IHS_SessionChannel *channel);
+/* RX worker: exactly one Starting or Streaming phase per update. */
+void IHS_SessionChannelControlUpdateStage(IHS_SessionChannel *, uint32_t now);
+void IHS_SessionChannelControlUpdateHeartbeat(IHS_SessionChannel *, uint32_t now);
+/* Caller holds sendLock; returns local failures without closing under the lock. */
+IHS_SendAdmission IHS_SessionChannelControlCompleteLocked(IHS_SessionChannelControl *);
 
 void IHS_SessionChannelControlOnHIDMsg(IHS_SessionChannel *channel, const CHIDMessageToRemote *message);
 

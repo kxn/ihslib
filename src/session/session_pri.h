@@ -50,7 +50,9 @@
  *   Handshaking   - ConnectACK received, ClientHandshake sent, waiting for ServerHandshake.
  *   Authenticating- ServerHandshake received, AuthenticationRequest sent, waiting for response.
  *   Negotiating   - AuthenticationResponse = Succeeded, waiting for NegotiationInit / sending
- * SetConfig. Connected     - NegotiationComplete sent, the stream is live.
+ * SetConfig.
+ *   Starting      - Host SetConfig copied; next RX update starts the stream.
+ *   Connected     - NegotiationComplete queued, the stream is live.
  */
 typedef enum IHS_SessionConnectionState {
     IHS_SessionConnectionStateUnconnected,
@@ -58,6 +60,7 @@ typedef enum IHS_SessionConnectionState {
     IHS_SessionConnectionStateHandshaking,
     IHS_SessionConnectionStateAuthenticating,
     IHS_SessionConnectionStateNegotiating,
+    IHS_SessionConnectionStateStarting,
     IHS_SessionConnectionStateConnected,
 } IHS_SessionConnectionState;
 
@@ -93,6 +96,7 @@ struct IHS_Session {
     IHS_SessionInfo info;
     IHS_SessionState state;
     CStreamingClientConfig *clientConfig; /* Base lock; owned complete value. */
+    CNegotiatedConfig *negotiatedConfig; /* RX-owned complete value, including unknown fields. */
     /* RX-worker-owned connection clock and lifecycle state. The application
      * publishes foreground transitions through lifecycleGeneration only. */
     struct {
@@ -197,7 +201,7 @@ bool IHS_SessionSendControlMessage(IHS_Session *session, EStreamControlMessage t
 bool IHS_SessionInputEnabled(IHS_Session *session);
 
 /**
- * Mirrors Steam's IsStreaming(): true once NegotiationComplete has been sent.
+ * Mirrors Steam's IsStreaming(): live during Starting before Complete is queued.
  * Outbound control traffic that the host only expects from a live session must
  * check this — it accepts an early packet, then abandons the session.
  */

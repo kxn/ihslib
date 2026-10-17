@@ -141,7 +141,8 @@ int main(int argc, char **argv) {
             IHS_SessionSetForeground(s, value != 0);
             continue;
         } else if (sscanf(line, "UPDATE %u", &now) == 1) {
-            s->base.callbacks.run->update(&s->base, NULL);
+            /* This oracle compares Transport/Pause, not OnThink stage work. */
+            IHS_SessionTransportUpdate(s, now);
         } else if (sscanf(line, "FEEDBACK %u %u %u", &value, &peerTime, &now) == 3) {
             IHS_StreamClockFeedback(&s->clock, value, peerTime, now);
         } else if (sscanf(line, "BEGIN %u", &now) == 1) {

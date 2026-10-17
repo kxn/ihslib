@@ -39,7 +39,26 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
 static void OnNegotiationSetConfig(IHS_SessionChannel *channel, const CNegotiationSetConfigMsg *message,
                                    uint16_t packetId);
 
-static void OnConnected(IHS_SessionChannel *channel);
+/* Generated C protobuf has no CopyFrom: round-trip the complete value so
+ * presence, repeated/nested values and unknown fields survive replacement. */
+static bool StoreNegotiatedConfig(IHS_Session *session, const CNegotiatedConfig *config) {
+    size_t size = cnegotiated_config__get_packed_size(config);
+    uint8_t *wire = malloc(size ? size : 1);
+    if (!wire)
+        return false;
+    cnegotiated_config__pack(config, wire);
+    CNegotiatedConfig *copy = cnegotiated_config__unpack(NULL, size, wire);
+    free(wire);
+    if (!copy)
+        return false;
+    if (session->negotiatedConfig)
+        cnegotiated_config__free_unpacked(session->negotiatedConfig, NULL);
+    session->negotiatedConfig = copy;
+    session->negotiatedVideoCodec = copy->selected_video_codec;
+    session->negotiationRemoteHid = !!copy->enable_remote_hid;
+    session->negotiationTouchInput = !!copy->enable_touch_input;
+    return true;
+}
 
 void IHS_SessionChannelControlOnNegotiation(IHS_SessionChannel *channel, EStreamControlMessage type,
                                             IHS_Buffer *payload, const IHS_SessionPacketHeader *header) {
@@ -268,7 +287,8 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
 
     CNegotiationSetConfigMsg response = CNEGOTIATION_SET_CONFIG_MSG__INIT;
     response.config = &config;
-    if (!IHS_SessionClientConfigStore(session, &clientConfig)) {
+    if (!IHS_SessionClientConfigStore(session, &clientConfig) ||
+        !StoreNegotiatedConfig(session, &config)) {
         cstreaming_client_config__free_unpacked(retained, NULL);
         IHS_SessionDisconnect(session);
         return;
@@ -283,19 +303,45 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
 
 static void OnNegotiationSetConfig(IHS_SessionChannel *channel, const CNegotiationSetConfigMsg *message,
                                    uint16_t packetId) {
-    IHS_OutgoingPriority(channel->session, 1, 2);
-    IHS_OutgoingPriority(channel->session, 2, -1);
-    CNegotiationCompleteMsg response = CNEGOTIATION_COMPLETE_MSG__INIT;
-    IHS_SessionChannelControlSend(channel, k_EStreamControlNegotiationComplete,
-                                  (const ProtobufCMessage *) &response, IHS_PACKET_ID_NEXT);
-    OnConnected(channel);
+    (void)packetId;
+    IHS_Session *session = channel->session;
+    /* The original's codec assertions are diagnostic in non-debug builds;
+     * they do not reject the host's complete config. Protocol §49–50. */
+    if (!StoreNegotiatedConfig(session, message->config)) {
+        IHS_SessionDisconnect(session);
+        return;
+    }
+    session->state.connectionState = IHS_SessionConnectionStateStarting;
 }
 
-static void OnConnected(IHS_SessionChannel *channel) {
+void IHS_SessionChannelControlUpdateStage(IHS_SessionChannel *channel, uint32_t now) {
     IHS_Session *session = channel->session;
-    session->state.connectionState = IHS_SessionConnectionStateConnected;
-    IHS_SessionChannelControlStartHeartbeat(channel);
-    if (session->callbacks.session && session->callbacks.session->connected) {
-        session->callbacks.session->connected(session, session->callbackContexts.session);
+    switch (session->state.connectionState) {
+    case IHS_SessionConnectionStateStarting: {
+        IHS_SessionChannelControl *control = (void *)channel;
+        /* Publish the live phase and enqueue Complete under the existing
+         * producer lock: another HID sender must not overtake Complete. */
+        IHS_MutexLock(control->sendLock);
+        /* State is live before Complete and the application notification. */
+        session->state.connectionState = IHS_SessionConnectionStateConnected;
+        IHS_OutgoingPriority(session, 1, 2);
+        IHS_OutgoingPriority(session, 2, -1);
+        control->keepAliveTimestamp = now;
+        IHS_SendAdmission result = IHS_SessionChannelControlCompleteLocked(control);
+        IHS_MutexUnlock(control->sendLock);
+        /* Closing may stop workers that also send control. Never do so while
+         * holding the producer lock, including the local allocation-failure path. */
+        if (result == IHS_SendAdmissionLocalFailure && !session->transport.shutdown &&
+            !session->transport.detached)
+            IHS_SessionDisconnect(session);
+        if (session->callbacks.session && session->callbacks.session->connected)
+            session->callbacks.session->connected(session, session->callbackContexts.session);
+        break; /* The same update must not also run Streaming. */
+    }
+    case IHS_SessionConnectionStateConnected:
+        IHS_SessionChannelControlUpdateHeartbeat(channel, now);
+        break;
+    default:
+        break;
     }
 }

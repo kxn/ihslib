@@ -201,6 +201,12 @@ bool IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamControlMe
     return ret == IHS_SendAdmissionAccepted;
 }
 
+IHS_SendAdmission IHS_SessionChannelControlCompleteLocked(IHS_SessionChannelControl *control) {
+    CNegotiationCompleteMsg message = CNEGOTIATION_COMPLETE_MSG__INIT;
+    return ControlSendLocked(control, k_EStreamControlNegotiationComplete,
+                              (const ProtobufCMessage *)&message, IHS_PACKET_ID_NEXT, NULL);
+}
+
 static IHS_SendAdmission ControlSendLocked(IHS_SessionChannelControl *control,
                                            EStreamControlMessage type,
                                            const ProtobufCMessage *message, int32_t packetId,
@@ -334,7 +340,6 @@ static void OnControlInit(IHS_SessionChannel *channel, const void *data) {
 
 static void OnControlDeinit(IHS_SessionChannel *channel) {
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *)channel;
-    IHS_SessionChannelControlStopHeartbeat(channel);
     IHS_MutexDestroy(control->sendLock);
 }
 

@@ -191,6 +191,8 @@ void IHS_SessionDestroy(IHS_Session *session) {
     IHS_StreamClockDeinit(&session->clock);
     if (session->clientConfig)
         cstreaming_client_config__free_unpacked(session->clientConfig, NULL);
+    if (session->negotiatedConfig)
+        cnegotiated_config__free_unpacked(session->negotiatedConfig, NULL);
     IHS_CondDestroy(session->sendQueueCond);
     IHS_MutexDestroy(session->sendQueueMutex);
     assert(!session->sendBatch);
@@ -667,7 +669,6 @@ static void SessionFinalized(IHS_Base *base, void *context) {
         IHS_ThreadJoin(session->sendThread);
     session->sendThread = NULL;
     /* Joining producers never occurs under Base/socket or timer locks. */
-    IHS_SessionChannelControlStopHeartbeat(session->channels[IHS_SessionChannelIdControl]);
     IHS_HIDManagerCloseAll(session->hidManager);
     bool requested = session->transport.detached || atomic_load(&session->transport.shutdown);
     IHS_SessionTransportClose(session);
@@ -687,8 +688,13 @@ static void SessionUpdate(IHS_Base *base, void *context) {
     bool updateControl = !base->interrupted && !session->transport.detached &&
         IHS_SessionTransportState(session) == IHS_TransportConnected;
     IHS_BaseUnlock(base);
-    if (updateControl)
+    if (updateControl) {
         IHS_SessionReliableUpdate(session);
+        /* Drain incoming reliable frames before choosing one client stage. */
+        if (!base->interrupted && !session->transport.detached)
+            IHS_SessionChannelControlUpdateStage(session->channels[IHS_SessionChannelIdControl],
+                                                  IHS_SessionPacketTimestamp());
+    }
 }
 
 void IHS_SessionWakeSend(IHS_Session *session) {
