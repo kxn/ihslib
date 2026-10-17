@@ -21,7 +21,7 @@
 static pthread_t owner;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
-static bool blockSubmit, entered, joining, released, failWorker, cancelOnStop, lateControl;
+static bool blockFlush, entered, joining, released, failWorker, cancelOnStop, lateControl;
 static unsigned prepares, starts, stops, infos, lost, waits, submissions;
 static unsigned order, joinedAt, stoppedAt, startedAt, lostAt, waitAt;
 static unsigned unavailableStarts;
@@ -144,15 +144,23 @@ static IHS_StreamVideoSubmitResult submit(IHS_Session *s, const IHS_VideoEpochIn
         held = ticket;
         *taken = true;
     }
+    return IHS_StreamVideoSubmitReset;
+}
+/* Pending requests gate submit, but key fragments still flush the old backend.
+ * Block that real worker phase to verify reset joins before retiring resources. */
+static void flush(IHS_Session *s, const IHS_VideoEpochInfo *e, IHS_StreamVideoFlushPhase phase,
+                  void *ctx) {
+    (void)s; (void)e; (void)ctx;
+    if (phase != IHS_StreamVideoFlushDecoder || pthread_equal(owner, pthread_self()))
+        return;
     pthread_mutex_lock(&lock);
-    if (blockSubmit) {
+    if (blockFlush) {
         entered = true;
         pthread_cond_broadcast(&cond);
         while (!released)
             pthread_cond_wait(&cond, &lock);
     }
     pthread_mutex_unlock(&lock);
-    return IHS_StreamVideoSubmitReset;
 }
 static void feed(IHS_Session *s, uint16_t id, uint16_t seq, bool key) {
     IHS_SessionFrame f = {.header = {.type = IHS_SessionPacketTypeReliable,
@@ -238,7 +246,8 @@ int main(void) {
     s->negotiatedVideoCodec = k_EStreamVideoCodecH264;
     assert(IHS_SessionSetVideoTrackingIdentity(s, 90));
     IHS_StreamVideoCallbacks cb = {
-        .prepare = prepare, .startTracked = start, .submitTracked = submit, .stopTracked = stop};
+        .prepare = prepare, .startTracked = start, .submitTracked = submit, .stopTracked = stop,
+        .flushTracked = flush};
     IHS_SessionSetVideoCallbacks(s, &cb, NULL);
     unavailableStarts = 1;
     CStartVideoDataMsg m = CSTART_VIDEO_DATA_MSG__INIT;
@@ -274,16 +283,19 @@ int main(void) {
     cycle(s); /* Request made after the cycle's reset gate waits for the next cycle. */
     assert(!lateControl && starts == 2 && lost == 1);
     assert(submissions == 1 && held);
-    /* No synchronous admission stop: a continuous delta can enter before next cycle. */
-    blockSubmit = true;
+    /* Continuous data is consumed but every pending request gates FinalDecode. */
     feed(s, 4, 3, false);
+    waitProcessed(4);
+    assert(submissions == 1);
+    blockFlush = true;
+    feed(s, 5, 4, true);
     pthread_mutex_lock(&lock);
     while (!entered)
         pthread_cond_wait(&cond, &lock);
     joining = false;
     pthread_mutex_unlock(&lock);
-    feed(s, 5, 4, true);
     feed(s, 6, 5, true);
+    feed(s, 7, 6, true);
     IHS_MutexLock(video->windowLock);
     assert(video->fecQueuedCount == 2);
     IHS_MutexUnlock(video->windowLock);
@@ -304,8 +316,8 @@ int main(void) {
     assert(!pthread_create(&releaser, NULL, releaseDuringJoin, NULL));
     cycle(s);
     assert(!pthread_join(releaser, NULL));
-    waitProcessed(4);
-    assert(submissions == 2 && stops == 2 && starts == 3 && prepares == 1 && lost == 2);
+    waitProcessed(5);
+    assert(submissions == 1 && stops == 2 && starts == 3 && prepares == 1 && lost == 2);
     assert(active.video_epoch == 3 && video->receive == rx &&
            slots == IHS_SessionPacketsWindowSize(rx->window));
     assert(IHS_SessionPacketsWindowNextNeededPacketId(rx->window) == 0);
@@ -320,13 +332,13 @@ int main(void) {
     IHS_FrameTicketComplete(held, &outcome);
     IHS_FrameTicketRelease(held);
     held = NULL;
-    blockSubmit = false;
-    feed(s, 7, 6, true);
-    waitProcessed(5);
+    blockFlush = false;
+    feed(s, 8, 7, true);
+    waitProcessed(6);
     failWorker = true;
     cycle(s); /* OS Start failure retains actor and bounded queue. */
     assert(!worker && starts == 4 && infos == 3 && lost == 3 && !video->interrupted);
-    feed(s, 8, 7, true);
+    feed(s, 9, 8, true);
     assert(video->fecQueuedCount == 1);
     CStopVideoDataMsg stopMsg = CSTOP_VIDEO_DATA_MSG__INIT;
     control(s, k_EStreamControlStopVideoData, &stopMsg.base);
@@ -336,8 +348,8 @@ int main(void) {
     failWorker = false;
     control(s, k_EStreamControlStartVideoData, &m.base);
     video = (void *)IHS_SessionChannelForType(s, IHS_SessionChannelTypeDataVideo);
-    feed(s, 9, 0, true);
-    waitProcessed(6);
+    feed(s, 10, 0, true);
+    waitProcessed(7);
     cancelOnStop = true;
     s->base.callbacks.run->update(&s->base, s->base.callbackContexts.run);
     assert(s->base.interrupted && starts == 5 && stops == 5 && lost == 3 && !worker);

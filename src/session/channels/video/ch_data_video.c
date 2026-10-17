@@ -56,12 +56,19 @@ typedef struct IHS_SessionChannelVideo {
         int32_t overflowFrameSpan;
         bool frameStarted;
         bool frameFinished;
+        /* Same-object Reset preserves the mode; a new decoder starts unseen. */
+        bool contentModeSeen, contentMode;
     } states;
     struct {
         uint16_t expectedSubFrameStart;
         IHS_VideoPartialFrames partial;
         IHS_Buffer buffer;
         IHS_StreamVideoFrameFlag flags;
+        bool contentMode;
+        /* Pending-reset complete frames retain their ownership until the actor
+         * or a key mark purges them. Capacity is a local tracker bound. */
+        IHS_FrameTicket *deferred[IHS_FRAME_TRACKER_CAPACITY];
+        size_t deferredCount;
     } frame;
     bool appStarted;
     bool prepared, backendReady;
@@ -356,6 +363,29 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
     }
 
     while (!videoCh->base.interrupted && AssembleFrame(channel)) {
+        /* Official OnThink 7b2648..26f8: only the finishing fragment decides
+         * mode. A transition requests an asynchronous reset. Every pending
+         * request, including one from a previous backend submit, gates FinalDecode. */
+        if (videoCh->states.contentModeSeen &&
+            videoCh->states.contentMode != videoCh->frame.contentMode)
+            atomic_store(&videoCh->resetRequested, true);
+        videoCh->states.contentModeSeen = true;
+        videoCh->states.contentMode = videoCh->frame.contentMode;
+        if (atomic_load(&videoCh->resetRequested)) {
+            if (videoCh->assembly) {
+                if (videoCh->frame.deferredCount == IHS_FRAME_TRACKER_CAPACITY) {
+                    IHS_SessionDisconnect(channel->session); /* Local ownership bound. */
+                    break;
+                }
+                videoCh->frame.deferred[videoCh->frame.deferredCount++] = videoCh->assembly;
+                videoCh->assembly = NULL;
+            }
+            /* The original keeps encoded buffers/packet references but accepts
+             * following frames. Do not submit or clear the accumulated bytes. */
+            videoCh->states.frameStarted = videoCh->states.frameFinished = false;
+            videoCh->frame.flags = 0;
+            continue;
+        }
         IHS_StreamVideoSubmitResult result =
             SubmitFrame(channel, videoCh->assemblyId, &videoCh->frame.buffer, videoCh->frame.flags);
         if (videoCh->assembly) {
@@ -469,7 +499,8 @@ static bool AssembleFrame(IHS_SessionChannel *channel) {
                 }
             }
         }
-        if (!videoCh->frame.buffer.size) {
+        if (!videoCh->states.frameStarted) {
+            videoCh->states.frameStarted = true;
             videoCh->assemblyId = partial->frameId;
             if (partial->ticket) {
                 if (!IHS_FrameTicketRetain(partial->ticket))
@@ -491,6 +522,7 @@ static bool AssembleFrame(IHS_SessionChannel *channel) {
             return false;
         }
         if (partial->header.flags & VideoFrameFlagFrameFinish) {
+            videoCh->frame.contentMode = (partial->header.flags & VideoFrameFlagContentMode) != 0;
             videoCh->states.frameFinished = true;
         }
         IHS_BufferClear(&partial->data, true);
@@ -584,6 +616,13 @@ static void DiscardPending(IHS_SessionChannelVideo *channel) {
         IHS_FrameTicketRelease(channel->assembly);
         channel->assembly = NULL;
     }
+    for (size_t n = 0; n < channel->frame.deferredCount; ++n) {
+        IHS_FrameTicket *ticket = channel->frame.deferred[n];
+        if (ticket != channel->incoming)
+            IHS_FrameTicketComplete(ticket, &outcome);
+        IHS_FrameTicketRelease(ticket);
+    }
+    channel->frame.deferredCount = 0;
     for (IHS_VideoPartialFrame *part = channel->frame.partial.head; part; part = part->next)
         if (part->ticket && part->ticket != channel->incoming)
             IHS_FrameTicketComplete(part->ticket, &outcome);
