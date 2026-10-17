@@ -41,6 +41,8 @@ bool IHS_OutgoingRetain(IHS_Session *, IHS_SessionPacket *, uint32_t created);
 int IHS_OutgoingSendUnreliable(IHS_Session *, uint8_t channel, bool retry);
 void IHS_OutgoingNack(IHS_Session *, const IHS_SessionPacket *);
 void IHS_OutgoingUpdate(IHS_Session *, uint32_t now);
+/* One factory/priority snapshot, shared by RX and TX scans. */
+unsigned IHS_OutgoingSnapshot(IHS_Session *, uint8_t order[32], unsigned *rotation);
 /* Sender actor wakes for producer work and also on a bounded clock wait. */
 void IHS_SessionWakeSend(IHS_Session *);
 int IHS_SessionSendPacketResult(IHS_Session *, IHS_SessionPacket *);

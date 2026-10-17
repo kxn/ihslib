@@ -194,6 +194,8 @@ bool IHS_SessionSendBatchBegin(IHS_Session *session);
 void IHS_SessionSendBatchEnd(IHS_Session *session, bool commit);
 /* Dispatch one complete transaction; wait=true is the bounded worker wait. */
 bool IHS_SessionDispatchQueued(IHS_Session *session, bool wait);
+/* Batch-end receive windows/feedback, before the client stage. */
+void IHS_SessionReceiveUpdateAt(IHS_Session *, uint32_t tick);
 
 bool IHS_SessionSendControlMessage(IHS_Session *session, EStreamControlMessage type,
                                    const ProtobufCMessage *message);

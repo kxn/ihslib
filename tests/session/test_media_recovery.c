@@ -1,5 +1,5 @@
-/* Receiver feedback, assembly boundaries and timestamp wrap. Tests real channel
- * workers without a socket; a blocked decoder must not block wire feedback. */
+/* Batch-end feedback, assembly boundaries and timestamp wrap. Real decoder
+ * worker can block while the network owner advances windows and sends NACKs. */
 #include "endianness.h"
 #include "ihs_buffer.h"
 #include "ihs_buffer_ext.h"
@@ -13,10 +13,17 @@
 #include <time.h>
 #include <unistd.h>
 
-typedef struct QueuedPacket {
-    IHS_SessionPacket packet;
-    bool retransmit;
-} QueuedPacket;
+static uint8_t feedbackWire[128];
+static size_t feedbackSize;
+bool __wrap_IHS_BaseSend(IHS_Base *base, IHS_SocketAddress address, const IHS_Buffer *wire) {
+    (void)base; (void)address;
+    if ((*IHS_BufferPointer(wire) & 127) == IHS_SessionPacketTypeUnreliableNack) {
+        assert(wire->size <= sizeof(feedbackWire));
+        feedbackSize = wire->size;
+        memcpy(feedbackWire, IHS_BufferPointer(wire), feedbackSize);
+    }
+    return true;
+}
 static void add(IHS_SessionPacketsWindow *w, uint16_t id, uint32_t stamp,
                 IHS_SessionPacketType type, int16_t fragment) {
     IHS_SessionPacket p = {.header = {.type = type,
@@ -139,37 +146,28 @@ static void deliver(IHS_SessionChannel *c, uint16_t id, uint32_t stamp) {
     c->cls->received(c, &p);
     IHS_SessionPacketClear(&p, true);
 }
-static void expect_feedback(IHS_Session *s, uint16_t base, uint16_t confirmed, uint8_t mask,
-                            uint32_t echo) {
+static void expect_feedback(IHS_SessionChannel *c, uint16_t base, uint16_t confirmed,
+                            uint8_t mask, uint32_t echo) {
     uint64_t until = IHS_TimerNow() + 500;
+    feedbackSize = 0;
     while (IHS_TimerNow() < until) {
-        IHS_MutexLock(s->sendQueueMutex);
-        IHS_QueueItem *item = IHS_QueuePoll(s->sendQueue);
-        IHS_MutexUnlock(s->sendQueueMutex);
-        if (!item) {
-            usleep(1000);
-            continue;
-        }
-        QueuedPacket *q = (void *)item;
-        assert(q->packet.header.type == IHS_SessionPacketTypeUnreliableNack && !q->retransmit);
-        IHS_SessionPacketPopulateBuffer(&q->packet);
-        const uint8_t *wire = q->packet.body.data;
-        assert(wire[0] == 10 && q->packet.body.size == 7);
-        uint16_t b, h;
-        uint32_t t;
-        IHS_ReadUInt16LE(wire + 7, &b);
-        IHS_ReadUInt16LE(wire + 17, &h);
-        IHS_ReadUInt32LE(wire + 13, &t);
-        bool matched = b == base && h == confirmed && wire[19] == mask && t == echo;
-        IHS_SessionPacketClear(&q->packet, true);
-        IHS_QueueItemFree(item);
-        if (matched)
+        IHS_SessionChannelDataUpdateAt((void *)c, IHS_SessionPacketTimestamp());
+        if (feedbackSize) {
+            const uint8_t *wire = feedbackWire;
+            assert(wire[0] == 10 && feedbackSize == 20);
+            uint16_t b, h; uint32_t t;
+            IHS_ReadUInt16LE(wire + 7, &b);
+            IHS_ReadUInt16LE(wire + 17, &h);
+            IHS_ReadUInt32LE(wire + 13, &t);
+            assert(b == base && h == confirmed && wire[19] == mask && t == echo);
             return;
+        }
+        usleep(1000);
     }
     assert(!"missing expected UnreliableNack while decoder blocked");
 }
 /* Expired holes must publish even when the remaining head is incomplete and
- * the decoder never receives a frame. Uses the actual cond-wait worker. */
+ * the decoder never receives a frame. Uses the RX protocol step while the decoder waits. */
 static void loss_without_frame(void) {
     IHS_Session *s = IHS_TestSessionCreate();
     s->state.connectionState = IHS_SessionConnectionStateHandshaking;
@@ -184,6 +182,7 @@ static void loss_without_frame(void) {
     IHS_BufferAppendUInt8(&p.body, k_EStreamDataPacket);
     c->cls->received(c, &p);
     IHS_SessionPacketClear(&p, true);
+    IHS_SessionChannelDataUpdateAt((void *)c, IHS_SessionPacketTimestamp());
     uint32_t lost = 0;
     uint64_t until = IHS_TimerNow() + 1000;
     do {
@@ -211,21 +210,22 @@ int main(void) {
         IHS_SessionChannelDataCreate(&cls, s, IHS_SessionChannelTypeDataVideo, 3, NULL);
     assert(c);
     deliver(c, 0, 1000);
+    IHS_SessionChannelDataUpdateAt((void *)c, IHS_SessionPacketTimestamp());
     pthread_mutex_lock(&lock);
     while (!entered)
         pthread_cond_wait(&ready, &lock);
     pthread_mutex_unlock(&lock);
     deliver(c, 2, 1100);
     deliver(c, 4, 1200);
-    expect_feedback(s, 2, 0, 5, 1200);
+    expect_feedback(c, 2, 0, 5, 1200);
     deliver(c, 1, 1000); // retransmission fills first hole
-    expect_feedback(s, 4, 2, 1, 1200);
+    expect_feedback(c, 4, 2, 1, 1200);
     pthread_mutex_lock(&lock);
     releaseDecode = true;
     pthread_cond_signal(&ready);
     pthread_mutex_unlock(&lock);
     IHS_SessionChannelStop(c);
-    IHS_SessionChannelDestroy(c); // joins both workers before freeing dependencies
+    IHS_SessionChannelDestroy(c); // joins decoder before freeing dependencies
     IHS_SessionDestroy(s);
     IHS_Quit();
     return 0;

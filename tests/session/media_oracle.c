@@ -47,7 +47,6 @@ int main(int argc, char **argv) {
     ch.window = IHS_SessionPacketsWindowCreateMedia(2048);
     ch.windowLock = IHS_MutexCreate();
     ch.windowCond = IHS_CondCreate();
-    ch.feedbackCond = IHS_CondCreate();
     atomic_init(&ch.interrupted, false);
     char line[256];
     while (fgets(line, sizeof(line), stdin)) {

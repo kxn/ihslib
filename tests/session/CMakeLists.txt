@@ -40,6 +40,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(ihstest_receive_cycle_worker PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
         -Wl,--wrap=IHS_UDPSocketWaitReadable -Wl,--wrap=IHS_UDPSocketReceive
         -Wl,--wrap=IHS_SessionPacketParse -Wl,--wrap=IHS_BaseSend -Wl,--wrap=IHS_SessionDeliverReliableFrame)
+    target_link_options(ihstest_receive_cycle_worker PRIVATE -Wl,--wrap=IHS_SessionPacketsWindowPoll)
     set_tests_properties(receive_cycle_worker PROPERTIES TIMEOUT 20)
     ihs_add_test(video_network_workers test_video_network_workers.c)
     target_link_libraries(ihstest_video_network_workers PRIVATE ihs-test-session)
@@ -182,6 +183,9 @@ target_link_libraries(ihstest_client_capabilities PRIVATE ihs-test-session)
 ihs_add_test(media_recovery test_media_recovery.c)
 target_link_libraries(ihstest_media_recovery PRIVATE ihs-test-session)
 set_tests_properties(media_recovery PROPERTIES TIMEOUT 10)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(ihstest_media_recovery PRIVATE -Wl,--wrap=IHS_BaseSend)
+endif()
 
 ihs_add_test(fec_channel test_fec_channel.c)
 target_link_libraries(ihstest_fec_channel PRIVATE ihs-test-session)

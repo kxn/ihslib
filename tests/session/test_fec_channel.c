@@ -108,12 +108,13 @@ int main(void) {
     assert(IHS_QueueIsEmpty(s->sendQueue)); /* no NACKs for FEC */
     IHS_MutexUnlock(s->sendQueueMutex);
     receive(s, false, 0, 1000); /* FEC IDs did not advance ordinary sequence */
+    IHS_SessionChannelDataUpdateAt((void *)c, IHS_SessionPacketTimestamp());
     pthread_mutex_lock(&lock);
     released = true;
     pthread_cond_broadcast(&ready);
     while (!final)
         pthread_cond_wait(&ready, &lock);
-    assert(delivered == 34); /* first + bounded last 32 + ordinary */
+    assert(delivered == 33); /* first + bounded FIFO (31 FEC + ordinary) */
     pthread_mutex_unlock(&lock);
     IHS_SessionChannelRemove(s, 3); /* stops/joins before FIFO/RS buffers die */
     IHS_SessionDestroy(s);

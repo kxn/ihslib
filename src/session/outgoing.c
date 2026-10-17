@@ -258,6 +258,21 @@ done:
 static bool send_reliable(IHS_SessionPacket *p, void *ctx) {
     return IHS_SessionSendPacket(ctx, p);
 }
+unsigned IHS_OutgoingSnapshot(IHS_Session *s, uint8_t order[32], unsigned *rotation) {
+    IHS_Outgoing *o = &s->outgoing;
+    IHS_MutexLock(s->sendQueueMutex);
+    if (o->dirty) {
+        memcpy(o->order, o->creation, o->count);
+        IHS_OutgoingSort(o);
+        o->dirty = false;
+    }
+    unsigned count = o->count;
+    if (rotation)
+        *rotation = o->rotation;
+    memcpy(order, o->order, count);
+    IHS_MutexUnlock(s->sendQueueMutex);
+    return count;
+}
 void IHS_OutgoingUpdate(IHS_Session *s, uint32_t now) {
     IHS_BaseLock(&s->base);
     if (IHS_SessionTransportState(s) != IHS_TransportConnected || s->transport.detached) {
@@ -266,15 +281,8 @@ void IHS_OutgoingUpdate(IHS_Session *s, uint32_t now) {
     }
     IHS_Outgoing *o = &s->outgoing;
     uint8_t order[32];
-    IHS_MutexLock(s->sendQueueMutex);
-    if (o->dirty) {
-        memcpy(o->order, o->creation, o->count);
-        IHS_OutgoingSort(o);
-        o->dirty = false;
-    }
-    unsigned count = o->count, rotation = o->rotation;
-    memcpy(order, o->order, count);
-    IHS_MutexUnlock(s->sendQueueMutex);
+    unsigned rotation;
+    unsigned count = IHS_OutgoingSnapshot(s, order, &rotation);
     /* Factory publication never needs Base. Snapshot its order before I/O;
      * a concurrently created channel is considered by the next scan. */
     for (unsigned i = 0; i < count; ++i) {

@@ -736,11 +736,26 @@ static void SessionUpdateAt(IHS_Base *base, void *context, uint32_t tick) {
         IHS_SessionTransportState(session) == IHS_TransportConnected;
     IHS_BaseUnlock(base);
     if (updateControl) {
-        IHS_SessionReliableUpdateAt(session, tick);
+        IHS_SessionReceiveUpdateAt(session, tick);
         /* Drain incoming reliable frames before choosing one client stage. */
         if (!base->interrupted && !session->transport.detached)
             IHS_SessionChannelControlUpdateStage(session->channels[IHS_SessionChannelIdControl],
                                                   IHS_SessionPacketTimestamp());
+    }
+}
+
+void IHS_SessionReceiveUpdateAt(IHS_Session *session, uint32_t tick) {
+    uint8_t order[32];
+    unsigned count = IHS_OutgoingSnapshot(session, order, NULL);
+    for (unsigned i = 0; i < count && !session->base.interrupted && !session->transport.detached; ++i) {
+        uint8_t id = order[i];
+        IHS_SessionReliableUpdateChannelAt(session, id, tick);
+        /* A reliable control frame may replace a consumer. Resolve after its
+         * delegate rather than retaining a channel pointer across callbacks. */
+        IHS_SessionChannel *ch = IHS_SessionChannelFor(session, id);
+        if (ch && (ch->type == IHS_SessionChannelTypeDataVideo ||
+                   ch->type == IHS_SessionChannelTypeDataAudio))
+            IHS_SessionChannelDataUpdateAt((void *)ch, tick);
     }
 }
 

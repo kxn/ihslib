@@ -51,15 +51,13 @@ typedef struct IHS_SessionChannelData {
     atomic_bool interrupted;
     IHS_Mutex *lock;
 
-    /* Feedback never waits for the decoder. Both workers are stopped/joined
-     * before the window, condition variables or session dependencies die. */
-    IHS_Thread *feedbackWorker;
-    IHS_Cond *feedbackCond;
+    /* Receive worker advances the window and emits feedback at batch end.
+     * The decoder worker only consumes the complete-frame FIFO below. */
     uint32_t lastPacketTimestamp, feedbackDeadline;
     bool haveFeedbackDeadline, feedbackDirty;
 
-    /* FEC groups have their own sequence and never enter window. Complete
-     * payloads cross to the existing decoder worker through a bounded FIFO. */
+    /* FEC groups have their own sequence and never enter window. All complete
+     * payloads cross to the decoder worker through this bounded FIFO. */
     IHS_FECReceiver *fec;
     struct IHS_FECFrameNode *fecHead, *fecTail;
     size_t fecQueuedBytes, fecQueuedCount, fecQueueLimit;
@@ -104,7 +102,9 @@ bool IHS_SessionChannelDataBuildFeedback(IHS_SessionChannelData *, uint32_t now,
 /* Transfer an ordered, reassembled reliable frame to the decoder worker. */
 void IHS_SessionChannelDataReceiveReliableFrame(IHS_SessionChannel *, IHS_SessionFrame *);
 
-/* One worker polling step. Hold windowLock; publish missing outside that lock. */
+/* RX batch-end protocol update, independent of decoder progress. */
+void IHS_SessionChannelDataUpdateAt(IHS_SessionChannelData *, uint32_t tick);
+/* Decoder FIFO polling only. Hold windowLock; missing is always zero. */
 bool IHS_SessionChannelDataPollLocked(IHS_SessionChannelData *, IHS_SessionFrame *, uint16_t *missing);
 
 /* Complete-frame consumer used by the data worker, outside windowLock. */

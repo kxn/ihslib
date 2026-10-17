@@ -4,6 +4,7 @@
 #include "ihslib.h"
 #include "session/session_pri.h"
 #include "session/reliable.h"
+#include "session/channels/ch_data.h"
 #include "test_session.h"
 #include <assert.h>
 #include <netinet/in.h>
@@ -16,6 +17,32 @@ static atomic_uint now, work, phase, frames, handshakeId;
 static atomic_bool scripted, handshake, acknowledged;
 static uint32_t start, batch;
 static bool crc;
+static bool ordinary;
+static IHS_SessionPacketsWindow *dataWindow;
+bool __real_IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *, IHS_SessionFrame *);
+bool __wrap_IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionFrame *f) {
+    bool result = __real_IHS_SessionPacketsWindowPoll(window, f);
+    if (ordinary && window == dataWindow) {
+        assert(atomic_load(&phase) == 7 && atomic_load(&now) == batch + 136);
+        assert(s->transport.updateTime == batch + 36);
+        if (result) {
+            unsigned n = atomic_fetch_add(&frames, 1);
+            assert(n < 2 && f->header.receiveBegin == batch+n*18 &&
+                f->header.receiveTimestamp == batch+n*18 && f->header.sendTimestamp == 900000+n);
+        } else if (atomic_load(&frames) == 2) atomic_store(&acknowledged, true);
+    }
+    return result;
+}
+static void data_init(IHS_SessionChannel *ch, const void *unused) {
+    (void)unused; assert(IHS_SessionChannelDataInit(ch, 32));
+}
+static bool data_start(IHS_SessionChannel *ch) { (void)ch; return true; }
+static void data_stop(IHS_SessionChannel *ch) { (void)ch; }
+static const IHS_SessionChannelDataClass dataClass = {
+    .base={.instanceSize=sizeof(IHS_SessionChannelData),.init=data_init,
+        .deinit=IHS_SessionChannelDataDeinit,.stopped=IHS_SessionChannelDataStopped,
+        .received=IHS_SessionChannelDataReceived},.start=data_start,.stop=data_stop,
+};
 uint32_t __wrap_IHS_SessionPacketTimestamp(void) { return atomic_load(&now); }
 static unsigned read32(const uint8_t *p) {
     return p[0] | (unsigned)p[1]<<8 | (unsigned)p[2]<<16 | (unsigned)p[3]<<24;
@@ -38,6 +65,7 @@ bool __real_IHS_BaseSend(IHS_Base *,IHS_SocketAddress,const IHS_Buffer *);
 bool __wrap_IHS_BaseSend(IHS_Base *base,IHS_SocketAddress address,const IHS_Buffer *b) {
     if (!atomic_load(&scripted)) return __real_IHS_BaseSend(base,address,b);
     const uint8_t *w=IHS_BufferPointer(b); unsigned type=w[0]&127;
+    assert(!ordinary || type != 10 || w[4] != 3); /* complete batch needs no NACK */
     if (type==5 && w[4]==1) {
         atomic_store(&handshakeId,w[7]|(unsigned)w[8]<<8);atomic_store(&handshake,true);
     }
@@ -59,10 +87,10 @@ int __wrap_IHS_UDPSocketWaitReadable(IHS_UDPSocket *socket,uint32_t ms) {
 static int incoming(IHS_UDPPacket *rx,unsigned type,unsigned ch,unsigned id,unsigned retry) {
     IHS_SessionPacket p={.header={.type=type,.channelId=ch,.packetId=id,.retransmitCount=retry,
         .srcConnectionId=34,.dstConnectionId=s->state.connectionId,.hasCrc=type!=2&&crc,
-        .sendTimestamp=type==5?900000+id:atomic_load(&now)}};
+        .sendTimestamp=type==5||type==3?900000+id:atomic_load(&now)}};
     IHS_SessionPacketBodyInitialize(&p.body,p.header.hasCrc);
     uint8_t bytes[4]={0};size_t size=4;
-    if(type==5) {bytes[0]=6;bytes[1]=0xaa;bytes[2]=0xbb;size=3;}
+    if(type==5||type==3) {bytes[0]=6;bytes[1]=0xaa;bytes[2]=0xbb;size=3;}
     if(type==7) {uint32_t t=atomic_load(&now);for(unsigned n=0;n<4;++n)bytes[n]=t>>(n*8);}
     IHS_BufferAppendMem(&p.body,bytes,size);IHS_SessionPacketPopulateBuffer(&p);
     rx->address=s->info.address;IHS_BufferAppendMem(&rx->buffer,p.body.data,IHS_SessionPacketSize(&p));
@@ -81,7 +109,7 @@ int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket,IHS_UDPPacket *rx) {
     case 4:case 5: {
         unsigned n=atomic_load(&phase)-4;assert(!atomic_load(&frames));
         atomic_fetch_add(&now,7);atomic_store(&work,11);atomic_fetch_add(&phase,1);
-        return incoming(rx,5,4,n,n);
+        return incoming(rx,ordinary?3:5,ordinary?3:4,n,n);
     }
     case 6:
         assert(!atomic_load(&frames));atomic_fetch_add(&now,100);atomic_store(&phase,7);return 0;
@@ -110,19 +138,25 @@ static void loopback(void) {
 }
 int main(void) {
     IHS_Init();loopback();
-    for(unsigned c=0;c<2;++c){
+    for(unsigned mode=0;mode<2;++mode)for(unsigned c=0;c<2;++c){
+        ordinary=mode;dataWindow=NULL;
         crc=c;start=1000000;batch=start+1000;atomic_store(&now,start);
         atomic_store(&phase,0);atomic_store(&frames,0);atomic_store(&work,0);
         atomic_store(&handshake,false);atomic_store(&acknowledged,false);atomic_store(&scripted,true);
         s=IHS_TestSessionCreate();s->outgoing.rate[0]=s->outgoing.rate[1]=0;
+        if (ordinary) {
+            IHS_SessionChannelData *d=(void *)IHS_SessionChannelDataCreate(&dataClass,s,
+                IHS_SessionChannelTypeDataVideo,3,NULL);
+            assert(d);dataWindow=d->window;IHS_SessionChannelAdd(s,&d->base);
+        }
         assert(IHS_SessionConnect(s));uint64_t end=IHS_TimerNow()+2000;
         while(!atomic_load(&acknowledged)&&IHS_TimerNow()<end)usleep(1000);
         assert(atomic_load(&acknowledged));
-        IHS_BaseLock(&s->base);assert(s->networkPackets.lost==1);
+        IHS_BaseLock(&s->base);assert(s->networkPackets.lost==(ordinary?0u:1u));
         bool found=false;for(size_t n=0;n<s->networkPackets.queue.count;++n){
             const IHS_NetworkSample *p=&s->networkPackets.queue.data[(s->networkPackets.queue.head+n)&(s->networkPackets.queue.capacity-1)];
             if(p->values[1]){assert(p->timestamp==batch+36&&p->values[0]==1);found=true;}}
-        assert(found);IHS_BaseUnlock(&s->base);
+        assert(found==!ordinary);IHS_BaseUnlock(&s->base);
         IHS_SessionDisconnect(s);IHS_SessionThreadedJoin(s);IHS_SessionDestroy(s);
         atomic_store(&scripted,false);
     }

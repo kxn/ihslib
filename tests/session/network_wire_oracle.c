@@ -32,9 +32,8 @@ static bool initialize_media(IHS_SessionChannel *ch, uint16_t capacity) {
     d->fecQueueLimit = (size_t)capacity * 2048;
     d->windowLock = IHS_MutexCreate();
     d->windowCond = IHS_CondCreate();
-    d->feedbackCond = IHS_CondCreate();
     atomic_init(&d->interrupted, false);
-    return d->window && d->fec && d->windowLock && d->windowCond && d->feedbackCond;
+    return d->window && d->fec && d->windowLock && d->windowCond;
 }
 bool __real_IHS_SessionChannelDataInit(IHS_SessionChannel *, uint16_t);
 bool __wrap_IHS_SessionChannelDataInit(IHS_SessionChannel *ch, uint16_t capacity) {
@@ -270,6 +269,12 @@ int main(int argc, char **argv) {
     char line[8192];
     while (fgets(line, sizeof(line), stdin)) {
         unsigned type, ch, crc, source, dest, size, bad;
+        if (line[0] == 'Q') {
+            int priority;
+            assert(cycleMode && sscanf(line, "Q %u %d", &ch, &priority) == 2 && ch < 32);
+            IHS_OutgoingPriority(session, ch, priority);
+            continue;
+        }
         if (line[0] == 'B') {
             unsigned ready, blocked;
             assert(cycleMode && sscanf(line, "B %u %u %u %u %u", &now, &ready, &blocked,
@@ -299,6 +304,16 @@ int main(int argc, char **argv) {
             receiving = true;
             assert(session->base.callbacks.run->receiveCycle(&session->base, NULL, &rx));
             receiving = false;
+            for (;;) {
+                IHS_SessionFrame frame = {0}; uint16_t missing;
+                IHS_MutexLock(media->windowLock);
+                bool readyFrame = IHS_SessionChannelDataPollLocked(media, &frame, &missing);
+                IHS_MutexUnlock(media->windowLock);
+                assert(missing == 0);
+                if (readyFrame) deliver(&frame);
+                IHS_SessionFrameClear(&frame, true);
+                if (!readyFrame) break;
+            }
             IHS_BufferClear(&rx.buffer, true);
             for (unsigned n=0;n<cycleCount;++n) IHS_BufferClear(&cycleRows[n].wire,true);
         } else if (line[0] == 'W') {
@@ -343,8 +358,9 @@ int main(int argc, char **argv) {
             assert(lossMode && sscanf(line, "U %u %u", &now, &ch) == 2);
             if (videoMode || ch != 3) IHS_SessionReliableUpdateChannel(session, ch);
             if (ch == 3) {
-                /* Drive the production worker's polling step deterministically;
-                 * scheduler/decoder/feedback worker are outside this oracle. */
+                IHS_SessionChannelDataUpdateAt(media, now);
+                /* Drive the production complete-frame FIFO consumer; actual
+                 * decoder scheduling remains outside this oracle. */
                 for (;;) {
                     IHS_SessionFrame frame = {.body = IHS_BUFFER_INIT(1024, 0)};
                     uint16_t missing;
@@ -414,7 +430,6 @@ int main(int argc, char **argv) {
         IHS_SessionPacketsWindowDestroy(media->window);
         IHS_MutexDestroy(media->windowLock);
         IHS_CondDestroy(media->windowCond);
-        IHS_CondDestroy(media->feedbackCond);
         }
     }
     IHS_SessionDestroy(session);
