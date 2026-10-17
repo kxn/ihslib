@@ -168,10 +168,13 @@ int main(int argc, char **argv) {
         media.base = (IHS_SessionChannel){.cls = &mediaClass, .id = 3, .session = session,
                                           .type = IHS_SessionChannelTypeDataVideo};
         media.window = IHS_SessionPacketsWindowCreateMedia(1024);
+        media.fec = IHS_FECReceiverCreate();
+        media.fecQueueCapacity = 1024;
+        media.fecQueueLimit = 1024 * 2048;
         media.windowLock = IHS_MutexCreate();
         media.windowCond = IHS_CondCreate();
         media.feedbackCond = IHS_CondCreate();
-        assert(media.window && media.windowLock && media.windowCond && media.feedbackCond);
+        assert(media.window && media.fec && media.windowLock && media.windowCond && media.feedbackCond);
         IHS_SessionChannelAdd(session, &media.base);
     }
     char line[256];
@@ -200,6 +203,19 @@ int main(int argc, char **argv) {
             receiving = true;
             session->base.callbacks.received(&session->base, &session->info.address, &wire);
             receiving = false;
+            if (type == IHS_SessionPacketTypeUnreliableFEC) {
+                /* Source delegates FEC synchronously. Native bridges through
+                 * its worker FIFO; drain that production step within this
+                 * action to compare payload/counters, not callback timing. */
+                IHS_SessionFrame f = {.body = IHS_BUFFER_INIT(1024, 0)};
+                uint16_t missing;
+                IHS_MutexLock(media.windowLock);
+                bool ready = IHS_SessionChannelDataPollLocked(&media, &f, &missing);
+                IHS_MutexUnlock(media.windowLock);
+                assert(missing == 0);
+                if (ready) deliver(&f);
+                IHS_SessionFrameClear(&f, true);
+            }
             IHS_BufferClear(&wire, true);
             IHS_SessionPacketClear(&p, true);
         } else if (line[0] == 'U') {
@@ -263,6 +279,8 @@ int main(int argc, char **argv) {
     if (lossMode) {
         assert(session->channels[session->numChannels - 1] == &media.base);
         session->channels[--session->numChannels] = NULL;
+        assert(media.fecQueuedCount == 0);
+        IHS_FECReceiverDestroy(media.fec);
         IHS_SessionPacketsWindowDestroy(media.window);
         IHS_MutexDestroy(media.windowLock);
         IHS_CondDestroy(media.windowCond);
