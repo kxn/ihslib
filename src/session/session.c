@@ -689,6 +689,9 @@ static void SessionFinalized(IHS_Base *base, void *context) {
 
 static bool SessionReceiveCycle(IHS_Base *base, void *context, IHS_UDPPacket *packet) {
     IHS_Session *session = (IHS_Session *)base;
+    /* Before RX/transport/control consumption, matching OnThink's inline gate. */
+    IHS_SessionVideoHandlePendingReset(session);
+    if (base->interrupted) return false;
     IHS_BaseLock(base);
     unsigned waitMs = session->outgoing.blocked ? 0 : 2;
     IHS_BaseUnlock(base);
@@ -712,6 +715,7 @@ static bool SessionReceiveCycle(IHS_Base *base, void *context, IHS_UDPPacket *pa
 }
 
 static void SessionUpdate(IHS_Base *base, void *context) {
+    IHS_SessionVideoHandlePendingReset((IHS_Session *)base);
     SessionUpdateAt(base, context, IHS_SessionPacketTimestamp());
 }
 static void SessionUpdateAt(IHS_Base *base, void *context, uint32_t tick) {

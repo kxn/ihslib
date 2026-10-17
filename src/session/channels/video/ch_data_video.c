@@ -64,6 +64,8 @@ typedef struct IHS_SessionChannelVideo {
         IHS_StreamVideoFrameFlag flags;
     } frame;
     bool appStarted;
+    bool prepared, backendReady;
+    atomic_bool resetRequested;
     IHS_VideoEpochInfo epoch;
     IHS_FrameTicket *incoming, *assembly;
     uint16_t assemblyId;
@@ -128,6 +130,7 @@ static const IHS_SessionChannelDataClass ChannelClass = {
     .start = DataStart,
     .dataFrame = DataReceived,
     .stop = DataStop,
+    .startOnCaller = true,
 };
 
 static const uint8_t EmptyIV[16] = {
@@ -146,6 +149,7 @@ static void ChannelVideoInit(IHS_SessionChannel *channel, const void *config) {
     videoCh->config.width = message->width;
     videoCh->config.height = message->height;
     videoCh->config.codec = (IHS_StreamVideoCodec)message->codec;
+    atomic_init(&videoCh->resetRequested, false);
     if (message->has_codec_data && message->codec_data.len) {
         if (message->codec_data.len > 2u * 1024u * 1024u || !message->codec_data.data) {
             channel->initFailed = true;
@@ -194,39 +198,51 @@ static bool DataStart(IHS_SessionChannel *channel) {
     IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
     IHS_Session *session = channel->session;
     const IHS_StreamVideoCallbacks *callbacks = session->callbacks.video;
-    if (session->invalidVideoCallbacks)
+    if (session->invalidVideoCallbacks) {
+        IHS_SessionDisconnect(session); /* Invalid local callback/ownership contract. */
         return false;
+    }
     if (!callbacks)
         return true;
+    if (!videoCh->prepared) {
+        if (callbacks->prepare && callbacks->prepare(session, &videoCh->config,
+                                                     session->callbackContexts.video) != 0)
+            return false;
+        videoCh->prepared = true;
+    }
     if (videoCh->tracked &&
         (!session->frameTracker || !videoCh->epoch.video_epoch ||
-         !IHS_FrameTrackerOpenEpoch(session->frameTracker, videoCh->epoch.video_epoch)))
+         !IHS_FrameTrackerOpenEpoch(session->frameTracker, videoCh->epoch.video_epoch))) {
+        IHS_SessionDisconnect(session);
         return false;
-    if (!videoCh->tracked && !callbacks->start)
+    }
+    if (!videoCh->tracked && !callbacks->start) {
+        videoCh->backendReady = true; /* Preserve legacy submit-only callbacks. */
         return true;
+    }
     int started =
         videoCh->tracked
             ? callbacks->startTracked(session, &videoCh->epoch, &videoCh->config,
                                       session->callbackContexts.video)
             : callbacks->start(session, &videoCh->config, session->callbackContexts.video);
-    if (started != 0) {
+    bool unavailable = callbacks->prepare && started == 1;
+    if (started != 0 && !unavailable) {
         if (videoCh->tracked)
             IHS_FrameTrackerCloseEpoch(session->frameTracker, videoCh->epoch.video_epoch);
+        IHS_SessionDisconnect(session); /* Local guard, or legacy combined start failure. */
         return false;
     }
     videoCh->appStarted = true;
+    videoCh->backendReady = !unavailable;
+    if (unavailable) return true;
     CVideoDecoderInfoMsg message = CVIDEO_DECODER_INFO_MSG__INIT;
     message.info = (char *)session->clientCapabilities.decoderInfo;
     if (session->clientCapabilities.decoderThreads)
         PROTOBUF_C_SET_VALUE(message, threads, session->clientCapabilities.decoderThreads);
 
-    if (!IHS_SessionSendControlMessage(session, k_EStreamControlVideoDecoderInfo,
-                                       (const ProtobufCMessage *)&message)) {
-        /* DataThreadWorker skips stop when start fails. Undo every successful
-         * stage here, before channel/session destruction can begin. */
-        DataStop(channel);
-        return false;
-    }
+    /* Standalone StartDecoding does not stop its actor on Info send failure. */
+    IHS_SessionSendControlMessage(session, k_EStreamControlVideoDecoderInfo,
+                                  (const ProtobufCMessage *)&message);
     return true;
 }
 
@@ -375,6 +391,36 @@ static void DataStop(IHS_SessionChannel *channel) {
     } else if (callbacks && callbacks->stop)
         callbacks->stop(session, session->callbackContexts.video);
     DiscardPending(videoCh);
+}
+
+void IHS_SessionVideoHandlePendingReset(IHS_Session *session) {
+    if (session->base.interrupted || session->transport.detached)
+        return;
+    IHS_SessionChannel *ch = IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataVideo);
+    /* A generic data-channel fixture/consumer may use the video channel type
+     * without owning this private decoder state. Type alone is not its ABI. */
+    if (!ch || ch->cls != &ChannelClass.base) return;
+    IHS_SessionChannelVideo *video = (void *)ch;
+    if (!atomic_load(&video->resetRequested) || !video->appStarted) return;
+    /* No Base/state mutex across join or callbacks. RX is this actor, so channel
+     * replacement cannot race this section. New complete data is excluded. */
+    IHS_SessionChannelDataJoinAndPurge(&video->base);
+    DataStop(ch);
+    video->states.waitingKeyFrame = true;
+    video->states.syncingBacklog = false;
+    video->states.lastRecoveryRequest = IHS_SessionPacketTimestamp();
+    atomic_store(&video->resetRequested, false); /* Coalesce old-worker requests. */
+    if (session->base.interrupted || session->transport.detached) return;
+    if (video->tracked) {
+        if (session->nextVideoEpoch == UINT64_MAX) {
+            IHS_SessionDisconnect(session);
+            return;
+        }
+        video->epoch.video_epoch = ++session->nextVideoEpoch;
+    }
+    if (!DataStart(ch) || session->base.interrupted || session->transport.detached) return;
+    IHS_SessionChannelDataRestartWorker(&video->base);
+    IHS_SessionChannelDataLost(ch);
 }
 
 static size_t VideoFrameHeaderParse(IHS_VideoFrameHeader *header, const uint8_t *data) {
@@ -576,16 +622,21 @@ static IHS_StreamVideoSubmitResult SubmitFrame(IHS_SessionChannel *channel, uint
         bool taken = false;
         if (videoCh->assembly)
             IHS_FrameTicketSetSize(videoCh->assembly, data->size);
-        result = callbacks->submitTracked(session, &videoCh->epoch, frameId, videoCh->assembly,
-                                          data, flags, &taken, context);
+        result = videoCh->backendReady
+            ? callbacks->submitTracked(session, &videoCh->epoch, frameId, videoCh->assembly,
+                                        data, flags, &taken, context)
+            : IHS_StreamVideoSubmitReset;
         if (!taken && videoCh->assembly) {
             IHS_FrameOutcome outcome = {.result = IHS_VideoFrameResultDroppedDecodeCorrupt,
                                         .completionUs = IHS_TimerNow() * 1000};
             IHS_FrameTicketComplete(videoCh->assembly, &outcome);
         }
     } else
-        result = callbacks->submit(session, frameId, data, flags, context);
-    if (result == IHS_StreamVideoSubmitReportLost) {
+        result = videoCh->backendReady ? callbacks->submit(session, frameId, data, flags, context)
+                                      : IHS_StreamVideoSubmitReset;
+    if (result == IHS_StreamVideoSubmitReset) {
+        atomic_store(&videoCh->resetRequested, true);
+    } else if (result == IHS_StreamVideoSubmitReportLost) {
         /* FinalDecode 0x7b1158..68 requests recovery without an unconditional
          * backend reset or strict keyframe wait. The backend may still decode
          * subsequent frames; damaged output is rejected by the application. */

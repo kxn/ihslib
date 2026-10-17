@@ -71,7 +71,7 @@ typedef struct IHS_SessionChannelDataClass {
 
     void (*stop)(struct IHS_SessionChannel *channel);
 
-    bool startOnCaller; /* Audio: start synchronously, then stop after joining the worker (§75). */
+    bool startOnCaller; /* Start on lifecycle actor; stop only after worker join/purge. */
 } IHS_SessionChannelDataClass;
 
 #define IHS_SESSION_DATA_FRAME_HEADER_SIZE 12
@@ -108,6 +108,10 @@ void IHS_SessionChannelDataReceiveReliableFrame(IHS_SessionChannel *, IHS_Sessio
 void IHS_SessionChannelDataUpdateAt(IHS_SessionChannelData *, uint32_t tick);
 /* Decoder FIFO polling only. Hold windowLock; missing is always zero. */
 bool IHS_SessionChannelDataPollLocked(IHS_SessionChannelData *, IHS_SessionFrame *, uint16_t *missing);
+/* RX owner, outside Base/state locks: exclude and join decoder, purge only its
+ * complete-frame FIFO. Connection receive windows/FEC groups stay alive. */
+void IHS_SessionChannelDataJoinAndPurge(IHS_SessionChannelData *);
+void IHS_SessionChannelDataRestartWorker(IHS_SessionChannelData *);
 
 /* Complete-frame consumer used by the data worker, outside windowLock. */
 void IHS_SessionChannelDataReceiveFrame(IHS_SessionChannelData *, IHS_SessionFrame *);

@@ -60,6 +60,9 @@ typedef enum IHS_StreamVideoSubmitResult {
     /* Request a replacement keyframe; the backend remains active. This is not
      * a notification that decoder state has been destroyed or recreated. */
     IHS_StreamVideoSubmitReportLost = 1,
+    /* Backend absent: request an actor-owned rebuild on the next client cycle.
+     * Unlike ReportLost, no immediate DataLost is produced by this result. */
+    IHS_StreamVideoSubmitReset = 2,
     IHS_StreamVideoSubmitError = -1,
 } IHS_StreamVideoSubmitResult;
 
@@ -140,4 +143,11 @@ typedef struct IHS_StreamVideoCallbacks {
                                                  IHS_StreamVideoFrameFlag, bool *ticketTaken,
                                                  void *);
     void (*stopTracked)(IHS_Session *, const IHS_VideoEpochInfo *, void *);
+    /* Optional player preparation, before decoder start on the control actor.
+     * Nonzero retains the media mapping but discards matching complete frames.
+     * With prepare, start/startTracked may return 1 for an active decoder whose
+     * backend is unavailable; 0 is ready and negative is local fatal protection.
+     * Stop releases the decoder; player/window ownership stays with the app.
+     * Zero-initialize and rebuild callback tables when upgrading this source ABI. */
+    int (*prepare)(IHS_Session *, const IHS_StreamVideoConfig *, void *);
 } IHS_StreamVideoCallbacks;

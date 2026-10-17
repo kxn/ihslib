@@ -200,6 +200,28 @@ void IHS_SessionChannelDataStopped(IHS_SessionChannel *channel) {
     DataThreadInterrupt((IHS_SessionChannelData *)channel);
 }
 
+void IHS_SessionChannelDataJoinAndPurge(IHS_SessionChannelData *data) {
+    DataThreadInterrupt(data);
+    atomic_store(&data->interrupted, true);
+    if (data->worker) IHS_ThreadJoin(data->worker);
+    data->worker = NULL;
+    IHS_MutexLock(data->windowLock);
+    IHS_SessionFrame frame = {0};
+    while (PollFEC(data, &frame)) IHS_BufferClear(&frame.body, true);
+    IHS_MutexUnlock(data->windowLock);
+}
+
+void IHS_SessionChannelDataRestartWorker(IHS_SessionChannelData *data) {
+    assert(!data->worker);
+    IHS_MutexLock(data->windowLock);
+    atomic_store(&data->interrupted, false);
+    IHS_MutexUnlock(data->windowLock);
+    char name[16];
+    snprintf(name, sizeof(name), "IHS%s", DataChannelName(data->base.type));
+    data->worker = IHS_ThreadCreate((IHS_ThreadFunction *)DataThreadWorker, name, data);
+    /* Original Reset ignores the OS Start result and retains the actor. */
+}
+
 size_t IHS_SessionChannelDataFrameHeaderParse(IHS_SessionDataFrameHeader *header,
                                               const IHS_Buffer *data) {
     if (data->size < IHS_SESSION_DATA_FRAME_HEADER_SIZE)

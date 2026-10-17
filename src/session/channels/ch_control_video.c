@@ -39,7 +39,7 @@ void IHS_SessionChannelControlOnVideo(IHS_SessionChannel *channel, EStreamContro
     switch (type) {
         case k_EStreamControlStartVideoData: {
             CStartVideoDataMsg *message = cstart_video_data_msg__unpack(NULL, payload->size,
-                                                                        IHS_BufferPointer(payload));
+                                          payload->size ? IHS_BufferPointer(payload) : NULL);
             if (message == NULL) {
                 IHS_SessionLog(session, IHS_LogLevelWarn, "Video", "Malformed CStartVideoDataMsg");
                 break;
@@ -63,7 +63,12 @@ void IHS_SessionChannelControlOnVideo(IHS_SessionChannel *channel, EStreamContro
                 cstart_video_data_msg__free_unpacked(message, NULL);
                 break;
             }
-            video = IHS_SessionChannelDataVideoCreate(session, message);
+            CStartVideoDataMsg effective = *message;
+            if (!effective.has_codec) {
+                effective.has_codec = true;
+                effective.codec = (EStreamVideoCodec)session->negotiatedVideoCodec;
+            }
+            video = IHS_SessionChannelDataVideoCreate(session, &effective);
             IHS_SessionChannelAdd(session, video);
             cstart_video_data_msg__free_unpacked(message, NULL);
             break;

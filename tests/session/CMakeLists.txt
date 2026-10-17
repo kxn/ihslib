@@ -11,6 +11,12 @@ ihs_add_test(video_control test_video_control.c)
 target_link_libraries(ihstest_video_control PRIVATE ihs-test-session)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ihs-video-start-oracle video_start_oracle.c)
+    target_include_directories(ihs-video-start-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-video-start-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-video-start-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-video-start-oracle PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
+        -Wl,--wrap=IHS_ThreadCreate -Wl,--wrap=IHS_SessionSendControlMessage)
     add_executable(ihs-client-shutdown-oracle client_shutdown_oracle.c)
     target_include_directories(ihs-client-shutdown-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-client-shutdown-oracle PRIVATE ihs-test-session ihslib)
@@ -148,6 +154,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(ihstest_initial_send_worker PRIVATE -Wl,--wrap=IHS_BaseSend
         -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive -Wl,--wrap=IHS_UDPSocketWaitReadable)
     set_tests_properties(initial_send initial_send_worker PROPERTIES TIMEOUT 20)
+    ihs_add_test(video_reset_worker test_video_reset_worker.c)
+    target_link_libraries(ihstest_video_reset_worker PRIVATE ihs-test-session)
+    target_link_options(ihstest_video_reset_worker PRIVATE -Wl,--wrap=IHS_ThreadCreate
+        -Wl,--wrap=IHS_ThreadJoin -Wl,--wrap=IHS_SessionPacketsWindowReleaseFrame
+        -Wl,--wrap=IHS_SessionChannelControlOnMessageReceived
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_SessionSendControlMessage
+        -Wl,--wrap=IHS_SessionChannelDataLost -Wl,--wrap=IHS_BaseSend -Wl,--wrap=IHS_UDPSocketWaitReadable)
+    set_tests_properties(video_reset_worker PROPERTIES TIMEOUT 20)
     ihs_add_test(video_tracked test_video_tracked.c)
     target_link_libraries(ihstest_video_tracked PRIVATE ihs-test-session)
     target_link_options(ihstest_video_tracked PRIVATE -Wl,--wrap=IHS_SessionSendControlMessage)
