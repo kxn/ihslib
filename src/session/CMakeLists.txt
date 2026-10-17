@@ -12,6 +12,7 @@ target_sources(ihslib PRIVATE
         frame_stats.c
         frame_tracker.c
         clock.c
+        network_stats.c
         callbacks.c
         reliable.c
         retransmission.c

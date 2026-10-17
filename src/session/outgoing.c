@@ -177,11 +177,7 @@ int IHS_OutgoingSendUnreliable(IHS_Session *s, uint8_t ch, bool retry) {
     IHS_BaseLock(&s->base);
     uint32_t now = IHS_SessionPacketTimestamp();
     IHS_OutgoingWindow *w = &s->outgoing.unreliable[ch];
-    IHS_MutexLock(s->clock.lock);
-    float rttMs = s->clock.rttSamples
-                      ? (float)s->clock.rttSum / s->clock.rttSamples * (1000.0f / 65536.0f)
-                      : 0;
-    IHS_MutexUnlock(s->clock.lock);
+    float rttMs = IHS_StreamClockRTTMilliseconds(&s->clock);
     uint32_t ms = (uint32_t)(rttMs + 2.0f);
     uint32_t keep = 13107 + 2 * (uint32_t)((uint64_t)ms * 65536 / 1000);
     while (w->head != w->tail &&

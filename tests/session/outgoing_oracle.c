@@ -86,8 +86,8 @@ int main(void) {
     s->state.connectionId = s->state.hostConnectionId = 0;
     s->state.crcRequired = true;
     s->state.connectionState = IHS_SessionConnectionStateConnected;
-    s->clock.rttSum = 16384;
-    s->clock.rttSamples = 25;
+    /* Source fixture seeds connection+732 directly, not a live ping queue. */
+    s->clock.ping.milliseconds = 10;
     s->clock.smoothedRTT = 100;
     char line[4096], bitmap[2048];
     unsigned ch, id, count, stamp, created, type, retry, deadline, rate, head, cursor, base,

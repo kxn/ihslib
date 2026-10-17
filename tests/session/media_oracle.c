@@ -40,8 +40,7 @@ int main(int argc, char **argv) {
     IHS_Session *s = IHS_TestSessionCreate();
     s->state.connectionState = IHS_SessionConnectionStateHandshaking;
     s->state.connectionId = 12;
-    s->clock.rttSamples = 1;
-    s->clock.rttSum = strtoul(argv[1], NULL, 0);
+    assert(IHS_NetworkPingRecord(&s->clock.ping, strtoul(argv[1], NULL, 0), 1000000));
     s->clock.smoothedRTT = strtoul(argv[2], NULL, 0);
     IHS_SessionChannelData ch = {
         .base = {.session = s, .type = IHS_SessionChannelTypeDataVideo, .id = 3}};
