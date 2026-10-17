@@ -29,6 +29,7 @@
 #include "ch_control.h"
 #include "ch_data_audio.h"
 #include "session/session_pri.h"
+#include "session/unreliable.h"
 
 #include "protobuf/pb_utils.h"
 #include "protobuf/discovery.pb-c.h"
@@ -49,6 +50,11 @@ void IHS_SessionChannelControlOnAudio(IHS_SessionChannel *channel, EStreamContro
             }
             /* OnStartAudioData 0x7adddc..0x7addf8 stops the previous decoder. */
             if (audio) IHS_SessionChannelRemove(session, audio->id);
+            /* Original Start*Data sets transport delay before decoder creation. */
+            if (!IHS_SessionUnreliableSetDelay(session, message->channel, 6553)) {
+                cstart_audio_data_msg__free_unpacked(message, NULL);
+                break;
+            }
             audio = IHS_SessionChannelDataAudioCreate(session, message);
             IHS_SessionChannelAdd(session, audio);
             cstart_audio_data_msg__free_unpacked(message, NULL);

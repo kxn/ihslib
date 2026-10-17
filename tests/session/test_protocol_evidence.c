@@ -221,7 +221,7 @@ static void handshake_unconnected_probe(void) {
     IHS_SessionDestroy(s);
 }
 static void receive_early(IHS_SessionChannel *channel, IHS_SessionPacket *p) {
-    assert(channel->id == 4 && p->header.packetId == 77);
+    assert(channel->id == 4 && p->header.packetId == 0);
     assert(p->header.receiveTimestamp != 0);
     assert(p->body.size == 1 && *IHS_BufferPointer(&p->body) == 99);
     earlyPackets++;
@@ -259,15 +259,20 @@ static void session_feedback_and_early_data(void) {
     IHS_SessionGetReliabilityStats(s, &stats);
     assert(stats.hidAcknowledged == 1);
     IHS_SessionPacketClear(&p, true);
-    init(&p, IHS_SessionPacketTypeUnreliable, 77, 0);
+    init(&p, IHS_SessionPacketTypeUnreliable, 0, 0);
     p.header.channelId = 4; p.header.srcConnectionId = 34; p.header.dstConnectionId = 12;
     IHS_BufferAppendUInt8(&p.body, 99);
     deliver_wire(s, &p);
-    assert(IHS_SessionChannelFor(s, 4) == NULL && s->pendingDataCount == 1);
+    /* Transport receives/reassembles before decoder configuration. An unknown
+     * message tag is not a complete data packet pending a decoder. */
+    assert(IHS_SessionChannelFor(s, 4) == NULL && s->pendingDataCount == 0);
+    assert(s->unreliable[4] && IHS_SessionPacketsWindowSize(s->unreliable[4]->window) == 1);
     static const IHS_SessionChannelClass cls = {.received=receive_early, .instanceSize=sizeof(IHS_SessionChannel)};
     IHS_SessionChannel *ch = IHS_SessionChannelCreate(&cls, s, IHS_SessionChannelTypeDataVideo, 4, NULL);
     IHS_SessionChannelAdd(s, ch);
-    assert(earlyPackets == 1 && s->pendingDataCount == 0);
+    assert(earlyPackets == 0 && s->pendingDataCount == 0);
+    IHS_SessionUnreliableUpdateAt(s, 4, IHS_SessionPacketTimestamp());
+    assert(!IHS_SessionPacketsWindowSize(s->unreliable[4]->window) && earlyPackets == 0);
     IHS_SessionPacketClear(&p, true);
     IHS_SessionDestroy(s);
 }

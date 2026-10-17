@@ -32,6 +32,7 @@
 #include "session/frame.h"
 #include "session/fec.h"
 #include "session/window.h"
+#include "session/unreliable.h"
 
 typedef struct IHS_SessionDataFrameHeader {
     uint16_t id;
@@ -43,22 +44,16 @@ typedef struct IHS_SessionDataFrameHeader {
 
 typedef struct IHS_SessionChannelData {
     IHS_SessionChannel base;
-    IHS_SessionPacketsWindow *window;
-    IHS_Mutex *windowLock;
+    IHS_UnreliableChannel *receive; /* borrowed from the connection */
+    IHS_Mutex *windowLock; /* consumer FIFO lock; transport has receive->lock */
     IHS_Cond *windowCond;
 
     IHS_Thread *worker;
     atomic_bool interrupted;
     IHS_Mutex *lock;
 
-    /* Receive worker advances the window and emits feedback at batch end.
-     * The decoder worker only consumes the complete-frame FIFO below. */
-    uint32_t lastPacketTimestamp, feedbackDeadline;
-    bool haveFeedbackDeadline, feedbackDirty;
-
-    /* FEC groups have their own sequence and never enter window. All complete
-     * payloads cross to the decoder worker through this bounded FIFO. */
-    IHS_FECReceiver *fec;
+    /* All accepted complete payloads cross to the decoder worker through this
+     * bounded FIFO. Transport windows and FEC groups belong to the connection. */
     struct IHS_FECFrameNode *fecHead, *fecTail;
     size_t fecQueuedBytes, fecQueuedCount, fecQueueLimit;
     unsigned fecQueueCapacity;
@@ -94,7 +89,7 @@ void IHS_SessionChannelDataStopped(IHS_SessionChannel *channel);
 size_t IHS_SessionChannelDataFrameHeaderParse(IHS_SessionDataFrameHeader *header,
                                               const IHS_Buffer *data);
 
-/* Internal protocol step, serialized by windowLock. UINT32_MAX means wait for
+/* Internal protocol step, serialized by receive->lock. UINT32_MAX means wait for
  * more input; otherwise retry after waitTicks. Ready packets transfer to caller. */
 bool IHS_SessionChannelDataBuildFeedback(IHS_SessionChannelData *, uint32_t now,
                                          IHS_SessionPacket *, uint32_t *waitTicks);

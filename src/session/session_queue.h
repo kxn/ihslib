@@ -10,5 +10,4 @@ typedef struct IHS_QueueItem {
     uint32_t queuedAt;
     uint16_t batchCount; /* reliable frame head: N; continuation: 0 */
     struct IHS_QueueItem *batchNext;
-    bool pendingReliableFrame;
 } QueuedPacket;

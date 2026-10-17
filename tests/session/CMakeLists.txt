@@ -48,6 +48,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_tests_properties(negotiation_stage_worker PROPERTIES TIMEOUT 20)
     add_executable(ihs-frame-events-loop-oracle frame_events_loop_oracle.c)
     add_executable(ihs-network-collectors-oracle network_collectors_oracle.c)
+    add_executable(ihs-early-media-worker early_media_worker.c)
+    target_include_directories(ihs-early-media-worker PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-early-media-worker PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-early-media-worker PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-early-media-worker PRIVATE -Wl,--wrap=IHS_BaseSend -Wl,--wrap=IHS_SessionPacketTimestamp)
     add_executable(ihs-network-wire-oracle network_wire_oracle.c)
     ihs_add_test(receive_cycle_worker test_receive_cycle_worker.c)
     target_link_libraries(ihstest_receive_cycle_worker PRIVATE ihs-test-session)
@@ -274,6 +279,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(ihs-transport-oracle PRIVATE ihs-test-session ihslib)
     target_compile_options(ihs-transport-oracle PRIVATE -UNDEBUG)
     target_link_options(ihs-transport-oracle PRIVATE
+        -Wl,--wrap=IHS_SessionUnreliableReceived
         -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_SessionDisconnect
         -Wl,--wrap=IHS_SessionTransportDisconnect
         -Wl,--wrap=IHS_BaseSend)

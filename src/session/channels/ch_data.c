@@ -116,8 +116,9 @@ bool IHS_SessionChannelDataInit(IHS_SessionChannel *channel, uint16_t windowCapa
     dataCh->lock = IHS_MutexCreate();
     dataCh->windowLock = IHS_MutexCreate();
     dataCh->windowCond = IHS_CondCreate();
-    dataCh->window = IHS_SessionPacketsWindowCreateMedia(windowCapacity);
-    dataCh->fec = IHS_FECReceiverCreate();
+    dataCh->receive = IHS_SessionUnreliableGet(channel->session, channel->id, windowCapacity);
+    if (dataCh->receive)
+        dataCh->receive->maxReceiveDelay = 6553; /* StartAudio/VideoData setter */
     dataCh->fecQueueCapacity = windowCapacity;
     dataCh->fecQueueLimit = (size_t)windowCapacity * 2048;
     /* Keep a single supported payload admissible even for small audio/test
@@ -126,7 +127,7 @@ bool IHS_SessionChannelDataInit(IHS_SessionChannel *channel, uint16_t windowCapa
         dataCh->fecQueueLimit = IHS_FEC_MAX_PAYLOAD + sizeof(IHS_FECFrameNode);
     atomic_init(&dataCh->interrupted, false);
     if (!dataCh->lock || !dataCh->windowLock || !dataCh->windowCond ||
-        !dataCh->window || !dataCh->fec) {
+        !dataCh->receive) {
         channel->initFailed = true;
         return false;
     }
@@ -149,59 +150,16 @@ void IHS_SessionChannelDataDeinit(IHS_SessionChannel *channel) {
     IHS_SessionFrame remaining = {0};
     while (PollFEC(dataCh, &remaining))
         IHS_BufferClear(&remaining.body, true);
-    IHS_FECReceiverDestroy(dataCh->fec);
-    if (dataCh->window)
-        IHS_SessionPacketsWindowDestroy(dataCh->window);
     if (dataCh->windowLock)
         IHS_MutexDestroy(dataCh->windowLock);
     if (dataCh->windowCond)
         IHS_CondDestroy(dataCh->windowCond);
-    dataCh->window = NULL;
     if (dataCh->lock)
         IHS_MutexDestroy(dataCh->lock);
 }
 
 void IHS_SessionChannelDataReceived(IHS_SessionChannel *channel, IHS_SessionPacket *packet) {
-    IHS_SessionChannelData *dataCh = (IHS_SessionChannelData *)channel;
-    assert(dataCh->window != NULL);
-    IHS_SessionPacketType type = packet->header.type;
-    if (type != IHS_SessionPacketTypeUnreliable && type != IHS_SessionPacketTypeUnreliableFrag &&
-        type != IHS_SessionPacketTypeUnreliableFEC)
-        return;
-    IHS_OutgoingRegister(channel->session, channel->id);
-    IHS_MutexLock(dataCh->windowLock);
-    if (dataCh->interrupted) {
-        IHS_MutexUnlock(dataCh->windowLock);
-        return;
-    }
-    if (type == IHS_SessionPacketTypeUnreliableFEC) {
-        IHS_SessionFrame frame;
-        if (IHS_FECReceiverAdd(dataCh->fec, packet, &frame)) {
-            QueueFrame(dataCh, &frame);
-            IHS_CondSignal(dataCh->windowCond);
-        }
-        IHS_MutexUnlock(dataCh->windowLock);
-        return; /* no ordinary window, sender timestamp propagation or NACK */
-    }
-    bool inserted = false;
-    if (!IHS_SessionPacketsWindowAddEx(dataCh->window, packet, &inserted)) {
-        IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Data",
-                       "%s channel items overflow! Available: %u", DataChannelName(channel->type),
-                       IHS_SessionPacketsWindowAvailable(dataCh->window));
-        /* Capacity recovery is independent of packet age: release incomplete
-         * frames and holes too, then start a fresh receive window. */
-        IHS_SessionPacketsWindowReleaseAll(dataCh->window);
-        IHS_SessionChannelDataLost(channel);
-        IHS_SessionPacketsWindowAddEx(dataCh->window, packet, &inserted);
-    }
-    if (!dataCh->lastPacketTimestamp ||
-        (int32_t)(packet->header.sendTimestamp - dataCh->lastPacketTimestamp) > 0)
-        dataCh->lastPacketTimestamp = packet->header.sendTimestamp;
-    dataCh->feedbackDirty = true;
-    IHS_MutexUnlock(dataCh->windowLock);
-    if (inserted && packet->header.retransmitCount > 1)
-        IHS_SessionRecordNetworkLost(channel->session, packet->header.receiveTimestamp,
-                                      packet->header.retransmitCount - 1u);
+    IHS_SessionUnreliableReceived(channel->session, packet);
 }
 
 void IHS_SessionChannelDataLost(IHS_SessionChannel *channel) {
@@ -346,75 +304,9 @@ static const char *DataChannelName(IHS_SessionChannelType type) {
 
 bool IHS_SessionChannelDataBuildFeedback(IHS_SessionChannelData *channel, uint32_t now,
                                          IHS_SessionPacket *packet, uint32_t *waitTicks) {
-    *waitTicks = UINT32_MAX;
-    if (!channel->feedbackDirty)
-        return false;
-    channel->feedbackDirty = false;
-    IHS_MediaFeedback feedback;
-    if (!IHS_SessionPacketsWindowMediaFeedback(channel->window, &feedback))
-        return false;
-    int32_t wait = 0;
-    if (feedback.retransmitCount == 1)
-        wait = (int32_t)(feedback.receiveTimestamp + 65 - now);
-    if (channel->haveFeedbackDeadline) {
-        int32_t deadline = (int32_t)(channel->feedbackDeadline - now);
-        if (deadline > wait)
-            wait = deadline;
-    }
-    if (wait > 0) {
-        channel->feedbackDirty = true;
-        *waitTicks = wait;
-        return false;
-    }
-    IHS_SessionChannelInitializePacket(&channel->base, packet, IHS_SessionPacketTypeUnreliableNack,
-                                       false, feedback.base);
-    IHS_BufferAppendUInt32LE(&packet->body, channel->lastPacketTimestamp);
-    IHS_BufferAppendUInt16LE(&packet->body, feedback.confirmed);
-    IHS_BufferAppendMem(&packet->body, feedback.bitmap, feedback.bitmapBytes);
-    channel->feedbackDeadline =
-        now + IHS_StreamClockFeedbackTicks(&channel->base.session->clock);
-    channel->haveFeedbackDeadline = true;
-    *waitTicks = 0;
-    return true;
+    return IHS_SessionUnreliableBuildFeedback(channel->receive, now, packet, waitTicks);
 }
 
 void IHS_SessionChannelDataUpdateAt(IHS_SessionChannelData *channel, uint32_t tick) {
-    /* Original UpdateUnreliableState: Pop complete frames, retire aged prefix,
-     * then build feedback. Never drain the consumer FIFO here (§25/58/61). */
-    for (;;) {
-        IHS_SessionFrame frame = {.body = IHS_BUFFER_INIT(1024, IHS_FEC_MAX_PAYLOAD)};
-        uint16_t missing = 0;
-        IHS_MutexLock(channel->windowLock);
-        if (channel->interrupted) {
-            IHS_MutexUnlock(channel->windowLock);
-            break;
-        }
-        bool ready = IHS_SessionPacketsWindowPoll(channel->window, &frame);
-        if (!ready) {
-            IHS_SessionPacketsWindowDiscardEx(channel->window,
-                IHS_StreamClockMediaDelayTicks(&channel->base.session->clock), &missing);
-            ready = IHS_SessionPacketsWindowPoll(channel->window, &frame);
-        }
-        if (ready) {
-            QueueFrame(channel, &frame);
-            IHS_CondSignal(channel->windowCond);
-        }
-        IHS_MutexUnlock(channel->windowLock);
-        IHS_BufferClear(&frame.body, true);
-        IHS_SessionRecordNetworkLost(channel->base.session, tick, missing);
-        if (!ready && !missing)
-            break;
-    }
-    IHS_SessionPacket packet;
-    uint32_t waitTicks;
-    IHS_MutexLock(channel->windowLock);
-    bool send = !channel->interrupted &&
-        IHS_SessionChannelDataBuildFeedback(channel, tick, &packet, &waitTicks);
-    IHS_MutexUnlock(channel->windowLock);
-    if (send) {
-        /* Feedback is attempted in this network cycle, not queued behind TX
-         * producer work. The original does not retry a failed feedback send. */
-        IHS_SessionSendPacket(channel->base.session, &packet);
-        IHS_SessionPacketClear(&packet, true);
-    }
+    IHS_SessionUnreliableUpdateAt(channel->base.session, channel->base.id, tick);
 }

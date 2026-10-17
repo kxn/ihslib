@@ -17,6 +17,7 @@ target_sources(ihslib PRIVATE
         network_stats.c
         callbacks.c
         reliable.c
+        unreliable.c
         retransmission.c
         outgoing.c
         outgoing_sort.c)

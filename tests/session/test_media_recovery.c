@@ -135,7 +135,7 @@ static const IHS_SessionChannelDataClass cls = {
     .dataFrame = data,
 };
 static void deliver(IHS_SessionChannel *c, uint16_t id, uint32_t stamp) {
-    IHS_SessionPacket p = {.header = {.type = IHS_SessionPacketTypeUnreliable,
+    IHS_SessionPacket p = {.header = {.channelId = c->id, .type = IHS_SessionPacketTypeUnreliable,
                                       .packetId = id,
                                       .sendTimestamp = stamp,
                                       .receiveTimestamp = IHS_SessionPacketTimestamp()}};
@@ -174,8 +174,9 @@ static void loss_without_frame(void) {
     IHS_SessionChannel *c =
         IHS_SessionChannelDataCreate(&cls, s, IHS_SessionChannelTypeDataVideo, 3, NULL);
     assert(c);
+    IHS_SessionChannelAdd(s, c); /* Match the official configured decoder ID. */
     deliver(c, 1, 1000);
-    IHS_SessionPacket p = {.header = {.type = IHS_SessionPacketTypeUnreliable,
+    IHS_SessionPacket p = {.header = {.channelId = c->id, .type = IHS_SessionPacketTypeUnreliable,
         .packetId = 3, .fragmentId = 1, .sendTimestamp = 10000,
         .receiveTimestamp = IHS_SessionPacketTimestamp()}};
     IHS_BufferInit(&p.body, 4, 4);
@@ -196,8 +197,7 @@ static void loss_without_frame(void) {
     pthread_mutex_lock(&lock);
     assert(!entered);
     pthread_mutex_unlock(&lock);
-    IHS_SessionChannelStop(c);
-    IHS_SessionChannelDestroy(c);
+    IHS_SessionChannelRemove(s, c->id);
     IHS_SessionDestroy(s);
 }
 int main(void) {
@@ -209,6 +209,7 @@ int main(void) {
     IHS_SessionChannel *c =
         IHS_SessionChannelDataCreate(&cls, s, IHS_SessionChannelTypeDataVideo, 3, NULL);
     assert(c);
+    IHS_SessionChannelAdd(s, c); /* Match the official configured decoder ID. */
     deliver(c, 0, 1000);
     IHS_SessionChannelDataUpdateAt((void *)c, IHS_SessionPacketTimestamp());
     pthread_mutex_lock(&lock);
@@ -224,8 +225,7 @@ int main(void) {
     releaseDecode = true;
     pthread_cond_signal(&ready);
     pthread_mutex_unlock(&lock);
-    IHS_SessionChannelStop(c);
-    IHS_SessionChannelDestroy(c); // joins decoder before freeing dependencies
+    IHS_SessionChannelRemove(s, c->id); // stop/join before freeing dependencies
     IHS_SessionDestroy(s);
     IHS_Quit();
     return 0;

@@ -32,14 +32,14 @@ static const char *media_name(IHS_SessionChannel *ch, bool destroy) {
 static void media_init(IHS_SessionChannel *ch, const void *unused) {
     (void)unused;
     IHS_SessionChannelData *d = (void *)ch;
-    d->window = IHS_SessionPacketsWindowCreateMedia(32);
-    d->fec = IHS_FECReceiverCreate();
+    d->receive = IHS_SessionUnreliableGet(ch->session, ch->id, 32);
+    if (d->receive) d->receive->maxReceiveDelay = 6553;
     d->windowLock = IHS_MutexCreate();
     d->windowCond = IHS_CondCreate();
     d->fecQueueCapacity = 32;
     d->fecQueueLimit = 2 * 1024 * 1024;
     atomic_init(&d->interrupted, false);
-    assert(d->window && d->fec && d->windowLock && d->windowCond);
+    assert(d->receive && d->windowLock && d->windowCond);
 }
 static void media_stop(IHS_SessionChannel *ch) { action(media_name(ch, false)); }
 static void media_destroy(IHS_SessionChannel *ch) {

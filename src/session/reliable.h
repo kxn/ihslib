@@ -25,6 +25,8 @@ typedef enum IHS_ReliableDisposition {
     IHS_ReliablePending,
     IHS_ReliableData,
 } IHS_ReliableDisposition;
+/* Legacy name: common complete-frame dispatch for reliable, ordinary and FEC
+ * carriers. It never inserts an already assembled frame into transport windows. */
 IHS_ReliableDisposition IHS_SessionDeliverReliableFrame(IHS_Session *, IHS_SessionFrame *);
 
 void IHS_SessionReliableUpdateChannelAt(IHS_Session *, uint8_t channel, uint32_t tick);

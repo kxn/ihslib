@@ -132,6 +132,7 @@ struct IHS_Session {
     IHS_SessionRetransmission retransmission;
     IHS_Outgoing outgoing;
     IHS_ReliableChannel reliable[32];
+    struct IHS_UnreliableChannel *unreliable[32];
     IHS_Mutex *reliableLock;
     IHS_StreamClock clock;
     /* Connection collectors, serialized by base.lock; no independent timer. */

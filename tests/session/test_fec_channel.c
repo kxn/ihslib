@@ -101,8 +101,8 @@ int main(void) {
         receive(s, true, i, (uint16_t)(10 + i));
     IHS_SessionChannelData *d = (void *)c;
     IHS_MutexLock(d->windowLock);
-    assert(!IHS_SessionPacketsWindowSize(d->window));
-    assert(!d->feedbackDirty && !d->haveFeedbackDeadline);
+    assert(!IHS_SessionPacketsWindowSize(d->receive->window));
+    assert(!d->receive->feedbackDirty && !d->receive->haveFeedbackDeadline);
     assert(d->fecQueuedCount == 32 && d->fecQueuedBytes <= d->fecQueueLimit);
     IHS_MutexUnlock(d->windowLock);
     IHS_MutexLock(s->sendQueueMutex);

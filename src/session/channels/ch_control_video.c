@@ -30,6 +30,7 @@
 
 #include "video/ch_data_video.h"
 #include "session/session_pri.h"
+#include "session/unreliable.h"
 
 void IHS_SessionChannelControlOnVideo(IHS_SessionChannel *channel, EStreamControlMessage type,
                                       IHS_Buffer *payload, const IHS_SessionPacketHeader *header) {
@@ -56,6 +57,11 @@ void IHS_SessionChannelControlOnVideo(IHS_SessionChannel *channel, EStreamContro
                                "Replacing active video channel old=%u new=%u",
                                video->id, message->channel);
                 IHS_SessionChannelRemove(session, video->id);
+            }
+            /* Original Start*Data sets transport delay before decoder creation. */
+            if (!IHS_SessionUnreliableSetDelay(session, message->channel, 6553)) {
+                cstart_video_data_msg__free_unpacked(message, NULL);
+                break;
             }
             video = IHS_SessionChannelDataVideoCreate(session, message);
             IHS_SessionChannelAdd(session, video);

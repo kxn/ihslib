@@ -19,7 +19,7 @@ static void frames(IHS_SessionChannelData *ch) {
     IHS_SessionFrame f = {0};
     IHS_BufferInit(&f.body, 32, 1048576);
     for (;;) {
-        if (IHS_SessionPacketsWindowPoll(ch->window, &f)) {
+        if (IHS_SessionPacketsWindowPoll(ch->receive->window, &f)) {
             printf("{\"frame\":%u,\"send\":%u,\"payload\":\"", f.header.packetId,
                    f.header.sendTimestamp);
             hex(IHS_BufferPointer(&f.body), f.body.size);
@@ -28,11 +28,11 @@ static void frames(IHS_SessionChannelData *ch) {
             continue;
         }
         if (!IHS_SessionPacketsWindowDiscard(
-                ch->window, IHS_StreamClockMediaDelayTicks(&ch->base.session->clock)))
+                ch->receive->window, IHS_StreamClockMediaDelayTicks(&ch->base.session->clock)))
             break;
     }
     IHS_BufferClear(&f.body, true);
-    printf("{\"head\":%u}\n", IHS_SessionPacketsWindowNextNeededPacketId(ch->window));
+    printf("{\"head\":%u}\n", IHS_SessionPacketsWindowNextNeededPacketId(ch->receive->window));
 }
 int main(int argc, char **argv) {
     assert(argc == 3);
@@ -44,7 +44,8 @@ int main(int argc, char **argv) {
     s->clock.smoothedRTT = strtoul(argv[2], NULL, 0);
     IHS_SessionChannelData ch = {
         .base = {.session = s, .type = IHS_SessionChannelTypeDataVideo, .id = 3}};
-    ch.window = IHS_SessionPacketsWindowCreateMedia(2048);
+    ch.receive = IHS_SessionUnreliableGet(s, 3, 2048);
+    ch.receive->maxReceiveDelay = 6553;
     ch.windowLock = IHS_MutexCreate();
     ch.windowCond = IHS_CondCreate();
     atomic_init(&ch.interrupted, false);
@@ -53,7 +54,7 @@ int main(int argc, char **argv) {
         unsigned id, stamp, received, count, type, fragment, tick;
         if (sscanf(line, "A %u %u %u %u %u %u", &id, &stamp, &received, &count, &type, &fragment) ==
             6) {
-            IHS_SessionPacket p = {.header = {.packetId = id,
+            IHS_SessionPacket p = {.header = {.channelId = 3, .packetId = id,
                                               .sendTimestamp = stamp,
                                               .receiveTimestamp = received,
                                               .retransmitCount = count,
@@ -81,7 +82,7 @@ int main(int argc, char **argv) {
             puts("}");
         } else if (sscanf(line, "S %u", &id) == 1) {
             /* Test a post-resynchronization watermark near 16-bit wrap. */
-            IHS_SessionPacketsWindowReleaseAll(ch.window);
+            IHS_SessionPacketsWindowReleaseAll(ch.receive->window);
         } else if (line[0] == 'U') {
             frames(&ch);
         } else {

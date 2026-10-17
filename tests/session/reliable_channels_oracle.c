@@ -212,8 +212,9 @@ int main(int argc, char **argv) {
     s->state.crcRequired = crc;
     s->state.connectionState = phase == 0   ? IHS_SessionConnectionStateUnconnected
                                : phase == 2 ? IHS_SessionConnectionStateHandshaking
+                               : phase == 7 ? IHS_SessionConnectionStateStopping
                                             : IHS_SessionConnectionStateConnected;
-    s->transport.shutdown = phase == 7;
+    /* Source keeps connection1 independent of the controlled client phase. */
     s->clock.smoothedRTT = 100;
     s->outgoing.rate[0] = s->outgoing.rate[1] = 0;
     IHS_SessionReliableGet(s, 1); /* The source fixture starts after the 0/1 factory bootstrap. */

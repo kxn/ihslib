@@ -210,7 +210,7 @@ int main(void) {
         if (ordinary) {
             IHS_SessionChannelData *d=(void *)IHS_SessionChannelDataCreate(&dataClass,s,
                 IHS_SessionChannelTypeDataVideo,3,NULL);
-            assert(d);dataWindow=d->window;IHS_SessionChannelAdd(s,&d->base);
+            assert(d);dataWindow=d->receive->window;IHS_SessionChannelAdd(s,&d->base);
         }
         assert(IHS_SessionConnect(s));uint64_t end=IHS_TimerNow()+2000;
         while(!atomic_load(&acknowledged)&&IHS_TimerNow()<end)usleep(1000);

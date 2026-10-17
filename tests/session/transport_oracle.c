@@ -52,6 +52,12 @@ static void channel_received(IHS_SessionChannel *c, IHS_SessionPacket *p) {
     received++;
     strcat(actions, "channel ");
 }
+void __wrap_IHS_SessionUnreliableReceived(IHS_Session *s, IHS_SessionPacket *p) {
+    (void)s;
+    /* Source transport fixture stops at channel HandlePacket, before window
+     * processing. Observe that same terminal admission boundary. */
+    channel_received(NULL, p);
+}
 static const IHS_SessionChannelClass consumer = {.received = channel_received,
                                                  .instanceSize = sizeof(IHS_SessionChannel)};
 

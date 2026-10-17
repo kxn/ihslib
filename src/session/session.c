@@ -187,6 +187,7 @@ void IHS_SessionDestroy(IHS_Session *session) {
     IHS_RetransmissionDeinit(&session->retransmission);
     IHS_OutgoingDeinit(session);
     IHS_SessionReliableDeinit(session);
+    IHS_SessionUnreliableDeinit(session);
     IHS_StreamClockDeinit(&session->clock);
     IHS_NetworkSampleQueueDestroy(&session->networkRates[0].queue);
     IHS_NetworkSampleQueueDestroy(&session->networkRates[1].queue);
@@ -555,24 +556,13 @@ static void SessionRecvAt(IHS_Base *base, const IHS_SocketAddress *address,
         return;
     }
     IHS_SessionChannel *channel = IHS_SessionChannelFor(session, channelId);
-    if (channel == NULL && channelId >= IHS_SessionChannelIdDataStart &&
+    if (channelId >= IHS_SessionChannelIdDataStart &&
         (packetType == IHS_SessionPacketTypeUnreliable ||
          packetType == IHS_SessionPacketTypeUnreliableFrag ||
          packetType == IHS_SessionPacketTypeUnreliableFEC)) {
-        /* OnDataPacket queues early data; StartVideoData supplies codec/channel
-         * identity before HandlePendingDataPackets (0x7ae1f4). Do not guess. */
-        if (session->pendingDataCount == 320) {
-            QueuedPacket *old = (void *)IHS_QueuePoll(session->pendingData);
-            IHS_SessionPacketClear(&old->packet, true);
-            IHS_QueueItemFree((void *)old);
-            session->pendingDataCount--;
-        }
-        QueuedPacket *queued = (void *)IHS_QueueItemObtain(session->pendingData);
-        queued->packet = packet;
-        queued->pendingReliableFrame = false;
-        memset(&packet.body, 0, sizeof(packet.body));
-        IHS_QueueAppend(session->pendingData, (void *)queued);
-        session->pendingDataCount++;
+        IHS_SessionUnreliableReceived(session, &packet);
+        IHS_SessionPacketClear(&packet, true);
+        return;
     }
     if (channel != NULL) {
         IHS_SessionChannelReceivedPacket(channel, &packet);
@@ -585,8 +575,12 @@ static void SessionRecvAt(IHS_Base *base, const IHS_SocketAddress *address,
 
 IHS_ReliableDisposition IHS_SessionDeliverReliableFrame(IHS_Session *session,
                                                          IHS_SessionFrame *frame) {
+    /* Original OnStreamPacket gates client0/7, not connection Closing/Closed.
+     * FEC can still complete during the read batch after a peer type9, before
+     * Connection::Update delivers OnStreamDisconnected and moves client6->7. */
     if (session->state.connectionState == IHS_SessionConnectionStateUnconnected ||
-        atomic_load(&session->transport.shutdown))
+        session->state.connectionState == IHS_SessionConnectionStateStopping ||
+        session->base.interrupted || session->transport.detached)
         return IHS_ReliableDiscarded;
     uint8_t id = frame->header.channelId;
     if (id == IHS_SessionChannelIdControl) {
@@ -607,8 +601,8 @@ IHS_ReliableDisposition IHS_SessionDeliverReliableFrame(IHS_Session *session,
         IHS_SessionChannelDataReceiveReliableFrame(channel, frame);
         return IHS_ReliableData;
     }
-    /* Complete reliable frames wait for Start*Data without re-entering the
-     * sequence window. Preserve their original transport metadata. */
+    /* Complete frames from all carriers wait for Start*Data without re-entering
+     * transport windows or FEC. Preserve original transport metadata. */
     if (session->pendingDataCount == 320) {
         QueuedPacket *old = (void *)IHS_QueuePoll(session->pendingData);
         IHS_SessionPacketClear(&old->packet, true);
@@ -622,7 +616,6 @@ IHS_ReliableDisposition IHS_SessionDeliverReliableFrame(IHS_Session *session,
     }
     queued->packet.header = frame->header;
     IHS_BufferTransferOwnership(&frame->body, &queued->packet.body);
-    queued->pendingReliableFrame = true;
     IHS_QueueAppend(session->pendingData, (void *)queued);
     session->pendingDataCount++;
     return IHS_ReliablePending;
@@ -759,12 +752,7 @@ void IHS_SessionNetworkUpdateAt(IHS_Session *session, uint32_t tick) {
     for (unsigned i = 0; i < count && !session->base.interrupted && !session->transport.detached; ++i) {
         uint8_t id = order[i];
         IHS_SessionReliableUpdateChannelAt(session, id, tick);
-        /* A reliable control frame may replace a consumer. Resolve after its
-         * delegate rather than retaining a channel pointer across callbacks. */
-        IHS_SessionChannel *ch = IHS_SessionChannelFor(session, id);
-        if (ch && (ch->type == IHS_SessionChannelTypeDataVideo ||
-                   ch->type == IHS_SessionChannelTypeDataAudio))
-            IHS_SessionChannelDataUpdateAt((void *)ch, tick);
+        IHS_SessionUnreliableUpdateAt(session, id, tick);
         IHS_OutgoingUpdateChannel(session, id, tick);
     }
     IHS_OutgoingRetryPass(session, order, count, rotation);
