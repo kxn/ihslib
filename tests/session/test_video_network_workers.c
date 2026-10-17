@@ -100,7 +100,7 @@ int main(void) {
         for (unsigned n = 0; n < 20; ++n) IHS_BufferAppendUInt8(&payload, fid);
         receive((fid - 1) * 2, 1, sent, sent + 10, IHS_BufferPointer(&payload), 16);
         receive((fid - 1) * 2 + 1, 0, sent, sent + 20, IHS_BufferPointer(&payload) + 16, payload.size - 16);
-        IHS_SessionReceiveUpdateAt(session, sent + 21);
+        IHS_SessionNetworkUpdateAt(session, sent + 21);
         IHS_BufferClear(&payload, true);
         until = IHS_TimerNow() + 1000;
         while (atomic_load(&submitted) < fid && IHS_TimerNow() < until) usleep(1000);

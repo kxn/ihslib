@@ -308,6 +308,12 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     ihs_add_test(outgoing test_outgoing.c)
     target_link_libraries(ihstest_outgoing PRIVATE ihs-test-session)
+    ihs_add_test(network_cycle_worker test_network_cycle_worker.c)
+    target_link_libraries(ihstest_network_cycle_worker PRIVATE ihs-test-session)
+    target_link_options(ihstest_network_cycle_worker PRIVATE -Wl,--wrap=IHS_BaseSend
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_UDPSocketReceive
+        -Wl,--wrap=IHS_UDPSocketWaitReadable)
+    set_tests_properties(network_cycle_worker PROPERTIES TIMEOUT 20)
     ihs_add_test(outgoing_worker test_outgoing_worker.c)
     target_link_libraries(ihstest_outgoing_worker PRIVATE ihs-test-session)
     target_link_options(ihstest_outgoing_worker PRIVATE -Wl,--wrap=IHS_BaseSend

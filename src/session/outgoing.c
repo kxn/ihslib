@@ -273,23 +273,25 @@ unsigned IHS_OutgoingSnapshot(IHS_Session *s, uint8_t order[32], unsigned *rotat
     IHS_MutexUnlock(s->sendQueueMutex);
     return count;
 }
-void IHS_OutgoingUpdate(IHS_Session *s, uint32_t now) {
+void IHS_OutgoingUpdateChannel(IHS_Session *s, uint8_t channel, uint32_t tick) {
     IHS_BaseLock(&s->base);
-    if (IHS_SessionTransportState(s) != IHS_TransportConnected || s->transport.detached) {
+    if (!s->base.interrupted && !s->transport.detached &&
+        IHS_SessionTransportState(s) == IHS_TransportConnected) {
+        /* Source 7fc390 passes the batch tick to SendReliablePackets; the
+         * unreliable sender and Socket::Send obtain fresh timestamps. */
+        IHS_RetransmissionProcessChannel(&s->retransmission, IHS_TimerNow(), tick, channel,
+                                         send_reliable, s);
+        IHS_OutgoingSendUnreliable(s, channel, false);
+    }
+    IHS_BaseUnlock(&s->base);
+}
+void IHS_OutgoingRetryPass(IHS_Session *s, const uint8_t order[32], unsigned count,
+                           unsigned rotation) {
+    IHS_BaseLock(&s->base);
+    if (s->base.interrupted || s->transport.detached ||
+        IHS_SessionTransportState(s) != IHS_TransportConnected) {
         IHS_BaseUnlock(&s->base);
         return;
-    }
-    IHS_Outgoing *o = &s->outgoing;
-    uint8_t order[32];
-    unsigned rotation;
-    unsigned count = IHS_OutgoingSnapshot(s, order, &rotation);
-    /* Factory publication never needs Base. Snapshot its order before I/O;
-     * a concurrently created channel is considered by the next scan. */
-    for (unsigned i = 0; i < count; ++i) {
-        uint8_t ch = order[i];
-        IHS_RetransmissionProcessChannel(&s->retransmission, IHS_TimerNow(), now, ch, send_reliable,
-                                         s);
-        IHS_OutgoingSendUnreliable(s, ch, false);
     }
     for (unsigned i = 0; i < count; ++i) {
         if (rotation >= count)
@@ -297,8 +299,24 @@ void IHS_OutgoingUpdate(IHS_Session *s, uint32_t now) {
         IHS_OutgoingSendUnreliable(s, order[rotation++], true);
     }
     IHS_MutexLock(s->sendQueueMutex);
-    if (++o->rotation > count)
-        o->rotation = 0;
+    if (++s->outgoing.rotation > count)
+        s->outgoing.rotation = 0;
     IHS_MutexUnlock(s->sendQueueMutex);
+    IHS_BaseUnlock(&s->base);
+}
+void IHS_OutgoingUpdate(IHS_Session *s, uint32_t now) {
+    IHS_BaseLock(&s->base);
+    if (IHS_SessionTransportState(s) != IHS_TransportConnected || s->transport.detached) {
+        IHS_BaseUnlock(&s->base);
+        return;
+    }
+    uint8_t order[32];
+    unsigned rotation;
+    unsigned count = IHS_OutgoingSnapshot(s, order, &rotation);
+    /* Standalone component boundary. Production interleaves RX and TX for
+     * each channel in IHS_SessionNetworkUpdateAt, using this same snapshot. */
+    for (unsigned i = 0; i < count; ++i)
+        IHS_OutgoingUpdateChannel(s, order[i], now);
+    IHS_OutgoingRetryPass(s, order, count, rotation);
     IHS_BaseUnlock(&s->base);
 }

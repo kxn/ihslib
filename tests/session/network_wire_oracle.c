@@ -19,7 +19,7 @@ static IHS_Session *session;
 static uint32_t now;
 static bool receiving, sending;
 static unsigned resultCode, entryCount, writeCount, entries[512];
-static bool reportMetadata, lossMode, videoMode, cycleMode;
+static bool reportMetadata, lossMode, videoMode, cycleMode, networkMode;
 static IHS_SessionChannelData mediaStorage, *media = &mediaStorage;
 static unsigned deliveredCount;
 static char *delivered[256];
@@ -60,11 +60,42 @@ IHS_ReliableDisposition __wrap_IHS_SessionDeliverReliableFrame(IHS_Session *s, I
 }
 static const IHS_SessionChannelClass mediaClass = {.received = IHS_SessionChannelDataReceived};
 static struct { IHS_Buffer wire; unsigned cost, work; } cycleRows[256];
-static unsigned cycleCount, cycleIndex, cycleEOF, cycleWork;
+static unsigned cycleCount, cycleIndex, cycleEOF, cycleWork, writeCost;
 static bool cycleReady;
 static unsigned waits[8], waitCount;
 static char *cycleWires[256];
 static unsigned cycleWireCount;
+static char *initialWires[256];
+static unsigned initialWireCount;
+static struct { unsigned kind, channel, id; } txSeeds[256];
+static unsigned txSeedCount;
+static void report_tx(void) {
+    printf(",\"tx\":{\"windows\":[");
+    for (unsigned i = 0; i < txSeedCount; ++i) {
+        unsigned kind = txSeeds[i].kind, ch = txSeeds[i].channel, id = txSeeds[i].id;
+        IHS_OutgoingWindow *w = &session->outgoing.unreliable[ch];
+        IHS_OutgoingPacket *p = kind == 3 && w->capacity &&
+            (uint16_t)(id-w->head) < (uint16_t)(w->tail-w->head) ?
+            w->slots[id & (w->capacity-1)] : NULL;
+        bool retained = kind == 3 ? p != NULL :
+            IHS_RetransmissionIsTracked(&session->retransmission, ch, id, 0);
+        printf("%s{\"kind\":%u,\"channel\":%u,\"id\":%u,\"retained\":%s", i ? "," : "", kind, ch, id, retained ? "true" : "false");
+        if (kind == 3)
+            printf(",\"head\":%u,\"tail\":%u,\"cursor\":%u,\"count\":%u,\"stamp\":%u", w->head, w->tail, w->cursor,
+                p ? p->packet.header.retransmitCount : 0, p ? p->packet.header.sendTimestamp : 0);
+        printf("}");
+    }
+    printf("],\"order\":[");
+    for (unsigned i=0; i<session->outgoing.count; ++i)
+        printf("%s%u", i ? "," : "", session->outgoing.order[i]);
+    printf("],\"rotation\":%u,\"blocked\":%s,\"deadlines\":[%u,%u]},\"initial_wires\":[", session->outgoing.rotation,
+        session->outgoing.blocked ? "true" : "false", session->outgoing.deadline[0], session->outgoing.deadline[1]);
+    for (unsigned i=0; i<initialWireCount; ++i) {
+        printf("%s\"%s\"", i ? "," : "", initialWires[i]); free(initialWires[i]);
+    }
+    initialWireCount=0;
+    printf("]");
+}
 int __real_IHS_UDPSocketWaitReadable(IHS_UDPSocket *, uint32_t);
 int __wrap_IHS_UDPSocketWaitReadable(IHS_UDPSocket *socket, uint32_t milliseconds) {
     if (!cycleMode) return __real_IHS_UDPSocketWaitReadable(socket, milliseconds);
@@ -133,6 +164,7 @@ bool __wrap_IHS_BaseSend(IHS_Base *base, IHS_SocketAddress address, const IHS_Bu
     writes[writeCount].size = wire->size - (crc ? 4 : 0);
     writes[writeCount++].crc = crc;
     static const int errors[] = {0, EAGAIN, EMSGSIZE, EBADF, EIO};
+    now += writeCost;
     errno = errors[resultCode];
     return resultCode == 0;
 }
@@ -212,6 +244,7 @@ static void report(void) {
             session->clock.lastEcho, session->clock.minRTT, session->clock.smoothedRTT,
             session->clock.minRTTUpdate, (uint32_t)session->clock.offset);
     }
+    if (networkMode) report_tx();
     if (reportMetadata) {
         printf(",\"frames\":[");
         for (unsigned i = 0; i < frameCount; ++i)
@@ -238,7 +271,8 @@ static IHS_SessionPacket packet(unsigned type, unsigned channel, unsigned crc,
 int main(int argc, char **argv) {
     assert(argc >= 3 && argc <= 6);
     videoMode = argc == 6 && !strcmp(argv[5], "video");
-    cycleMode = argc == 6 && !strcmp(argv[5], "cycle");
+    networkMode = argc == 6 && !strcmp(argv[5], "network");
+    cycleMode = networkMode || (argc == 6 && !strcmp(argv[5], "cycle"));
     lossMode = videoMode || cycleMode || (argc == 6 && !strcmp(argv[5], "loss"));
     IHS_Init();
     session = IHS_TestSessionCreate();
@@ -269,6 +303,30 @@ int main(int argc, char **argv) {
     char line[8192];
     while (fgets(line, sizeof(line), stdin)) {
         unsigned type, ch, crc, source, dest, size, bad;
+        if (networkMode && line[0] == 'I') {
+            unsigned cls, rate, deadline;
+            assert(sscanf(line, "I %u %u %u", &cls, &rate, &deadline) == 3 && cls < 2);
+            session->outgoing.rate[cls] = (int32_t)rate;
+            session->outgoing.deadline[cls] = deadline;
+            continue;
+        }
+        if (networkMode && line[0] == 'A') {
+            char hex[4096];
+            assert(sscanf(line, "A %u %u %u %4095s %u", &now, &type, &ch, hex, &resultCode) == 5);
+            assert(type == 3 || type == 5);
+            IHS_OutgoingRegister(session, ch);
+            IHS_SessionPacket p = packet(type, ch, session->state.crcRequired, 12, 34, strlen(hex)/2);
+            p.header.autoPacketId = true;
+            for (unsigned i=0; i<p.body.size; ++i) { unsigned v; assert(sscanf(hex+i*2,"%2x",&v)==1); IHS_BufferPointer(&p.body)[i]=v; }
+            assert(IHS_SessionQueuePacket(session, &p, type == 5));
+            assert(txSeedCount < 256);
+            txSeeds[txSeedCount].kind=type; txSeeds[txSeedCount].channel=ch; txSeeds[txSeedCount++].id=p.header.packetId;
+            assert(IHS_SessionDispatchQueued(session, false));
+            IHS_SessionPacketClear(&p, true);
+            for (unsigned i=0;i<cycleWireCount;++i) { assert(initialWireCount < 256); initialWires[initialWireCount++]=cycleWires[i]; }
+            cycleWireCount=writeCount=entryCount=0;
+            continue;
+        }
         if (line[0] == 'Q') {
             int priority;
             assert(cycleMode && sscanf(line, "Q %u %d", &ch, &priority) == 2 && ch < 32);
@@ -279,6 +337,7 @@ int main(int argc, char **argv) {
             unsigned ready, blocked;
             assert(cycleMode && sscanf(line, "B %u %u %u %u %u", &now, &ready, &blocked,
                 &cycleEOF, &cycleCount) == 5 && cycleCount <= 256);
+            if (networkMode) assert(sscanf(line, "B %*u %*u %*u %*u %*u %u %u", &resultCode, &writeCost) == 2);
             cycleReady = ready; cycleIndex = 0;
             session->outgoing.blocked = blocked;
             if (!initializedCycle) {

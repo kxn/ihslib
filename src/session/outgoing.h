@@ -41,9 +41,13 @@ bool IHS_OutgoingRetain(IHS_Session *, IHS_SessionPacket *, uint32_t created);
 int IHS_OutgoingSendUnreliable(IHS_Session *, uint8_t channel, bool retry);
 void IHS_OutgoingNack(IHS_Session *, const IHS_SessionPacket *);
 void IHS_OutgoingUpdate(IHS_Session *, uint32_t now);
+/* Periodic TX follows this channel's RX updates, then one final retry pass. */
+void IHS_OutgoingUpdateChannel(IHS_Session *, uint8_t channel, uint32_t tick);
+void IHS_OutgoingRetryPass(IHS_Session *, const uint8_t order[32], unsigned count,
+                           unsigned rotation);
 /* One factory/priority snapshot, shared by RX and TX scans. */
 unsigned IHS_OutgoingSnapshot(IHS_Session *, uint8_t order[32], unsigned *rotation);
-/* Sender actor wakes for producer work and also on a bounded clock wait. */
+/* Legacy timer wake only; periodic TX belongs to the receive/update cycle. */
 void IHS_SessionWakeSend(IHS_Session *);
 int IHS_SessionSendPacketResult(IHS_Session *, IHS_SessionPacket *);
 

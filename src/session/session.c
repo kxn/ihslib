@@ -736,7 +736,7 @@ static void SessionUpdateAt(IHS_Base *base, void *context, uint32_t tick) {
         IHS_SessionTransportState(session) == IHS_TransportConnected;
     IHS_BaseUnlock(base);
     if (updateControl) {
-        IHS_SessionReceiveUpdateAt(session, tick);
+        IHS_SessionNetworkUpdateAt(session, tick);
         /* Official OnThink consumes ordinary control only after network
          * updates, outside the network lock; handlers can join consumers. */
         if (!base->interrupted && !session->transport.detached)
@@ -748,9 +748,10 @@ static void SessionUpdateAt(IHS_Base *base, void *context, uint32_t tick) {
     }
 }
 
-void IHS_SessionReceiveUpdateAt(IHS_Session *session, uint32_t tick) {
+void IHS_SessionNetworkUpdateAt(IHS_Session *session, uint32_t tick) {
     uint8_t order[32];
-    unsigned count = IHS_OutgoingSnapshot(session, order, NULL);
+    unsigned rotation;
+    unsigned count = IHS_OutgoingSnapshot(session, order, &rotation);
     for (unsigned i = 0; i < count && !session->base.interrupted && !session->transport.detached; ++i) {
         uint8_t id = order[i];
         IHS_SessionReliableUpdateChannelAt(session, id, tick);
@@ -760,7 +761,9 @@ void IHS_SessionReceiveUpdateAt(IHS_Session *session, uint32_t tick) {
         if (ch && (ch->type == IHS_SessionChannelTypeDataVideo ||
                    ch->type == IHS_SessionChannelTypeDataAudio))
             IHS_SessionChannelDataUpdateAt((void *)ch, tick);
+        IHS_OutgoingUpdateChannel(session, id, tick);
     }
+    IHS_OutgoingRetryPass(session, order, count, rotation);
 }
 
 void IHS_SessionWakeSend(IHS_Session *session) {
@@ -770,19 +773,10 @@ void IHS_SessionWakeSend(IHS_Session *session) {
 }
 static void SessionSendWorker(void *context) {
     IHS_Session *session = context;
-    uint32_t lastUpdate = IHS_SessionPacketTimestamp();
-    while (!session->base.interrupted) {
-        bool hadQueued = IHS_SessionDispatchQueued(session, true);
-        if (session->base.interrupted)
-            break;
-        uint32_t now = IHS_SessionPacketTimestamp();
-        if (!hadQueued || (uint32_t)(now - lastUpdate) >= 65) {
-            if (IHS_SessionTransportState(session) == IHS_TransportConnected &&
-                !session->transport.detached)
-                IHS_OutgoingUpdate(session, now);
-            lastUpdate = now;
-        }
-    }
+    /* Initial producer transactions still have their own admission/dispatch
+     * boundary. Periodic RX/feedback/TX is owned by the network cycle. */
+    while (!session->base.interrupted)
+        IHS_SessionDispatchQueued(session, true);
 }
 
 static bool SendRetained(IHS_SessionPacket *packet, void *context) {
