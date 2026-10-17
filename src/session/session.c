@@ -189,6 +189,9 @@ void IHS_SessionDestroy(IHS_Session *session) {
     IHS_OutgoingDeinit(session);
     IHS_SessionReliableDeinit(session);
     IHS_StreamClockDeinit(&session->clock);
+    IHS_NetworkSampleQueueDestroy(&session->networkRates[0].queue);
+    IHS_NetworkSampleQueueDestroy(&session->networkRates[1].queue);
+    IHS_NetworkSampleQueueDestroy(&session->networkPackets.queue);
     if (session->clientConfig)
         cstreaming_client_config__free_unpacked(session->clientConfig, NULL);
     if (session->negotiatedConfig)
@@ -255,7 +258,10 @@ int IHS_SessionSendPacketResult(IHS_Session *session, IHS_SessionPacket *packet)
     bool sent = IHS_BaseSend(&session->base, config->address, &serialized);
     int result = sent ? 0 : errno == EAGAIN || errno == EWOULDBLOCK ? 1 :
         errno == EMSGSIZE ? 2 : errno == EBADF ? 3 : 4;
-    if (sent) IHS_OutgoingSent(session, packet->header.type, packet->header.sendTimestamp, charged);
+    if (sent) {
+        IHS_SessionRecordNetworkSent(session, packet->header.sendTimestamp, charged);
+        IHS_OutgoingSent(session, packet->header.type, packet->header.sendTimestamp, charged);
+    }
     IHS_BaseUnlock(&session->base);
     return result;
 }
@@ -442,17 +448,19 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
     /* Socket HandleMessage 0x7ff660..0x7ff6f0 dispatches Unconnected discovery
      * before connection-ID checks: MTU probes have zero IDs after Connected.
      * HandlePacket 0x7faf08/0x7faff0 checks both IDs for type9/ordinary traffic,
-     * including while the transport is still connecting. */
+     * including while connecting. Connect 0x7fad50 only checks a known peer's
+     * source ID; Connected 0x7fae30 only checks destination. Protocol §57. */
     if ((packet.header.type != IHS_SessionPacketTypeUnconnected && session->transport.addressCleared) ||
         IHS_IPAddressCompare(&address->ip, &session->info.address.ip) != 0 ||
         address->port != session->info.address.port ||
         (packet.header.type != IHS_SessionPacketTypeUnconnected &&
+         packet.header.type != IHS_SessionPacketTypeConnect &&
          packet.header.dstConnectionId != session->state.connectionId) ||
         (packet.header.type == IHS_SessionPacketTypeUnconnected &&
          packet.header.channelId != IHS_SessionChannelIdDiscovery) ||
         (packet.header.type != IHS_SessionPacketTypeUnconnected &&
          packet.header.type != IHS_SessionPacketTypeConnectACK &&
-         packet.header.type != IHS_SessionPacketTypeConnect &&
+         (packet.header.type != IHS_SessionPacketTypeConnect || session->state.hostConnectionId) &&
          packet.header.srcConnectionId != session->state.hostConnectionId)) {
         IHS_SessionPacketClear(&packet, true);
         return;
@@ -474,6 +482,9 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
      * channel's payload validation. Discovery probes do not keep it alive. */
     if (packetType != IHS_SessionPacketTypeUnconnected)
         session->transport.lastReceive = packet.header.receiveTimestamp;
+    if (packetType != IHS_SessionPacketTypeUnconnected)
+        IHS_SessionRecordNetworkReceived(session, packet.header.receiveTimestamp,
+                                         IHS_PACKET_HEADER_SIZE + packet.body.size);
     /* Connection::HandlePacket calls GetChannel after CRC/ID/admission and
      * before the channel ignores unknown types (0x7fb164..c0). */
     if (!special && session->state.connectionState >= IHS_SessionConnectionStateHandshaking)

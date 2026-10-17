@@ -42,3 +42,8 @@ bool IHS_NetworkPingRecord(IHS_NetworkPingStats *, uint32_t ticks, uint32_t time
 float IHS_NetworkPingMeanMilliseconds(uint32_t sum, uint32_t count);
 bool IHS_NetworkVideoRecord(IHS_NetworkVideoStats *, uint32_t frameSend,
                             uint32_t receiveBegin, uint32_t receiveEnd, uint16_t frame, int32_t bytes);
+
+struct IHS_Session;
+void IHS_SessionRecordNetworkReceived(struct IHS_Session *, uint32_t timestamp, int32_t bytes);
+void IHS_SessionRecordNetworkSent(struct IHS_Session *, uint32_t timestamp, int32_t bytes);
+void IHS_SessionGetNetworkSample(struct IHS_Session *, float values[5]);

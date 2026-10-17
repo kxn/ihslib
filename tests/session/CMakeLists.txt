@@ -34,6 +34,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_tests_properties(negotiation_stage_worker PROPERTIES TIMEOUT 20)
     add_executable(ihs-frame-events-loop-oracle frame_events_loop_oracle.c)
     add_executable(ihs-network-collectors-oracle network_collectors_oracle.c)
+    add_executable(ihs-network-wire-oracle network_wire_oracle.c)
+    ihs_add_test(network_sampling_workers test_network_sampling_workers.c)
+    target_link_libraries(ihstest_network_sampling_workers PRIVATE ihs-test-session)
+    target_link_options(ihstest_network_sampling_workers PRIVATE -Wl,--wrap=IHS_BaseSend
+        -Wl,--wrap=IHS_SessionPacketTimestamp)
+    set_tests_properties(network_sampling_workers PROPERTIES TIMEOUT 20)
+    target_include_directories(ihs-network-wire-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-network-wire-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-network-wire-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-network-wire-oracle PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
+        -Wl,--wrap=IHS_BaseSend -Wl,--wrap=IHS_SessionPacketParse
+        -Wl,--wrap=IHS_SessionChannelQueueFrameResult)
     target_include_directories(ihs-network-collectors-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-network-collectors-oracle PRIVATE ihslib)
     target_compile_options(ihs-network-collectors-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)

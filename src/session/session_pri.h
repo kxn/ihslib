@@ -131,6 +131,9 @@ struct IHS_Session {
     IHS_ReliableChannel reliable[32];
     IHS_Mutex *reliableLock;
     IHS_StreamClock clock;
+    /* Connection collectors, serialized by base.lock; no independent timer. */
+    IHS_NetworkBitrateStats networkRates[2]; /* outgoing, incoming */
+    IHS_NetworkPacketStats networkPackets;
     IHS_HIDManager *hidManager;
     struct IHS_FrameStatsAggregator *frameStats;
     struct IHS_FrameTracker *frameTracker;

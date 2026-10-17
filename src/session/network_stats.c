@@ -1,9 +1,35 @@
 /* SPDX-License-Identifier: LGPL-3.0-or-later */
 #include "network_stats.h"
+#include "session_pri.h"
 #include <stdlib.h>
 #include <string.h>
 
 #define WINDOW_TICKS 0x30000u
+
+void IHS_SessionRecordNetworkReceived(IHS_Session *s, uint32_t now, int32_t bytes) {
+    IHS_BaseLock(&s->base);
+    IHS_NetworkPacketRecord(&s->networkPackets, now, 1, false);
+    IHS_NetworkBitrateRecord(&s->networkRates[1], now, bytes);
+    IHS_BaseUnlock(&s->base);
+}
+void IHS_SessionRecordNetworkSent(IHS_Session *s, uint32_t now, int32_t bytes) {
+    IHS_BaseLock(&s->base);
+    IHS_NetworkBitrateRecord(&s->networkRates[0], now, bytes);
+    IHS_BaseUnlock(&s->base);
+}
+void IHS_SessionGetNetworkSample(IHS_Session *s, float values[5]) {
+    IHS_BaseLock(&s->base);
+    values[0] = IHS_StreamClockRTTMilliseconds(&s->clock);
+    values[1] = s->networkRates[1].bitrate * 0.001f;
+    values[2] = s->networkRates[0].bitrate * 0.001f;
+    /* Video link sampling still needs the actual frame receive metadata.
+     * It was zero before this connection-sampling change; protocol §57. */
+    values[3] = 0;
+    values[4] = s->networkPackets.total
+        ? ((float)(int32_t)s->networkPackets.lost * 100.0f) / (float)(int32_t)s->networkPackets.total
+        : 0;
+    IHS_BaseUnlock(&s->base);
+}
 
 void IHS_NetworkSampleQueueDestroy(IHS_NetworkSampleQueue *q) {
     free(q->data);

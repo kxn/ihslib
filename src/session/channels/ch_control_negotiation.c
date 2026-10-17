@@ -348,6 +348,9 @@ void IHS_SessionChannelControlUpdateStage(IHS_SessionChannel *channel, uint32_t 
          * StatsSend failure can synchronously close the session. */
         if (!last || (int32_t)(last - now + 0x10000u) < 0) {
             if (session->frameStats) {
+                float network[5];
+                IHS_SessionGetNetworkSample(session, network);
+                IHS_FrameStatsSetNetworkSample(session->frameStats, network);
                 IHS_SessionSendFrameEvents(session, &session->frameStats->messageScratch);
                 if (session->frameTracker)
                     IHS_FrameStatsSettleTracked(session->frameStats, session->frameTracker,
