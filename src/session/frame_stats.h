@@ -35,14 +35,14 @@
 
 /**
  * Per-frame timestamp + result record. Mirrors Steam's CFastFrameStats:
- * a fixed-size slot in a 128-entry ring keyed by frameId & 0x7f. Each frame
+ * a fixed-size slot in a 240-entry ring keyed by frameId % 240. Each frame
  * carries up to 19 event timestamps (one per EStreamFrameEvent), the size of
  * the frame data, and the final IHS_VideoFrameResult.
  *
  * Timestamps are in IHS_SessionPacketTimestamp units (16.16 fixed-point seconds).
  *
- * `eventMask` bit i is set when `events[i]` has been recorded — distinguishes
- * "not yet observed" from "recorded as zero" (frameId 0 / frame 0 / etc).
+ * eventMask is local collection bookkeeping. Wire Save uses raw zero as absence;
+ * the original setter stores timestamps 0/1 as 1 and retains first Send/DecodeBegin.
  */
 #define IHS_FRAME_STATS_EVENT_COUNT 19
 
@@ -53,14 +53,14 @@ typedef struct IHS_FrameStatsSlot {
     uint32_t frameSize; /* bytes; 0 if unknown */
     uint16_t inputMark; /* 0 if not bound to an input mark */
     IHS_VideoFrameResult result;
+    float frameStartDelta, frameDisplayDelta; /* original CFastFrameStats ms */
     bool inUse, tracked;
     bool complete; /* event 18 (Complete) recorded */
 } IHS_FrameStatsSlot;
 
 /**
- * 19-slot aggregator matching CFrameStatsAccumulator. Each slot tracks
- * (count, sum, sum_of_squares) over a flush window so we can produce
- * (count, average, stddev) at flush time via the same closed-form Steam uses.
+ * Local partial accumulator. Its double sums/population-variance representation
+ * differs from the original float sample vectors/two-pass sample variance.
  */
 #define IHS_FRAME_STATS_ACCUM_SLOTS 19
 
@@ -75,11 +75,11 @@ typedef struct IHS_FrameStatsAccumulator {
 } IHS_FrameStatsAccumulator;
 
 /**
- * 128-slot ring + lock + accumulator. One per session. All accessors take
+ * 240-slot ring + lock + accumulator. One per session. All accessors take
  * `lock` internally; callers must not hold any other session lock when
  * invoking them to avoid lock-order inversion.
  */
-#define IHS_FRAME_STATS_RING_SIZE 128
+#define IHS_FRAME_STATS_RING_SIZE 240
 #define IHS_FRAME_REPORT_CAPACITY 256
 
 typedef struct IHS_FrameStatsReport {
@@ -97,7 +97,13 @@ typedef struct IHS_FrameStatsAggregator {
     IHS_FrameStatsAccumulator accumulator;
     uint16_t lastSentFrameId;
     uint16_t lastDisplayedFrameId;
-    uint32_t lastFrameTimestamp; /* event 18 of the previous *completed* frame */
+    uint32_t lastFrameTimestamp; /* legacy accumulator cursor, separate from protocol times */
+    uint32_t previousFrameStart, previousDisplay;
+    uint16_t lastInputMark;
+    struct {
+        uint16_t id;
+        uint32_t begin, sent;
+    } inputMarks[1024];
     bool fullReporting;          /* mirrors CStreamClient::sendFullFrameStats */
 
     IHS_FrameStatsReport pendingReport;
@@ -121,6 +127,8 @@ void IHS_FrameStatsAggregatorSetFullReporting(IHS_FrameStatsAggregator *agg, boo
 
 size_t IHS_FrameStatsEncodeEvents(const IHS_FrameStatsSlot *slot, int32_t clockOffset,
                                   CFrameEvent *events, CFrameEvent **pointers);
+void IHS_FrameStatsEncodeFrame(const IHS_FrameStatsSlot *, int32_t clockOffset,
+                                CFrameStats *, CFrameEvent *, CFrameEvent **);
 
 /**
  * Drain like IHS_FrameStatsAggregatorDrain, additionally copying each folded
@@ -133,31 +141,35 @@ size_t IHS_FrameStatsAggregatorDrainSlots(IHS_FrameStatsAggregator *agg, IHS_Fra
  * Record one of the four app-driven events (DecodeBegin/DecodeEnd/UploadBegin/UploadEnd).
  * `timestamp` is in 16.16 fixed-point seconds; `0` means "use IHS_SessionTimestampNow".
  *
- * Ring-slot policy: if the slot's frameId doesn't match, the slot is reset
- * and the new frameId takes ownership (i.e. late events for a wrapped-out
- * frameId are dropped, which matches Steam's behavior — the ring just
- * forgets ancient frames).
+ * Only Receive assigns a slot to a different frame ID. Events for a missing
+ * or overwritten ID are ignored (official RecordFrameEvent 0x7ac35c).
  */
 void IHS_FrameStatsRecordStage(IHS_FrameStatsAggregator *agg, uint16_t frameId,
                                IHS_VideoFrameStage stage, uint32_t timestamp);
 
 /**
- * Record the final result of a frame. Sets event 18 (Complete). Computes
- * inter-frame interval from the previous completed frame's event 18, so this
- * MUST be called once per frame the app processed (whether displayed or
- * dropped) for the FPS / Frame-duration stats to be meaningful.
+ * Finish a matching Pending slot, stamping event 18 once. Previous frame-start
+ * and display timestamps follow official RecordFrameComplete 0x7ac3f8.
  */
+void IHS_FrameStatsRecordCompleteAt(IHS_FrameStatsAggregator *, uint16_t, IHS_VideoFrameResult, uint32_t);
 void IHS_FrameStatsRecordComplete(IHS_FrameStatsAggregator *agg, uint16_t frameId,
                                   IHS_VideoFrameResult result);
 
 /**
  * Internal hook for the video-receive path. Seeds events 5 (Start), 12 (Send),
  * 13 (Recv) on first observation of a frame; subsequent partial-receives only
- * refresh event 13. `frameSize` is from the IHS_VideoFrameHeader.
+ * refresh event 13. frameSize is the data payload size before video-header parsing.
  */
 void IHS_FrameStatsRecordReceived(IHS_FrameStatsAggregator *agg, uint16_t frameId,
                                   uint32_t senderFrameTimestamp, uint32_t senderSendTimestamp,
                                   uint32_t recvTimestamp, uint32_t frameSize, uint16_t inputMark);
+void IHS_FrameStatsRecordReceivedInput(IHS_FrameStatsAggregator *, uint16_t frameId,
+                                       uint32_t frameTimestamp, uint32_t sendTimestamp,
+                                       uint32_t receiveTimestamp, uint32_t frameSize,
+                                       uint16_t inputMark, uint32_t inputReceived);
+/* Official CreateInputMark primitive. A caller must supply the input timestamp;
+ * creating and sending marks from input producers is a separate contract. */
+uint16_t IHS_FrameStatsCreateInputMark(IHS_FrameStatsAggregator *, uint32_t begin);
 
 /**
  * Drain the ring for everything between lastSentFrameId and lastDisplayedFrameId

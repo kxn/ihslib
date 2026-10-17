@@ -164,7 +164,7 @@ static void clock_and_events(void) {
     assert(rows[0].timestamp == 1050 && rows[1].timestamp == 100);
     assert(rows[2].timestamp == 25 && rows[3].timestamp == 25);
     assert(rows[1].event_id == 13); /* omitted host-only events */
-    slot.eventMask = (1u<<13)|(1u<<18);
+    slot = (IHS_FrameStatsSlot){.eventMask = (1u<<13)|(1u<<18)};
     slot.events[13] = UINT32_MAX-9; slot.events[18] = 10;
     assert(IHS_FrameStatsEncodeEvents(&slot, 20, rows, ptrs) == 2);
     assert(rows[0].timestamp == 10 && rows[1].timestamp == 20);

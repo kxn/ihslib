@@ -62,7 +62,12 @@ enum {
  * every ~18.2 hours; the cost is one cast). */
 static float ticks_to_ms(uint32_t earlier, uint32_t later) {
     uint32_t delta = later - earlier;
-    return (float)delta * (1000.0f / 65536.0f);
+    bool negative = (int32_t)delta < 0;
+    uint32_t magnitude = negative ? 0u - delta : delta;
+    float whole = (float)((magnitude >> 16) * 1000u);
+    float fraction = (float)((magnitude & 65535u) * 1000u) * (1.0f / 65536.0f);
+    float value = whole + fraction;
+    return negative ? -value : value;
 }
 
 IHS_FrameStatsAggregator *IHS_FrameStatsAggregatorCreate(void) {
@@ -91,8 +96,7 @@ size_t IHS_FrameStatsEncodeEvents(const IHS_FrameStatsSlot *slot, int32_t clockO
     size_t count = 0;
     uint32_t previous = 0;
     for (unsigned e = 0; e < IHS_FRAME_STATS_EVENT_COUNT; e++) {
-        if ((e >= 2 && e <= 12) || !(slot->eventMask & (1u << e)) ||
-            (!slot->tracked && !slot->events[e]))
+        if ((e >= 2 && e <= 12) || !slot->events[e])
             continue;
         cframe_event__init(&events[count]);
         events[count].event_id = (EStreamFrameEvent)e;
@@ -105,25 +109,46 @@ size_t IHS_FrameStatsEncodeEvents(const IHS_FrameStatsSlot *slot, int32_t clockO
     return count;
 }
 
+void IHS_FrameStatsEncodeFrame(const IHS_FrameStatsSlot *slot, int32_t clockOffset,
+                                CFrameStats *row, CFrameEvent *events, CFrameEvent **pointers) {
+    cframe_stats__init(row);
+    row->frame_id = slot->frameId;
+    row->result = (EStreamFrameResult)slot->result;
+    row->events = pointers;
+    row->n_events = IHS_FrameStatsEncodeEvents(slot, clockOffset, events, pointers);
+    if (slot->inputMark) {
+        row->has_input_mark = 1;
+        row->input_mark = slot->inputMark;
+    }
+    if (slot->frameStartDelta != 0) {
+        row->has_frame_start_delta = 1;
+        row->frame_start_delta = slot->frameStartDelta;
+    }
+    if (slot->frameDisplayDelta != 0) {
+        row->has_frame_display_delta = 1;
+        row->frame_display_delta = slot->frameDisplayDelta;
+    }
+    /* Official Save(..., true, ...) excludes frame_size and server events. */
+}
+
 void IHS_FrameStatsAggregatorSetFullReporting(IHS_FrameStatsAggregator *agg, bool enabled) {
     IHS_MutexLock(agg->lock);
     agg->fullReporting = enabled;
     IHS_MutexUnlock(agg->lock);
 }
 
-static IHS_FrameStatsSlot *acquire_slot(IHS_FrameStatsAggregator *agg, uint16_t frameId) {
-    IHS_FrameStatsSlot *slot = &agg->ring[frameId & (IHS_FRAME_STATS_RING_SIZE - 1)];
-    if (!slot->inUse || slot->frameId != frameId) {
-        memset(slot, 0, sizeof(*slot));
-        slot->frameId = frameId;
-        slot->inUse = true;
-    }
-    return slot;
+static IHS_FrameStatsSlot *find_slot(IHS_FrameStatsAggregator *agg, uint16_t frameId) {
+    IHS_FrameStatsSlot *slot = &agg->ring[frameId % IHS_FRAME_STATS_RING_SIZE];
+    return slot->frameId == frameId ? slot : NULL;
 }
 
 static void set_event(IHS_FrameStatsSlot *slot, uint32_t eventId, uint32_t timestamp) {
     assert(eventId < IHS_FRAME_STATS_EVENT_COUNT);
-    slot->events[eventId] = timestamp;
+    /* Original SetEventTimestamp: Send and DecodeBegin keep their first value;
+     * zero is reserved for absence, so timestamps 0/1 are both stored as 1. */
+    if ((eventId == EV_FRAME_SEND || eventId == EV_DECODE_BEGIN) && slot->events[eventId])
+        return;
+    slot->events[eventId] = timestamp > 1 ? timestamp : 1;
     slot->eventMask |= (1u << eventId);
 }
 
@@ -139,42 +164,100 @@ void IHS_FrameStatsRecordStage(IHS_FrameStatsAggregator *agg, uint16_t frameId,
         return;
     }
     IHS_MutexLock(agg->lock);
-    IHS_FrameStatsSlot *slot = acquire_slot(agg, frameId);
-    set_event(slot, ev, timestamp);
+    IHS_FrameStatsSlot *slot = find_slot(agg, frameId);
+    if (slot)
+        set_event(slot, ev, timestamp ? timestamp : IHS_SessionPacketTimestamp());
     IHS_MutexUnlock(agg->lock);
 }
 
+static void complete_slot(IHS_FrameStatsAggregator *agg, IHS_FrameStatsSlot *slot,
+                          IHS_VideoFrameResult result, uint32_t now) {
+    if (!slot || slot->result != IHS_VideoFrameResultPending)
+        return;
+    set_event(slot, EV_COMPLETE, now);
+    now = slot->events[EV_COMPLETE];
+    if (agg->previousFrameStart && slot->events[EV_FRAME_START]) {
+        slot->frameStartDelta = ticks_to_ms(agg->previousFrameStart, slot->events[EV_FRAME_START]);
+        if (!(slot->frameStartDelta > 0))
+            slot->frameStartDelta = 0.001f;
+    }
+    if (slot->events[EV_FRAME_START])
+        agg->previousFrameStart = slot->events[EV_FRAME_START];
+    if (agg->previousDisplay && now) {
+        slot->frameDisplayDelta = ticks_to_ms(agg->previousDisplay, now);
+        if (!(slot->frameDisplayDelta > 0))
+            slot->frameDisplayDelta = 0.001f;
+    }
+    slot->result = result;
+    slot->complete = result != IHS_VideoFrameResultPending;
+    if (result == IHS_VideoFrameResultDisplayed) {
+        agg->lastDisplayedFrameId = slot->frameId;
+        agg->previousDisplay = now;
+    }
+}
+
+void IHS_FrameStatsRecordCompleteAt(IHS_FrameStatsAggregator *agg, uint16_t frameId,
+                                    IHS_VideoFrameResult result, uint32_t now) {
+    IHS_MutexLock(agg->lock);
+    complete_slot(agg, find_slot(agg, frameId), result, now);
+    IHS_MutexUnlock(agg->lock);
+}
 void IHS_FrameStatsRecordComplete(IHS_FrameStatsAggregator *agg, uint16_t frameId,
                                   IHS_VideoFrameResult result) {
-    IHS_MutexLock(agg->lock);
-    IHS_FrameStatsSlot *slot = acquire_slot(agg, frameId);
-    slot->result = result;
-    slot->complete = true;
-    /* Only displayed frames advance the cursor — matches Steam's
-     * RecordFrameComplete, where IsDisplayed() (result == 1) gates the
-     * lastDisplayedFrameId write. Dropped frames sit in the ring waiting
-     * for the next displayed frame to draw a boundary, then get folded
-     * in the drain pass as part of the [lastSent, lastDisplayed] range. */
-    if (result == IHS_VideoFrameResultDisplayed) {
-        agg->lastDisplayedFrameId = frameId;
-    }
-    IHS_MutexUnlock(agg->lock);
+    IHS_FrameStatsRecordCompleteAt(agg, frameId, result, IHS_SessionPacketTimestamp());
 }
 
 void IHS_FrameStatsRecordReceived(IHS_FrameStatsAggregator *agg, uint16_t frameId,
                                   uint32_t senderFrameTimestamp, uint32_t senderSendTimestamp,
                                   uint32_t recvTimestamp, uint32_t frameSize, uint16_t inputMark) {
+    IHS_FrameStatsRecordReceivedInput(agg, frameId, senderFrameTimestamp, senderSendTimestamp,
+                                     recvTimestamp, frameSize, inputMark, 0);
+}
+
+uint16_t IHS_FrameStatsCreateInputMark(IHS_FrameStatsAggregator *agg, uint32_t begin) {
     IHS_MutexLock(agg->lock);
-    IHS_FrameStatsSlot *slot = &agg->ring[frameId & (IHS_FRAME_STATS_RING_SIZE - 1)];
-    if (!slot->inUse || slot->frameId != frameId) {
+    uint16_t mark = agg->lastInputMark == UINT16_MAX ? 1 : (uint16_t)(agg->lastInputMark + 1);
+    agg->lastInputMark = mark;
+    unsigned index = mark & 1023u;
+    agg->inputMarks[index].id = mark;
+    agg->inputMarks[index].begin = begin;
+    agg->inputMarks[index].sent = IHS_SessionPacketTimestamp();
+    IHS_MutexUnlock(agg->lock);
+    return mark;
+}
+
+void IHS_FrameStatsRecordReceivedInput(IHS_FrameStatsAggregator *agg, uint16_t frameId,
+                                       uint32_t senderFrameTimestamp, uint32_t senderSendTimestamp,
+                                       uint32_t recvTimestamp, uint32_t frameSize,
+                                       uint16_t inputMark, uint32_t inputReceived) {
+    IHS_MutexLock(agg->lock);
+    IHS_FrameStatsSlot *slot = &agg->ring[frameId % IHS_FRAME_STATS_RING_SIZE];
+    if (slot->frameId != frameId) {
         memset(slot, 0, sizeof(*slot));
         slot->frameId = frameId;
         slot->inUse = true;
         slot->frameSize = frameSize;
-        slot->inputMark = inputMark;
+        /* Original shifts frame-start with send when receive precedes send. */
+        if ((int32_t)(recvTimestamp - senderSendTimestamp) < 0) {
+            if (inputReceived)
+                inputReceived -= senderSendTimestamp - recvTimestamp;
+            senderFrameTimestamp -= senderSendTimestamp - recvTimestamp;
+            senderSendTimestamp = recvTimestamp;
+        }
         set_event(slot, EV_FRAME_START, senderFrameTimestamp);
         set_event(slot, EV_FRAME_SEND, senderSendTimestamp);
         set_event(slot, EV_FRAME_RECV, recvTimestamp);
+        /* The original indexes with the CURRENT mark, not the received mark.
+         * A matched entry is consumed once. Unknown marks are not echoed. */
+        unsigned index = agg->lastInputMark & 1023u;
+        if (inputMark && (int16_t)(uint16_t)(inputMark - agg->lastInputMark) <= 0 &&
+            agg->inputMarks[index].id == inputMark) {
+            slot->inputMark = inputMark;
+            set_event(slot, EV_INPUT_START, agg->inputMarks[index].begin);
+            set_event(slot, EV_INPUT_SEND, agg->inputMarks[index].sent);
+            set_event(slot, EV_INPUT_RECV, inputReceived);
+            agg->inputMarks[index].id = 0;
+        }
     } else {
         /* Additional partial — only refresh recv timestamp. */
         set_event(slot, EV_FRAME_RECV, recvTimestamp);
@@ -242,16 +325,17 @@ static size_t FrameStatsDrainLocked(IHS_FrameStatsAggregator *agg, IHS_FrameStat
     uint16_t lastSent = agg->lastSentFrameId;
     uint16_t lastDisplayed = agg->lastDisplayedFrameId;
     while (lastSent != lastDisplayed) {
-        uint16_t frameId = (uint16_t)(lastSent + 1);
-        IHS_FrameStatsSlot *slot = &agg->ring[frameId & (IHS_FRAME_STATS_RING_SIZE - 1)];
-        if (slot->inUse && slot->frameId == frameId) {
-            if (!slot->complete) {
-                /* Mark as DroppedLate so the host sees the slot was processed
-                 * even though the app never called RecordComplete in time. */
-                slot->result = IHS_VideoFrameResultDroppedLate;
-                slot->complete = true;
+        uint32_t candidate = (uint32_t)lastSent + 1u;
+        uint16_t frameId = (uint16_t)candidate;
+        IHS_FrameStatsSlot *slot = &agg->ring[frameId % IHS_FRAME_STATS_RING_SIZE];
+        /* Original 0x7a8398..0x7a83bc compares the widened increment with
+         * the uint16 slot ID. At FFFF -> 0 it advances but does not emit 0. */
+        if (slot->frameId == candidate) {
+            if (slot->result == IHS_VideoFrameResultPending) {
+                complete_slot(agg, slot, IHS_VideoFrameResultDroppedLate, IHS_SessionPacketTimestamp());
             }
-            fold_slot(agg, slot);
+            if (!agg->fullReporting)
+                fold_slot(agg, slot);
             if (out != NULL && folded < max) {
                 out[folded] = *slot;
             }
@@ -379,10 +463,11 @@ void IHS_FrameStatsSettleTracked(IHS_FrameStatsAggregator *agg, IHS_FrameTracker
             }
             set_event(&slot, EV_COMPLETE, us_to_ticks(f->outcome.completionUs));
             agg->lastFrameTimestamp = 0; /* interval is supplied by presentation order */
-            fold_slot(agg, &slot);
+            if (!agg->fullReporting)
+                fold_slot(agg, &slot);
             agg->lastFrameTimestamp = 0;
             if (f->outcome.result == IHS_VideoFrameResultDisplayed) {
-                if (f->outcome.hasPresentationInterval)
+                if (!agg->fullReporting && f->outcome.hasPresentationInterval)
                     accum_add(&agg->accumulator, 10, f->outcome.presentationIntervalUs / 1000.0);
                 if (f->outcome.presentationSerial > agg->lastPresentationSerial) {
                     agg->lastPresentationSerial = f->outcome.presentationSerial;

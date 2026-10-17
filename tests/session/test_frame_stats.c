@@ -57,14 +57,13 @@ static void expect_slot(const IHS_FrameStatsAggregator *agg, int slot, uint32_t 
 #define MS_TICKS(ms) ((uint32_t)((uint64_t)(ms) * 65536 / 1000))
 
 int main(void) {
-    /* Tracked valid-mask preserves a real timestamp zero across wire wrap. */
+    /* Official Save reserves raw zero for absence, including tracked slots. */
     IHS_FrameStatsSlot zero = {.tracked = true, .eventMask = (1u << 13) | (1u << 14)};
     zero.events[14] = 5;
     CFrameEvent events[IHS_FRAME_STATS_EVENT_COUNT];
     CFrameEvent *pointers[IHS_FRAME_STATS_EVENT_COUNT];
-    assert(IHS_FrameStatsEncodeEvents(&zero, 7, events, pointers) == 2);
-    assert(events[0].event_id == 13 && events[0].timestamp == 7);
-    assert(events[1].event_id == 14 && events[1].timestamp == 5);
+    assert(IHS_FrameStatsEncodeEvents(&zero, 7, events, pointers) == 1);
+    assert(events[0].event_id == 14 && events[0].timestamp == 12);
     zero.tracked = false;
     assert(IHS_FrameStatsEncodeEvents(&zero, 7, events, pointers) == 1);
 
@@ -82,11 +81,10 @@ int main(void) {
     IHS_FrameStatsRecordStage(agg, 1, IHS_VideoFrameStageUploadBegin, MS_TICKS(20));
     /*   UploadEnd (17)                            at 25 ms */
     IHS_FrameStatsRecordStage(agg, 1, IHS_VideoFrameStageUploadEnd, MS_TICKS(25));
-    /*   Complete (18) at 30 ms, Displayed. The public-API wrapper would have
-     *   stamped event 18 + advanced lastDisplayedFrameId; here we replay both
-     *   explicit steps. */
-    IHS_FrameStatsRecordStage(agg, 1, (IHS_VideoFrameStage)18, MS_TICKS(30));
-    IHS_FrameStatsRecordComplete(agg, 1, IHS_VideoFrameResultDisplayed);
+    /* Complete stamps event 18 itself; the explicit clock makes this test
+     * independent of wall time. The partial accumulator below is local-only;
+     * official ring/Save expectations come from frame_stats_official_vectors. */
+    IHS_FrameStatsRecordCompleteAt(agg, 1, IHS_VideoFrameResultDisplayed, MS_TICKS(30));
 
     /* Frame 2: inter-frame interval test. Complete at 50 ms (20 ms after frame 1). */
     IHS_FrameStatsRecordReceived(agg, 2, MS_TICKS(20), MS_TICKS(20), MS_TICKS(20), 1024, 0);
@@ -94,8 +92,7 @@ int main(void) {
     IHS_FrameStatsRecordStage(agg, 2, IHS_VideoFrameStageDecodeEnd, MS_TICKS(40));
     IHS_FrameStatsRecordStage(agg, 2, IHS_VideoFrameStageUploadBegin, MS_TICKS(40));
     IHS_FrameStatsRecordStage(agg, 2, IHS_VideoFrameStageUploadEnd, MS_TICKS(45));
-    IHS_FrameStatsRecordStage(agg, 2, (IHS_VideoFrameStage)18, MS_TICKS(50));
-    IHS_FrameStatsRecordComplete(agg, 2, IHS_VideoFrameResultDisplayed);
+    IHS_FrameStatsRecordCompleteAt(agg, 2, IHS_VideoFrameResultDisplayed, MS_TICKS(50));
 
     /* Drain: two displayed frames. lastSent was 0, lastDisplayed advanced to 2,
      * so we should fold both. */
@@ -126,8 +123,7 @@ int main(void) {
     IHS_FrameStatsRecordReceived(agg, 4, MS_TICKS(50), MS_TICKS(50), MS_TICKS(50), 1024, 0);
     IHS_FrameStatsRecordStage(agg, 4, IHS_VideoFrameStageDecodeBegin, MS_TICKS(60));
     IHS_FrameStatsRecordStage(agg, 4, IHS_VideoFrameStageDecodeEnd, MS_TICKS(70));
-    IHS_FrameStatsRecordStage(agg, 4, (IHS_VideoFrameStage)18, MS_TICKS(75));
-    IHS_FrameStatsRecordComplete(agg, 4, IHS_VideoFrameResultDisplayed);
+    IHS_FrameStatsRecordCompleteAt(agg, 4, IHS_VideoFrameResultDisplayed, MS_TICKS(75));
 
     folded = IHS_FrameStatsAggregatorDrain(agg, &latest);
     assert(folded == 2); /* frame 3 (dropped late) and frame 4 (displayed) */
@@ -146,15 +142,13 @@ int main(void) {
      * the next Displayed frame draws a boundary. */
     IHS_FrameStatsAccumulatorReset(&agg->accumulator);
     IHS_FrameStatsRecordReceived(agg, 5, MS_TICKS(80), MS_TICKS(80), MS_TICKS(80), 1024, 0);
-    IHS_FrameStatsRecordStage(agg, 5, (IHS_VideoFrameStage)18, MS_TICKS(95));
-    IHS_FrameStatsRecordComplete(agg, 5, IHS_VideoFrameResultDroppedDecodeSlow);
+    IHS_FrameStatsRecordCompleteAt(agg, 5, IHS_VideoFrameResultDroppedDecodeSlow, MS_TICKS(95));
     /* Frame 5 dropped → lastDisplayedFrameId still 4 → drain folds nothing yet. */
     folded = IHS_FrameStatsAggregatorDrain(agg, &latest);
     assert(folded == 0);
     /* Frame 6 displayed → boundary drawn at 6, frame 5 is in the range and gets folded. */
     IHS_FrameStatsRecordReceived(agg, 6, MS_TICKS(90), MS_TICKS(90), MS_TICKS(90), 1024, 0);
-    IHS_FrameStatsRecordStage(agg, 6, (IHS_VideoFrameStage)18, MS_TICKS(110));
-    IHS_FrameStatsRecordComplete(agg, 6, IHS_VideoFrameResultDisplayed);
+    IHS_FrameStatsRecordCompleteAt(agg, 6, IHS_VideoFrameResultDisplayed, MS_TICKS(110));
     folded = IHS_FrameStatsAggregatorDrain(agg, &latest);
     assert(folded == 2); /* frames 5 and 6 */
     assert(latest == 6);

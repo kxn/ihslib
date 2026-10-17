@@ -11,6 +11,11 @@ ihs_add_test(video_control test_video_control.c)
 target_link_libraries(ihstest_video_control PRIVATE ihs-test-session)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ihs-frame-stats-oracle frame_stats_oracle.c)
+    target_include_directories(ihs-frame-stats-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-frame-stats-oracle PRIVATE ihslib)
+    target_compile_options(ihs-frame-stats-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-frame-stats-oracle PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp)
     ihs_add_test(reliable_feedback_worker test_reliable_feedback_worker.c)
     target_link_libraries(ihstest_reliable_feedback_worker PRIVATE ihs-test-session)
     target_link_options(ihstest_reliable_feedback_worker PRIVATE -Wl,--wrap=IHS_BaseSend

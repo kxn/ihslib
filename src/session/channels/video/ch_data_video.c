@@ -262,6 +262,7 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
     if (!header || body->size < 7)
         return;
     IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
+    uint32_t receivedPayloadSize = (uint32_t)body->size;
     IHS_VideoFrameHeader vhead;
     IHS_BufferOffsetBy(body, (int)VideoFrameHeaderParse(&vhead, IHS_BufferPointer(body)));
 
@@ -272,10 +273,10 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
      * from the peer clock; preserve the original transport receive timestamp. */
     if (!videoCh->tracked && channel->session->frameStats != NULL) {
         int32_t offset = IHS_StreamClockOffset(&channel->session->clock);
-        IHS_FrameStatsRecordReceived(channel->session->frameStats, header->id,
+        IHS_FrameStatsRecordReceivedInput(channel->session->frameStats, header->id,
                                      header->timestamp - offset, header->sendTimestamp - offset,
-                                     header->receiveTimestamp,
-                                     0 /* frameSize unknown until assembly */, header->inputMark);
+                                     header->receiveTimestamp, receivedPayloadSize, header->inputMark,
+                                     header->inputRecvTimestamp ? header->inputRecvTimestamp - offset : 0);
     }
 
     IHS_MutexLock(videoCh->stateMutex);
@@ -639,10 +640,9 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
     IHS_SessionLog(channel->session, IHS_LogLevelVerbose, "Video", "%.2f FPS", fps);
     videoCh->states.lastStatsTime = now;
 
-    /* Drain the per-frame stats aggregator into the accumulator and ship one
-     * CFrameStatsListMsg over the stats channel. Matches Steam's
-     * CStreamClient::SendFrameEvents (0x001fb4f0) — 1 Hz, video only, packet
-     * suppressed when nothing was folded. */
+    /* Local report producer. The detail encoder follows original Save (protocol
+     * reference §52); this timer, partial accumulator and enqueue-retry policy
+     * are separate from original OnThink/SendFrameEvents 0x7a82e8. */
     if (session->frameStats == NULL) {
         return 1000;
     }
@@ -674,8 +674,8 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
         row->count = (int32_t)accum->slots[i].count;
         double average = accum->slots[i].sum / accum->slots[i].count;
         row->average = (float)average;
-        /* Stddev = sqrt(E[X^2] - E[X]^2). Suppress when ≤ 0 (single sample or
-         * negative-from-FP-roundoff). Matches Steam's set_stddev guard. */
+        /* Local population variance. Original uses float sample vectors and
+         * two-pass sample variance, not this closed-form calculation (§52). */
         if (accum->slots[i].count > 1) {
             double meanSq = accum->slots[i].sumSquares / accum->slots[i].count;
             double variance = meanSq - average * average;
@@ -704,22 +704,9 @@ static uint64_t ReportVideoStats(int runCount, void *data) {
         for (size_t i = 0; i < folded; i++) {
             const IHS_FrameStatsSlot *slot = &drained[i];
             CFrameStats *row = &frameRows[frameCount];
-            cframe_stats__init(row);
-            row->frame_id = slot->frameId;
-            row->n_events = 0;
-            row->events = &eventPtrs[eventCount];
-            row->n_events = IHS_FrameStatsEncodeEvents(slot, clockOffset, &eventRows[eventCount],
-                                                       &eventPtrs[eventCount]);
+            IHS_FrameStatsEncodeFrame(slot, clockOffset, row, &eventRows[eventCount],
+                                       &eventPtrs[eventCount]);
             eventCount += row->n_events;
-            row->result = slot->result;
-            if (slot->inputMark != 0) {
-                row->has_input_mark = 1;
-                row->input_mark = slot->inputMark;
-            }
-            if (slot->frameSize != 0) {
-                row->has_frame_size = 1;
-                row->frame_size = slot->frameSize;
-            }
             frameCount++;
         }
         for (size_t r = 0; r < frameCount; r++) {

@@ -80,7 +80,7 @@ bool __wrap_IHS_SessionChannelStatsSend(IHS_SessionChannel *channel, EStreamStat
     ++sends;
     if (sends <= 2) {
         assert(decoded->latest_frame_id == 1 && decoded->stats[0]->frame_id == 1);
-        assert(decoded->stats[0]->n_events >= 3 && decoded->stats[0]->frame_size == 101);
+        assert(decoded->stats[0]->n_events >= 3 && !decoded->stats[0]->has_frame_size);
         if (sends == 1) {
             firstPacket = packet;
             firstSize = size;

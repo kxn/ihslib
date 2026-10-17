@@ -143,9 +143,6 @@ void IHS_SessionReportVideoFrameStage(IHS_Session *session, uint16_t frameId,
     if (session->frameStats == NULL) {
         return;
     }
-    if (timestamp == 0) {
-        timestamp = IHS_SessionPacketTimestamp();
-    }
     IHS_FrameStatsRecordStage(session->frameStats, frameId, stage, timestamp);
 }
 
@@ -154,11 +151,6 @@ void IHS_SessionReportVideoFrameComplete(IHS_Session *session, uint16_t frameId,
     if (session->frameStats == NULL) {
         return;
     }
-    /* Stamp event 18 (Complete) ourselves before delegating, so the aggregator's
-     * fold step can compute Client end-to-end and inter-frame interval. */
-    IHS_FrameStatsRecordStage(session->frameStats, frameId,
-                              (IHS_VideoFrameStage)18 /* k_EStreamFrameEventComplete */,
-                              IHS_SessionPacketTimestamp());
     IHS_FrameStatsRecordComplete(session->frameStats, frameId, result);
 }
 
