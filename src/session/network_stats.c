@@ -23,14 +23,21 @@ void IHS_SessionRecordNetworkSent(IHS_Session *s, uint32_t now, int32_t bytes) {
     IHS_NetworkBitrateRecord(&s->networkRates[0], now, bytes);
     IHS_BaseUnlock(&s->base);
 }
+void IHS_SessionRecordNetworkVideo(IHS_Session *s, uint32_t sent, uint32_t begin,
+                                    uint32_t end, uint16_t frame, int32_t bytes) {
+    /* RecordFrameReceived clamps its local send value before the inline video
+     * collector; original packet/header timestamps remain untouched. */
+    if ((int32_t)(end - sent) < 0) sent = end;
+    IHS_BaseLock(&s->base);
+    IHS_NetworkVideoRecord(&s->networkVideo, sent, begin, end, frame, bytes);
+    IHS_BaseUnlock(&s->base);
+}
 void IHS_SessionGetNetworkSample(IHS_Session *s, float values[5]) {
     IHS_BaseLock(&s->base);
     values[0] = IHS_StreamClockRTTMilliseconds(&s->clock);
     values[1] = s->networkRates[1].bitrate * 0.001f;
     values[2] = s->networkRates[0].bitrate * 0.001f;
-    /* Video link sampling still needs the actual frame receive metadata.
-     * It was zero before this connection-sampling change; protocol §57. */
-    values[3] = 0;
+    values[3] = s->networkVideo.link * 0.001f;
     values[4] = s->networkPackets.total
         ? ((float)(int32_t)s->networkPackets.lost * 100.0f) / (float)(int32_t)s->networkPackets.total
         : 0;

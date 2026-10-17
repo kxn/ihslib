@@ -184,7 +184,15 @@ bool IHS_FECReceiverAdd(IHS_FECReceiver *r, const IHS_SessionPacket *packet,
         r->dataCount = data;
         r->parityCount = parity;
         r->firstHeader = packet->header;
+        r->firstHeader.receiveBegin = 0;
     }
+    /* BAddPacket 0x7f82a0..82dc: choose the lowest wire index, while
+     * first/last receive timestamps have independent sentinel/arrival rules. */
+    uint32_t begin = r->firstHeader.receiveBegin;
+    if (index < (uint16_t)r->firstHeader.fragmentId)
+        r->firstHeader = packet->header;
+    r->firstHeader.receiveBegin = begin ? begin : packet->header.receiveTimestamp;
+    r->firstHeader.receiveTimestamp = packet->header.receiveTimestamp;
     if (r->present[index])
         return false; /* original duplicate-count delivery bug is deliberately not copied */
     memcpy(r->shards + (size_t)index * shardSize, bytes + 8, shardSize);

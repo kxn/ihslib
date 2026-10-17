@@ -85,7 +85,8 @@ typedef struct IHS_SessionPacketHeader {
     uint32_t sendTimestamp;
     bool autoPacketId; /* Reserve IDs atomically when queued; never serialized. */
     bool hidReport; /* local classification, inherited by fragments; never serialized */
-    uint32_t receiveTimestamp; /* local metadata, never serialized */
+    uint32_t receiveTimestamp; /* local last receive, never serialized */
+    uint32_t receiveBegin; /* local first receive, carried through frame/FEC queues (§59) */
 } IHS_SessionPacketHeader;
 
 typedef struct IHS_SessionPacket {

@@ -38,7 +38,7 @@ static void DataThreadWorker(IHS_SessionChannelData *channel);
 
 static void DataThreadInterrupt(IHS_SessionChannelData *channel);
 
-static void ReceivedFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame);
+void IHS_SessionChannelDataReceiveFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame);
 
 static const char *DataChannelName(IHS_SessionChannelType type);
 
@@ -287,7 +287,7 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
         IHS_MutexUnlock(channel->windowLock);
         IHS_SessionRecordNetworkLost(channel->base.session, sampleTime, missing);
         if (hasFrame) {
-            ReceivedFrame(channel, &frame);
+            IHS_SessionChannelDataReceiveFrame(channel, &frame);
             IHS_SessionPacketsWindowReleaseFrame(&frame);
         }
     }
@@ -311,7 +311,7 @@ static void DataThreadInterrupt(IHS_SessionChannelData *channel) {
     IHS_MutexUnlock(channel->windowLock);
 }
 
-static void ReceivedFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
+void IHS_SessionChannelDataReceiveFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
     assert(frame->header.type == IHS_SessionPacketTypeUnreliable ||
            frame->header.type == IHS_SessionPacketTypeUnreliableFEC ||
            frame->header.type == IHS_SessionPacketTypeReliable);
@@ -324,12 +324,13 @@ static void ReceivedFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *fra
     }
     IHS_SessionDataFrameHeader header;
     bool hasHeader = false;
-    if (frame->body.size > IHS_SESSION_DATA_FRAME_HEADER_SIZE) {
+    if (frame->body.size >= IHS_SESSION_DATA_FRAME_HEADER_SIZE) {
         hasHeader = true;
         size_t offset = IHS_SessionChannelDataFrameHeaderParse(&header, &frame->body);
         IHS_BufferOffsetBy(&frame->body, (int)offset);
         header.sendTimestamp = frame->header.sendTimestamp;
         header.receiveTimestamp = frame->header.receiveTimestamp;
+        header.receiveBegin = frame->header.receiveBegin;
     }
     const IHS_SessionChannelDataClass *cls = (const IHS_SessionChannelDataClass *)channel->base.cls;
     if (hasHeader)

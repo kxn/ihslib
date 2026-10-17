@@ -232,12 +232,13 @@ static bool DataStart(IHS_SessionChannel *channel) {
 
 static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrameHeader *header,
                          IHS_Buffer *body) {
-    if (!header || body->size < 7)
+    if (!header)
         return;
     IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
     uint32_t receivedPayloadSize = (uint32_t)body->size;
-    IHS_VideoFrameHeader vhead;
-    IHS_BufferOffsetBy(body, (int)VideoFrameHeaderParse(&vhead, IHS_BufferPointer(body)));
+    int32_t offset = IHS_StreamClockOffset(&channel->session->clock);
+    IHS_SessionRecordNetworkVideo(channel->session, header->sendTimestamp - offset,
+        header->receiveBegin, header->receiveTimestamp, header->id, receivedPayloadSize);
 
     /* Seed events 5 (FrameEventStart) / 12 (FrameEventSend) / 13 (FrameEventRecv)
      * for this frame in the stats aggregator. Done outside the videoCh mutex so
@@ -247,17 +248,20 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
     if (channel->session->frameStats != NULL) {
         if (videoCh->tracked)
             IHS_FrameStatsCollectTracked(channel->session->frameStats, channel->session->frameTracker);
-        int32_t offset = IHS_StreamClockOffset(&channel->session->clock);
         IHS_FrameStatsRecordReceivedInput(channel->session->frameStats, header->id,
                                      header->timestamp - offset, header->sendTimestamp - offset,
                                      header->receiveTimestamp, receivedPayloadSize, header->inputMark,
                                      header->inputRecvTimestamp ? header->inputRecvTimestamp - offset : 0);
     }
 
+    if (body->size < 7)
+        return;
+    IHS_VideoFrameHeader vhead;
+    IHS_BufferOffsetBy(body, (int)VideoFrameHeaderParse(&vhead, IHS_BufferPointer(body)));
+
     IHS_MutexLock(videoCh->stateMutex);
     videoCh->contributed = false;
     if (videoCh->tracked) {
-        int32_t offset = IHS_StreamClockOffset(&channel->session->clock);
         uint64_t now = IHS_TimerNow() * 1000;
         IHS_FrameReceive received = {.firstReceiveUs = now,
                                      .lastReceiveUs = now,

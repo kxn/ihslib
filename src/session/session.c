@@ -192,6 +192,7 @@ void IHS_SessionDestroy(IHS_Session *session) {
     IHS_NetworkSampleQueueDestroy(&session->networkRates[0].queue);
     IHS_NetworkSampleQueueDestroy(&session->networkRates[1].queue);
     IHS_NetworkSampleQueueDestroy(&session->networkPackets.queue);
+    IHS_NetworkSampleQueueDestroy(&session->networkVideo.queue);
     if (session->clientConfig)
         cstreaming_client_config__free_unpacked(session->clientConfig, NULL);
     if (session->negotiatedConfig)
@@ -466,6 +467,7 @@ static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address
         return;
     }
     packet.header.receiveTimestamp = IHS_SessionPacketTimestamp();
+    packet.header.receiveBegin = packet.header.receiveTimestamp;
     IHS_SessionChannelId channelId = packet.header.channelId;
     IHS_SessionPacketType packetType = packet.header.type;
     bool special = packetType == IHS_SessionPacketTypeUnconnected ||

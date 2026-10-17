@@ -35,6 +35,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(ihs-frame-events-loop-oracle frame_events_loop_oracle.c)
     add_executable(ihs-network-collectors-oracle network_collectors_oracle.c)
     add_executable(ihs-network-wire-oracle network_wire_oracle.c)
+    ihs_add_test(video_network_workers test_video_network_workers.c)
+    target_link_libraries(ihstest_video_network_workers PRIVATE ihs-test-session)
+    target_link_options(ihstest_video_network_workers PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
+        -Wl,--wrap=IHS_SessionSendControlMessage)
+    set_tests_properties(video_network_workers PROPERTIES TIMEOUT 20)
     ihs_add_test(network_sampling_workers test_network_sampling_workers.c)
     target_link_libraries(ihstest_network_sampling_workers PRIVATE ihs-test-session)
     target_link_options(ihstest_network_sampling_workers PRIVATE -Wl,--wrap=IHS_BaseSend
@@ -46,6 +51,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(ihs-network-wire-oracle PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
         -Wl,--wrap=IHS_BaseSend -Wl,--wrap=IHS_SessionPacketParse
         -Wl,--wrap=IHS_SessionDeliverReliableFrame
+        -Wl,--wrap=IHS_SessionChannelDataInit
         -Wl,--wrap=IHS_SessionChannelQueueFrameResult)
     target_include_directories(ihs-network-collectors-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-network-collectors-oracle PRIVATE ihslib)

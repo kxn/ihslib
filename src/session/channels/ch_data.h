@@ -38,7 +38,7 @@ typedef struct IHS_SessionDataFrameHeader {
     uint32_t timestamp;
     uint16_t inputMark;
     uint32_t inputRecvTimestamp;
-    uint32_t sendTimestamp, receiveTimestamp; /* transport metadata, not header bytes */
+    uint32_t sendTimestamp, receiveTimestamp, receiveBegin; /* local transport metadata */
 } IHS_SessionDataFrameHeader;
 
 typedef struct IHS_SessionChannelData {
@@ -106,3 +106,6 @@ void IHS_SessionChannelDataReceiveReliableFrame(IHS_SessionChannel *, IHS_Sessio
 
 /* One worker polling step. Hold windowLock; publish missing outside that lock. */
 bool IHS_SessionChannelDataPollLocked(IHS_SessionChannelData *, IHS_SessionFrame *, uint16_t *missing);
+
+/* Complete-frame consumer used by the data worker, outside windowLock. */
+void IHS_SessionChannelDataReceiveFrame(IHS_SessionChannelData *, IHS_SessionFrame *);

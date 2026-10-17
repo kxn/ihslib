@@ -244,6 +244,7 @@ bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionF
         frameBodyLen += item->body.size;
     }
     frame->header = head->header;
+    frame->header.receiveBegin = head->header.receiveTimestamp;
     frame->receivedRetries = 0;
     IHS_BufferEnsureMaxSize(&frame->body, frameBodyLen);
 
@@ -251,7 +252,10 @@ bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionF
         WindowItem *item = &window->data[i % window->capacity];
         IHS_BufferAppend(&frame->body, &item->body);
         frame->receivedRetries += item->header.retransmitCount;
-        if ((int32_t)(item->header.receiveTimestamp - frame->header.receiveTimestamp) > 0) {
+        /* Pop 0x7f764c uses unsigned comparison, including across wrap. */
+        if (item->header.receiveTimestamp > frame->header.receiveTimestamp) {
+            if (!frame->header.receiveBegin)
+                frame->header.receiveBegin = item->header.receiveTimestamp;
             frame->header.receiveTimestamp = item->header.receiveTimestamp;
         }
 

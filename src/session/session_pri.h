@@ -134,6 +134,7 @@ struct IHS_Session {
     /* Connection collectors, serialized by base.lock; no independent timer. */
     IHS_NetworkBitrateStats networkRates[2]; /* outgoing, incoming */
     IHS_NetworkPacketStats networkPackets;
+    IHS_NetworkVideoStats networkVideo;
     IHS_HIDManager *hidManager;
     struct IHS_FrameStatsAggregator *frameStats;
     struct IHS_FrameTracker *frameTracker;
