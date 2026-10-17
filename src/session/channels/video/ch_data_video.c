@@ -747,3 +747,13 @@ bool IHS_SessionVideoDecodeFeedback(IHS_Session *session, const IHS_VideoEpochIn
      * it before channel/epoch replacement; do not recursively lock stateMutex. */
     return ApplyDecodeFeedback(video, result);
 }
+
+bool IHS_SessionVideoRequestReset(IHS_Session *session) {
+    if (!session) return false;
+    /* RX/control owner serializes lookup with channel replacement. No Base
+     * lock, decoder lock, stop or join here; the worker reads this atomic gate. */
+    IHS_SessionChannel *ch = IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataVideo);
+    if (!ch || ch->cls != &ChannelClass.base) return false;
+    atomic_store(&((IHS_SessionChannelVideo *)ch)->resetRequested, true);
+    return true;
+}

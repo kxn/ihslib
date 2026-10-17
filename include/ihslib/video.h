@@ -104,6 +104,15 @@ bool IHS_SessionVideoDecodeFeedback(IHS_Session *, const IHS_VideoEpochInfo *,
 /* Effective config field 7, including its true default. Backend selection
  * reads this again for every epoch, including actor-owned decoder rebuilds. */
 bool IHS_SessionVideoHardwareDecodingEnabled(IHS_Session *);
+/* The same effective value plus protobuf field presence. No allocation; safe
+ * in the config callback's Base-lock scope. Missing has the true default. */
+bool IHS_SessionVideoHardwareDecodingPreference(IHS_Session *, bool *present);
+/* Synchronous RX/control-owner call (e.g. clientConfigChanged on that owner).
+ * Only sets the current decoder's asynchronous request; never stops or joins.
+ * Call before updating the player's cached hardware preference. SDK workers
+ * use the epoch-scoped DecodeFeedback API instead. False means no video object.
+ * Do not call from an unrelated thread or retain a borrowed session. */
+bool IHS_SessionVideoRequestReset(IHS_Session *);
 
 /* Set before starting session workers. Identity cannot be reassigned. */
 bool IHS_SessionSetVideoTrackingIdentity(IHS_Session *, uint64_t session_id);

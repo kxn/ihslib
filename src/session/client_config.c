@@ -7,9 +7,18 @@
 static const CStreamingClientConfig defaults = CSTREAMING_CLIENT_CONFIG__INIT;
 
 bool IHS_SessionVideoHardwareDecodingEnabled(IHS_Session *s) {
-    if (!s) return false;
+    return IHS_SessionVideoHardwareDecodingPreference(s, NULL);
+}
+
+bool IHS_SessionVideoHardwareDecodingPreference(IHS_Session *s, bool *present) {
+    if (!s) {
+        if (present) *present = false;
+        return false;
+    }
     IHS_BaseLock(&s->base);
-    bool enabled = (s->clientConfig ? s->clientConfig : &defaults)->enable_hardware_decoding;
+    const CStreamingClientConfig *config = s->clientConfig ? s->clientConfig : &defaults;
+    bool enabled = config->enable_hardware_decoding;
+    if (present) *present = config->has_enable_hardware_decoding;
     IHS_BaseUnlock(&s->base);
     return enabled;
 }
