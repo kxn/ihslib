@@ -22,7 +22,9 @@ static bool receiving, sending;
 static unsigned resultCode, entryCount, writeCount, entries[512];
 static bool reportMetadata, lossMode, videoMode, cycleMode, networkMode, deadlineMode, admissionMode, earlyMode;
 static unsigned admitted[256], admittedCount;
-static bool earlyClosing;
+static bool earlyClosing, clockMode;
+static char *acceptedClock[32], *decodedClock[32];
+static unsigned acceptedClockCount, decodedClockCount;
 static IHS_SessionChannelData mediaStorage, *media = &mediaStorage;
 static unsigned deliveredCount;
 static char *delivered[256];
@@ -45,7 +47,25 @@ bool __wrap_IHS_SessionChannelDataInit(IHS_SessionChannel *ch, uint16_t capacity
     if (videoMode) return initialize_media(ch, capacity);
     return __real_IHS_SessionChannelDataInit(ch, capacity);
 }
+static char *clock_metadata(IHS_SessionFrame *f) {
+    IHS_Buffer body = f->body;
+    IHS_BufferOffsetBy(&body, 1);
+    IHS_SessionDataFrameHeader h = {0};
+    assert(IHS_SessionChannelDataFrameHeaderParse(&h, &body) == 12);
+    int32_t offset = f->mediaPrepared ? f->mediaOffset : IHS_StreamClockOffset(&session->clock);
+    char value[512];
+    snprintf(value, sizeof(value), "{\"id\":%u,\"frame\":%u,\"sent\":%u,\"received\":%u,\"first\":%u,\"input\":%u,\"input_received\":%u,\"size\":%zu}",
+        h.id, h.timestamp - offset, f->header.sendTimestamp - offset, f->header.receiveTimestamp,
+        f->header.receiveBegin, h.inputMark, h.inputRecvTimestamp ? h.inputRecvTimestamp - offset : 0, f->body.size - 13);
+    return strdup(value);
+}
+void __real_IHS_SessionChannelDataReceiveReliableFrame(IHS_SessionChannel *, IHS_SessionFrame *);
+void __wrap_IHS_SessionChannelDataReceiveReliableFrame(IHS_SessionChannel *ch, IHS_SessionFrame *f) {
+    if (clockMode) { assert(acceptedClockCount < 32); acceptedClock[acceptedClockCount++] = clock_metadata(f); }
+    __real_IHS_SessionChannelDataReceiveReliableFrame(ch, f);
+}
 static void deliver(IHS_SessionFrame *f) {
+    if (clockMode) { assert(decodedClockCount < 32); decodedClock[decodedClockCount++] = clock_metadata(f); }
     assert(deliveredCount < 256);
     char *hex = malloc(f->body.size * 2 + 1);
     assert(hex);
@@ -302,6 +322,13 @@ static void report(void) {
         printf("],\"receiver\":{\"head\":%u,\"tail\":%u,\"delay\":%u}", head,
             (uint16_t)(head + IHS_SessionPacketsWindowSize(rx->window)), rx->maxReceiveDelay);
     }
+    if (clockMode) {
+        printf(",\"offset\":%d,\"accepted\":[", IHS_StreamClockOffset(&session->clock));
+        for (unsigned i = 0; i < acceptedClockCount; ++i) { printf("%s%s", i ? "," : "", acceptedClock[i]); free(acceptedClock[i]); }
+        printf("],\"decoded\":[");
+        for (unsigned i = 0; i < decodedClockCount; ++i) { printf("%s%s", i ? "," : "", decodedClock[i]); free(decodedClock[i]); }
+        printf("]"); acceptedClockCount = decodedClockCount = 0;
+    }
     if (cycleMode) {
         printf(",\"waits\":[");
         for (unsigned i = 0; i < waitCount; ++i) printf("%s%u", i ? "," : "", waits[i]);
@@ -351,8 +378,9 @@ static IHS_SessionPacket packet(unsigned type, unsigned channel, unsigned crc,
 }
 int main(int argc, char **argv) {
     assert(argc >= 3 && argc <= 6);
+    clockMode = argc == 6 && !strcmp(argv[5], "media-clock");
     earlyClosing = argc == 6 && !strcmp(argv[5], "early-closing");
-    earlyMode = earlyClosing || (argc == 6 && !strcmp(argv[5], "early"));
+    earlyMode = clockMode || earlyClosing || (argc == 6 && !strcmp(argv[5], "early"));
     admissionMode = earlyMode || (argc == 6 && !strcmp(argv[5], "admission"));
     videoMode = admissionMode || (argc == 6 && !strcmp(argv[5], "video"));
     deadlineMode = argc == 6 && !strcmp(argv[5], "deadline");
@@ -392,6 +420,13 @@ int main(int argc, char **argv) {
     char line[8192];
     while (fgets(line, sizeof(line), stdin)) {
         unsigned type, ch, crc, source, dest, size, bad;
+        if (clockMode && line[0] == 'V') {
+            unsigned id;
+            assert(sscanf(line, "V %u %u", &id, &now) == 2);
+            IHS_FrameStatsRecordCompleteAt(session->frameStats, id, IHS_VideoFrameResultDisplayed, now);
+            report(); continue;
+        }
+        if (clockMode && line[0] == 'D') { drain_media(); report(); continue; }
         if (earlyMode && line[0] == 'X') {
             IHS_SessionPacket p = packet(IHS_SessionPacketTypeDisconnect, 0, session->state.crcRequired, 34, 12, 0);
             IHS_SessionPacketPopulateBuffer(&p);
@@ -413,7 +448,7 @@ int main(int argc, char **argv) {
             config.channel = id; config.codec = k_EStreamVideoCodecH264; config.width = 1280; config.height = 720;
             media = (void *)IHS_SessionChannelDataVideoCreate(session, &config); assert(media);
             IHS_SessionChannelAdd(session, &media->base);
-            drain_media(); report(); continue;
+            if (!clockMode) drain_media(); report(); continue;
         }
         if (deadlineMode && line[0] == 'L') {
             unsigned last,paused;
@@ -531,7 +566,7 @@ int main(int argc, char **argv) {
             receiving = true;
             session->base.callbacks.received(&session->base, &session->info.address, &wire);
             receiving = false;
-            if (type == IHS_SessionPacketTypeUnreliableFEC && media) {
+            if (type == IHS_SessionPacketTypeUnreliableFEC && media && !clockMode) {
                 /* Source delegates FEC synchronously. Native bridges through
                  * its worker FIFO; drain that production step within this
                  * action to compare payload/counters, not callback timing. */
@@ -551,7 +586,7 @@ int main(int argc, char **argv) {
             if (videoMode || ch != 3) IHS_SessionReliableUpdateChannel(session, ch);
             if (ch == 3 && earlyMode) {
                 IHS_SessionUnreliableUpdateAt(session, ch, now);
-                drain_media();
+                if (!clockMode) drain_media();
             } else if (ch == 3) {
                 IHS_SessionChannelDataUpdateAt(media, now);
                 /* Drive the production complete-frame FIFO consumer; actual

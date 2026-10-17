@@ -197,6 +197,8 @@ bool IHS_SessionChannelInitializePacket(IHS_SessionChannel *channel, IHS_Session
 
 bool IHS_SessionChannelInitializeFrame(IHS_SessionChannel *channel, IHS_SessionFrame *frame,
                                        IHS_SessionPacketType type, bool hasCrc, int32_t packetId) {
+    frame->mediaOffset = 0;
+    frame->mediaPrepared = false;
     IHS_SessionChannelInitializePacketHeader(channel, &frame->header, type, hasCrc, packetId);
     IHS_SessionFrameBodyInitialize(&frame->body, hasCrc);
     return true;

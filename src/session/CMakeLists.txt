@@ -4,6 +4,7 @@ target_sources(ihslib PRIVATE
         shutdown.c
         client_shutdown.c
         media_pending.c
+        media_receive.c
         connection_id.c
         client_config.c
         packet.c

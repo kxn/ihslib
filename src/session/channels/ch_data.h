@@ -35,6 +35,7 @@
 #include "session/unreliable.h"
 
 typedef struct IHS_SessionDataFrameHeader {
+    bool timestampsLocal, receivedRecorded; /* local metadata, not data-header bytes */
     uint16_t id;
     uint32_t timestamp;
     uint16_t inputMark;
@@ -94,7 +95,10 @@ size_t IHS_SessionChannelDataFrameHeaderParse(IHS_SessionDataFrameHeader *header
 bool IHS_SessionChannelDataBuildFeedback(IHS_SessionChannelData *, uint32_t now,
                                          IHS_SessionPacket *, uint32_t *waitTicks);
 
-/* Transfer an ordered, reassembled reliable frame to the decoder worker. */
+/* Source OnDataPacket: latch offset/record receive sampling before decoder handoff. */
+void IHS_SessionChannelDataPrepareFrame(IHS_SessionChannel *, IHS_SessionFrame *);
+
+/* Transfer an ordered, reassembled complete frame to the decoder worker. */
 void IHS_SessionChannelDataReceiveReliableFrame(IHS_SessionChannel *, IHS_SessionFrame *);
 
 /* RX batch-end protocol update, independent of decoder progress. */

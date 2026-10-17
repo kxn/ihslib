@@ -16,6 +16,9 @@
 
 static atomic_uint tick = 1000000, decoded, feedbacks, goodbyes, started, stopped;
 static uint16_t ids[16];
+static bool clockMode;
+static atomic_uint permits;
+static char *metadata[16];
 uint32_t __wrap_IHS_SessionPacketTimestamp(void) {
     return atomic_load(&tick);
 }
@@ -40,7 +43,9 @@ static void init(IHS_SessionChannel *ch, const void *unused) {
 static bool start(IHS_SessionChannel *ch) {
     (void)ch;
     atomic_fetch_add(&started, 1);
-    return true;
+    while (clockMode && !atomic_load(&permits) && !((IHS_SessionChannelData *)ch)->interrupted)
+        usleep(1000);
+    return true; /* This fixture models successful start, followed by stop even on early cancel. */
 }
 static void stop(IHS_SessionChannel *ch) {
     (void)ch;
@@ -53,7 +58,20 @@ static void data(IHS_SessionChannel *ch, const IHS_SessionDataFrameHeader *h, IH
     unsigned n = atomic_load(&decoded);
     assert(n < 16);
     ids[n] = h->id;
+    if (clockMode) {
+        char value[512];
+        snprintf(value, sizeof(value),
+                 "{\"id\":%u,\"frame\":%u,\"sent\":%u,\"received\":%u,\"first\":%u,\"input\":%u,"
+                 "\"input_received\":%u,\"size\":%zu}",
+                 h->id, h->timestamp, h->sendTimestamp, h->receiveTimestamp, h->receiveBegin,
+                 h->inputMark, h->inputRecvTimestamp, body->size);
+        metadata[n] = strdup(value);
+        assert(metadata[n]);
+    }
     atomic_store(&decoded, n + 1);
+    while (clockMode && n == 0 && atomic_load(&permits) <= 1 &&
+           !((IHS_SessionChannelData *)ch)->interrupted)
+        usleep(1000);
 }
 static const IHS_SessionChannelDataClass cls = {
     .base = {.init = init,
@@ -66,7 +84,8 @@ static const IHS_SessionChannelDataClass cls = {
     .dataFrame = data,
 };
 int main(int argc, char **argv) {
-    assert(argc == 2);
+    assert(argc == 2 || argc == 3);
+    clockMode = argc == 3;
     IHS_Init();
     IHS_Session *s = IHS_TestSessionCreate();
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
@@ -139,9 +158,22 @@ int main(int argc, char **argv) {
             assert(sscanf(line, "Q %u %u", &phase, &paused) == 2);
             s->state.connectionState = phase;
             s->transport.clientPaused = paused;
+        } else if (line[0] == 'O') {
+            unsigned value;
+            assert(sscanf(line, "O %u", &value) == 1);
+            IHS_MutexLock(s->clock.lock);
+            s->clock.offset = (int32_t)value;
+            IHS_MutexUnlock(s->clock.lock);
+        } else if (line[0] == 'T') {
+            unsigned echo, peer;
+            assert(sscanf(line, "T %u %u %u", &echo, &peer, &when) == 3);
+            atomic_store(&tick, when);
+            IHS_StreamClockFeedback(&s->clock, echo, peer, when);
         } else if (line[0] == 'D') {
             unsigned count;
             assert(sscanf(line, "D %u", &count) == 1);
+            if (clockMode)
+                atomic_store(&permits, count);
             uint64_t until = IHS_TimerNow() + 1000;
             while (atomic_load(&decoded) < count && IHS_TimerNow() < until)
                 usleep(1000);
@@ -158,6 +190,13 @@ int main(int argc, char **argv) {
     printf("{\"decoded\":[");
     for (unsigned i = 0; i < atomic_load(&decoded); ++i)
         printf("%s%u", i ? "," : "", ids[i]);
+    if (clockMode) {
+        printf("],\"metadata\":[");
+        for (unsigned i = 0; i < atomic_load(&decoded); ++i) {
+            printf("%s%s", i ? "," : "", metadata[i]);
+            free(metadata[i]);
+        }
+    }
     printf("],\"feedbacks\":%u,\"goodbyes\":%u,\"started\":%u,\"stopped\":%u}\n",
            atomic_load(&feedbacks), atomic_load(&goodbyes), atomic_load(&started),
            atomic_load(&stopped));

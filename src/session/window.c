@@ -244,6 +244,8 @@ bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionF
         frameBodyLen += item->body.size;
     }
     frame->header = head->header;
+    frame->mediaOffset = 0;
+    frame->mediaPrepared = false; /* fresh transport assembly, not a decoder FIFO item */
     frame->header.receiveBegin = head->header.receiveTimestamp;
     frame->receivedRetries = 0;
     IHS_BufferEnsureMaxSize(&frame->body, frameBodyLen);

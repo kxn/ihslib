@@ -181,6 +181,8 @@ size_t IHS_SessionChannelDataFrameHeaderParse(IHS_SessionDataFrameHeader *header
                                               const IHS_Buffer *data) {
     if (data->size < IHS_SESSION_DATA_FRAME_HEADER_SIZE)
         return 0;
+    header->timestampsLocal = false;
+    header->receivedRecorded = false;
     size_t offset = 0;
     offset += IHS_ReadUInt16LE(IHS_BufferPointerAt(data, offset), &header->id);
     offset += IHS_ReadUInt32LE(IHS_BufferPointerAt(data, offset), &header->timestamp);
@@ -194,7 +196,8 @@ void IHS_SessionChannelDataReceiveReliableFrame(IHS_SessionChannel *channel,
     IHS_SessionChannelData *data = (void *)channel;
     IHS_MutexLock(data->windowLock);
     if (!data->interrupted) {
-        IHS_SessionFrame owned = {.header = frame->header};
+        IHS_SessionFrame owned = {.header = frame->header, .mediaOffset = frame->mediaOffset,
+                                   .mediaPrepared = frame->mediaPrepared};
         IHS_BufferTransferOwnership(&frame->body, &owned.body);
         QueueFrame(data, &owned);
         IHS_CondSignal(data->windowCond);
@@ -276,7 +279,7 @@ void IHS_SessionChannelDataReceiveFrame(IHS_SessionChannelData *channel, IHS_Ses
     if (type != k_EStreamDataPacket) {
         return;
     }
-    IHS_SessionDataFrameHeader header;
+    IHS_SessionDataFrameHeader header = {0};
     bool hasHeader = false;
     if (frame->body.size >= IHS_SESSION_DATA_FRAME_HEADER_SIZE) {
         hasHeader = true;
@@ -285,6 +288,13 @@ void IHS_SessionChannelDataReceiveFrame(IHS_SessionChannelData *channel, IHS_Ses
         header.sendTimestamp = frame->header.sendTimestamp;
         header.receiveTimestamp = frame->header.receiveTimestamp;
         header.receiveBegin = frame->header.receiveBegin;
+        if (frame->mediaPrepared) {
+            header.timestamp -= frame->mediaOffset;
+            header.sendTimestamp -= frame->mediaOffset;
+            if (header.inputRecvTimestamp) header.inputRecvTimestamp -= frame->mediaOffset;
+            header.timestampsLocal = true;
+            header.receivedRecorded = channel->base.type == IHS_SessionChannelTypeDataVideo;
+        }
     }
     const IHS_SessionChannelDataClass *cls = (const IHS_SessionChannelDataClass *)channel->base.cls;
     if (hasHeader)

@@ -598,6 +598,7 @@ IHS_ReliableDisposition IHS_SessionDeliverReliableFrame(IHS_Session *session,
     IHS_SessionChannel *channel = IHS_SessionChannelFor(session, id);
     if (channel && (channel->type == IHS_SessionChannelTypeDataAudio ||
                     channel->type == IHS_SessionChannelTypeDataVideo)) {
+        IHS_SessionChannelDataPrepareFrame(channel, frame);
         IHS_SessionChannelDataReceiveReliableFrame(channel, frame);
         return IHS_ReliableData;
     }

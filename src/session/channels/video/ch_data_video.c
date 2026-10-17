@@ -236,22 +236,22 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
         return;
     IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
     uint32_t receivedPayloadSize = (uint32_t)body->size;
-    int32_t offset = IHS_StreamClockOffset(&channel->session->clock);
-    IHS_SessionRecordNetworkVideo(channel->session, header->sendTimestamp - offset,
-        header->receiveBegin, header->receiveTimestamp, header->id, receivedPayloadSize);
-
-    /* Seed events 5 (FrameEventStart) / 12 (FrameEventSend) / 13 (FrameEventRecv)
-     * for this frame in the stats aggregator. Done outside the videoCh mutex so
-     * the aggregator's own lock orders independently. Mirrors Steam's
-     * RecordFrameReceived: translate the frame and transport-send timestamps
-     * from the peer clock; preserve the original transport receive timestamp. */
+    int32_t offset = header->timestampsLocal ? 0 : IHS_StreamClockOffset(&channel->session->clock);
+    /* Production sampling occurs on RX before the FIFO. Direct decoder probes
+     * can supply raw peer-clock headers and retain their own receive boundary. */
+    if (!header->receivedRecorded) {
+        IHS_SessionRecordNetworkVideo(channel->session, header->sendTimestamp - offset,
+            header->receiveBegin, header->receiveTimestamp, header->id, receivedPayloadSize);
+    }
     if (channel->session->frameStats != NULL) {
         if (videoCh->tracked)
             IHS_FrameStatsCollectTracked(channel->session->frameStats, channel->session->frameTracker);
-        IHS_FrameStatsRecordReceivedInput(channel->session->frameStats, header->id,
-                                     header->timestamp - offset, header->sendTimestamp - offset,
-                                     header->receiveTimestamp, receivedPayloadSize, header->inputMark,
-                                     header->inputRecvTimestamp ? header->inputRecvTimestamp - offset : 0);
+        if (!header->receivedRecorded) {
+            IHS_FrameStatsRecordReceivedInput(channel->session->frameStats, header->id,
+                header->timestamp - offset, header->sendTimestamp - offset,
+                header->receiveTimestamp, receivedPayloadSize, header->inputMark,
+                header->inputRecvTimestamp ? header->inputRecvTimestamp - offset : 0);
+        }
     }
 
     if (body->size < 7)
