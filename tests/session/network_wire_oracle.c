@@ -5,6 +5,8 @@
 #include "session/session_pri.h"
 #include "session/channels/ch_control.h"
 #include "session/frame_stats.h"
+#include "session/channels/ch_data.h"
+#include "session/reliable.h"
 #include "test_session.h"
 #include <assert.h>
 #include <errno.h>
@@ -16,7 +18,25 @@ static IHS_Session *session;
 static uint32_t now;
 static bool receiving, sending;
 static unsigned resultCode, entryCount, writeCount, entries[8];
-static bool reportMetadata;
+static bool reportMetadata, lossMode;
+static IHS_SessionChannelData media;
+static unsigned deliveredCount;
+static char *delivered[16];
+static void deliver(const IHS_SessionFrame *f) {
+    assert(deliveredCount < 16);
+    char *hex = malloc(f->body.size * 2 + 1);
+    assert(hex);
+    hex[0] = 0;
+    for (size_t i = 0; i < f->body.size; ++i)
+        sprintf(hex + i * 2, "%02x", IHS_BufferPointer(&f->body)[i]);
+    delivered[deliveredCount++] = hex;
+}
+IHS_ReliableDisposition __real_IHS_SessionDeliverReliableFrame(IHS_Session *, IHS_SessionFrame *);
+IHS_ReliableDisposition __wrap_IHS_SessionDeliverReliableFrame(IHS_Session *s, IHS_SessionFrame *f) {
+    if (lossMode) { deliver(f); return IHS_ReliableData; }
+    return __real_IHS_SessionDeliverReliableFrame(s, f);
+}
+static const IHS_SessionChannelClass mediaClass = {.received = IHS_SessionChannelDataReceived};
 static unsigned frameCount;
 static uint64_t producedSequence;
 static struct { unsigned channel; char *body; } frames[8];
@@ -99,6 +119,15 @@ static void report(void) {
         printf("%s{\"size\":%u,\"wire_size\":%u,\"crc\":%s}", i ? "," : "",
                writes[i].size, writes[i].wireSize, writes[i].crc ? "true" : "false");
     printf("]");
+    if (lossMode) {
+        printf(",\"delivered\":[");
+        for (unsigned i = 0; i < deliveredCount; ++i) {
+            printf("%s\"%s\"", i ? "," : "", delivered[i]);
+            free(delivered[i]);
+        }
+        deliveredCount = 0;
+        printf("]");
+    }
     if (reportMetadata) {
         printf(",\"frames\":[");
         for (unsigned i = 0; i < frameCount; ++i)
@@ -123,21 +152,75 @@ static IHS_SessionPacket packet(unsigned type, unsigned channel, unsigned crc,
     return p;
 }
 int main(int argc, char **argv) {
-    assert(argc >= 3 && argc <= 5);
+    assert(argc >= 3 && argc <= 6);
+    lossMode = argc == 6 && !strcmp(argv[5], "loss");
     IHS_Init();
     session = IHS_TestSessionCreate();
     IHS_TimerTaskStopImmediate(session->retransmission.timer);
     session->state.connectionState = IHS_SessionConnectionStateConnected;
     session->state.connectionId = 12;
-    session->state.hostConnectionId = argc == 5 ? atoi(argv[4]) : 34;
+    session->state.hostConnectionId = argc >= 5 ? atoi(argv[4]) : 34;
     session->state.crcRequired = atoi(argv[1]);
     reportMetadata = argc >= 4 && atoi(argv[3]) >= 0;
     if (reportMetadata) IHS_FrameStatsAggregatorSetFullReporting(session->frameStats, atoi(argv[3]));
     session->outgoing.rate[0] = session->outgoing.rate[1] = 0;
+    if (lossMode) {
+        media.base = (IHS_SessionChannel){.cls = &mediaClass, .id = 3, .session = session,
+                                          .type = IHS_SessionChannelTypeDataVideo};
+        media.window = IHS_SessionPacketsWindowCreateMedia(1024);
+        media.windowLock = IHS_MutexCreate();
+        media.windowCond = IHS_CondCreate();
+        media.feedbackCond = IHS_CondCreate();
+        assert(media.window && media.windowLock && media.windowCond && media.feedbackCond);
+        IHS_SessionChannelAdd(session, &media.base);
+    }
     char line[256];
     while (fgets(line, sizeof(line), stdin)) {
         unsigned type, ch, crc, source, dest, size, bad;
-        if (!strncmp(line, "RX ", 3)) {
+        if (line[0] == 'W') {
+            unsigned id, retry, fragment, sent;
+            char hex[128];
+            assert(lossMode);
+            assert(sscanf(line, "W %u %u %u %u %u %u %u %127s", &now, &type, &ch,
+                          &id, &retry, &fragment, &sent, hex) == 8);
+            size = strlen(hex) / 2;
+            IHS_SessionPacket p = packet(type, ch, session->state.crcRequired, 34, 12, size);
+            p.header.packetId = id;
+            p.header.retransmitCount = retry;
+            p.header.fragmentId = fragment;
+            p.header.sendTimestamp = sent;
+            for (unsigned i = 0; i < size; ++i) {
+                unsigned value;
+                assert(sscanf(hex + i * 2, "%2x", &value) == 1);
+                IHS_BufferPointer(&p.body)[i] = value;
+            }
+            IHS_SessionPacketPopulateBuffer(&p);
+            IHS_Buffer wire = IHS_BUFFER_INIT(2048, 2048);
+            IHS_BufferAppendMem(&wire, p.body.data, IHS_SessionPacketSize(&p));
+            receiving = true;
+            session->base.callbacks.received(&session->base, &session->info.address, &wire);
+            receiving = false;
+            IHS_BufferClear(&wire, true);
+            IHS_SessionPacketClear(&p, true);
+        } else if (line[0] == 'U') {
+            assert(lossMode && sscanf(line, "U %u %u", &now, &ch) == 2);
+            if (ch != 3) IHS_SessionReliableUpdateChannel(session, ch);
+            else {
+                /* Drive the production worker's polling step deterministically;
+                 * scheduler/decoder/feedback worker are outside this oracle. */
+                for (;;) {
+                    IHS_SessionFrame frame = {.body = IHS_BUFFER_INIT(1024, 0)};
+                    uint16_t missing;
+                    IHS_MutexLock(media.windowLock);
+                    bool ready = IHS_SessionChannelDataPollLocked(&media, &frame, &missing);
+                    IHS_MutexUnlock(media.windowLock);
+                    IHS_SessionRecordNetworkLost(session, now, missing);
+                    if (ready) deliver(&frame);
+                    IHS_SessionFrameClear(&frame, true);
+                    if (!ready && !missing) break;
+                }
+            }
+        } else if (!strncmp(line, "RX ", 3)) {
             assert(sscanf(line, "RX %u %u %u %u %u %u %u %u", &now, &type, &ch, &crc,
                           &source, &dest, &size, &bad) == 8);
             IHS_SessionPacket p = packet(type, ch, crc, source, dest, size);
@@ -176,6 +259,14 @@ int main(int argc, char **argv) {
             IHS_SessionChannelControlUpdateStage(session->channels[1], now);
         }
         report();
+    }
+    if (lossMode) {
+        assert(session->channels[session->numChannels - 1] == &media.base);
+        session->channels[--session->numChannels] = NULL;
+        IHS_SessionPacketsWindowDestroy(media.window);
+        IHS_MutexDestroy(media.windowLock);
+        IHS_CondDestroy(media.windowCond);
+        IHS_CondDestroy(media.feedbackCond);
     }
     IHS_SessionDestroy(session);
     IHS_Quit();

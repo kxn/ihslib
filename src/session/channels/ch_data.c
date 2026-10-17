@@ -175,7 +175,8 @@ void IHS_SessionChannelDataReceived(IHS_SessionChannel *channel, IHS_SessionPack
         IHS_MutexUnlock(dataCh->windowLock);
         return; /* no ordinary window, sender timestamp propagation or NACK */
     }
-    if (!IHS_SessionPacketsWindowAdd(dataCh->window, packet)) {
+    bool inserted = false;
+    if (!IHS_SessionPacketsWindowAddEx(dataCh->window, packet, &inserted)) {
         IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Data",
                        "%s channel items overflow! Available: %u", DataChannelName(channel->type),
                        IHS_SessionPacketsWindowAvailable(dataCh->window));
@@ -183,8 +184,7 @@ void IHS_SessionChannelDataReceived(IHS_SessionChannel *channel, IHS_SessionPack
          * frames and holes too, then start a fresh receive window. */
         IHS_SessionPacketsWindowReleaseAll(dataCh->window);
         IHS_SessionChannelDataLost(channel);
-        IHS_SessionPacketsWindowAdd(dataCh->window,
-                                    packet); /* now fits; caller clears on failure */
+        IHS_SessionPacketsWindowAddEx(dataCh->window, packet, &inserted);
     }
     if (!dataCh->lastPacketTimestamp ||
         (int32_t)(packet->header.sendTimestamp - dataCh->lastPacketTimestamp) > 0)
@@ -193,6 +193,9 @@ void IHS_SessionChannelDataReceived(IHS_SessionChannel *channel, IHS_SessionPack
     IHS_CondSignal(dataCh->windowCond);
     IHS_CondSignal(dataCh->feedbackCond);
     IHS_MutexUnlock(dataCh->windowLock);
+    if (inserted && packet->header.retransmitCount > 1)
+        IHS_SessionRecordNetworkLost(channel->session, packet->header.receiveTimestamp,
+                                      packet->header.retransmitCount - 1u);
 }
 
 void IHS_SessionChannelDataLost(IHS_SessionChannel *channel) {
@@ -235,6 +238,16 @@ void IHS_SessionChannelDataReceiveReliableFrame(IHS_SessionChannel *channel,
     IHS_MutexUnlock(data->windowLock);
 }
 
+bool IHS_SessionChannelDataPollLocked(IHS_SessionChannelData *channel, IHS_SessionFrame *frame,
+                                       uint16_t *missing) {
+    *missing = 0;
+    if (PollFEC(channel, frame) || IHS_SessionPacketsWindowPoll(channel->window, frame))
+        return true;
+    IHS_SessionPacketsWindowDiscardEx(channel->window,
+        IHS_StreamClockMediaDelayTicks(&channel->base.session->clock), missing);
+    return IHS_SessionPacketsWindowPoll(channel->window, frame);
+}
+
 static void DataThreadWorker(IHS_SessionChannelData *channel) {
     const IHS_SessionChannelDataClass *cls = (const IHS_SessionChannelDataClass *)channel->base.cls;
     IHS_SessionFrame frame;
@@ -254,22 +267,15 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
     while (!channel->interrupted) {
         IHS_MutexLock(channel->windowLock);
         bool hasFrame;
+        uint16_t missing;
+        uint32_t sampleTime;
         for (;;) {
-            /* Retry the age-based discard on every wakeup, not just once per
-             * delivered frame: a packet lost at the head makes Poll fail forever,
-             * and the discard that would step over it is the only way out. */
-            if ((hasFrame = PollFEC(channel, &frame) ||
-                            IHS_SessionPacketsWindowPoll(channel->window, &frame)))
+            sampleTime = IHS_SessionPacketTimestamp();
+            hasFrame = IHS_SessionChannelDataPollLocked(channel, &frame, &missing);
+            /* A loss-only step must publish outside windowLock, even when no
+             * complete frame can be decoded. Then recheck before waiting. */
+            if (hasFrame || missing)
                 break;
-            uint16_t discarded = IHS_SessionPacketsWindowDiscard(
-                channel->window, IHS_StreamClockMediaDelayTicks(&channel->base.session->clock));
-            if (discarded > 0) {
-                IHS_SessionLog(channel->base.session, IHS_LogLevelDebug, channelName,
-                               "Discarded %u packets", discarded);
-            }
-            if ((hasFrame = IHS_SessionPacketsWindowPoll(channel->window, &frame))) {
-                break;
-            }
             /* Stop may have signalled before this worker acquired windowLock. */
             if (channel->interrupted)
                 break;
@@ -279,6 +285,7 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
             }
         }
         IHS_MutexUnlock(channel->windowLock);
+        IHS_SessionRecordNetworkLost(channel->base.session, sampleTime, missing);
         if (hasFrame) {
             ReceivedFrame(channel, &frame);
             IHS_SessionPacketsWindowReleaseFrame(&frame);

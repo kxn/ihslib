@@ -13,7 +13,8 @@ IHS_ReliableChannel *IHS_SessionReliableGet(IHS_Session *s, uint8_t channel) {
     IHS_OutgoingRegister(s, channel);
     return &s->reliable[channel];
 }
-static void ReliableDrainFrames(IHS_Session *s, IHS_ReliableChannel *state) {
+static uint32_t ReliableDrainFrames(IHS_Session *s, IHS_ReliableChannel *state) {
+    uint32_t retries = 0;
     IHS_SessionFrame frame = {.body = IHS_BUFFER_INIT(1024, 0)};
     for (;;) {
         IHS_MutexLock(s->reliableLock);
@@ -22,10 +23,12 @@ static void ReliableDrainFrames(IHS_Session *s, IHS_ReliableChannel *state) {
         IHS_MutexUnlock(s->reliableLock);
         if (!ready)
             break;
+        retries += frame.receivedRetries;
         IHS_SessionDeliverReliableFrame(s, &frame);
         IHS_SessionPacketsWindowReleaseFrame(&frame);
     }
     IHS_BufferClear(&frame.body, true);
+    return retries;
 }
 /* Original Channel::UpdateReliableState; see protocol reference §45. Run on
  * the receive worker so frame/decrypt callbacks keep their existing thread. */
@@ -45,7 +48,8 @@ void IHS_SessionReliableUpdateChannel(IHS_Session *session, uint8_t channelId) {
     IHS_MutexUnlock(session->reliableLock);
     /* Application delegates retain their existing lock domain. Only feedback
      * state + Socket attempts need Base -> reliableLock serialization. */
-    ReliableDrainFrames(session, state);
+    uint32_t retries = ReliableDrainFrames(session, state);
+    IHS_SessionRecordNetworkLost(session, now, retries);
     IHS_BaseLock(&session->base);
     IHS_MutexLock(session->reliableLock);
     bool eligible = (int32_t)(now - state->feedbackDeadline) >= 0;
@@ -117,10 +121,14 @@ void IHS_SessionReliableReceived(IHS_Session *session, IHS_SessionPacket *packet
                           packet->header.packetId) > 0)
                 state->ackPending = true;
         }
-        bool added = window && IHS_SessionPacketsWindowAdd(window, packet);
+        bool inserted = false;
+        bool added = window && IHS_SessionPacketsWindowAddEx(window, packet, &inserted);
         if (!window)
             state->feedbackDirty = false;
         IHS_MutexUnlock(session->reliableLock);
+        if (inserted && packet->header.retransmitCount > 1)
+            IHS_SessionRecordNetworkLost(session, packet->header.receiveTimestamp,
+                                          packet->header.retransmitCount - 1u);
         if (!added) {
             /* Log and disconnect once: the packets keep coming, and firing a
              * disconnect per packet floods the link and re-enters teardown. */

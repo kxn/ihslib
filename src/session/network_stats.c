@@ -12,6 +12,12 @@ void IHS_SessionRecordNetworkReceived(IHS_Session *s, uint32_t now, int32_t byte
     IHS_NetworkBitrateRecord(&s->networkRates[1], now, bytes);
     IHS_BaseUnlock(&s->base);
 }
+void IHS_SessionRecordNetworkLost(IHS_Session *s, uint32_t now, uint32_t count) {
+    if (!count) return;
+    IHS_BaseLock(&s->base);
+    IHS_NetworkPacketRecord(&s->networkPackets, now, count, true);
+    IHS_BaseUnlock(&s->base);
+}
 void IHS_SessionRecordNetworkSent(IHS_Session *s, uint32_t now, int32_t bytes) {
     IHS_BaseLock(&s->base);
     IHS_NetworkBitrateRecord(&s->networkRates[0], now, bytes);

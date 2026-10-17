@@ -120,6 +120,12 @@ void IHS_SessionPacketsWindowDestroy(IHS_SessionPacketsWindow *window) {
 }
 
 bool IHS_SessionPacketsWindowAdd(IHS_SessionPacketsWindow *window, IHS_SessionPacket *packet) {
+    return IHS_SessionPacketsWindowAddEx(window, packet, NULL);
+}
+
+bool IHS_SessionPacketsWindowAddEx(IHS_SessionPacketsWindow *window, IHS_SessionPacket *packet,
+                                    bool *inserted) {
+    if (inserted) *inserted = false;
     /* Calculate distance of 2 items */
     int tailOffset =
         window->tail.pos < 0 ? 1 : (int16_t)(packet->header.packetId - window->tail.id);
@@ -166,6 +172,7 @@ bool IHS_SessionPacketsWindowAdd(IHS_SessionPacketsWindow *window, IHS_SessionPa
         return true;
     }
     FrameItemUsePacket(tailPkt, packet);
+    if (inserted) *inserted = true;
     /* BInsertPacket 0x7f73d0..7430: max at this slot, then propagate a
      * smaller timestamp backwards even through occupied slots. Never modify
      * the packet's actual transport timestamp, which is used by frame stats. */
@@ -237,11 +244,13 @@ bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionF
         frameBodyLen += item->body.size;
     }
     frame->header = head->header;
+    frame->receivedRetries = 0;
     IHS_BufferEnsureMaxSize(&frame->body, frameBodyLen);
 
     for (int i = window->head.pos, j = window->head.pos + packetsCount; i < j; i++) {
         WindowItem *item = &window->data[i % window->capacity];
         IHS_BufferAppend(&frame->body, &item->body);
+        frame->receivedRetries += item->header.retransmitCount;
         if ((int32_t)(item->header.receiveTimestamp - frame->header.receiveTimestamp) > 0) {
             frame->header.receiveTimestamp = item->header.receiveTimestamp;
         }
@@ -259,6 +268,12 @@ bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionF
 }
 
 uint16_t IHS_SessionPacketsWindowDiscard(IHS_SessionPacketsWindow *window, uint32_t diff) {
+    return IHS_SessionPacketsWindowDiscardEx(window, diff, NULL);
+}
+
+uint16_t IHS_SessionPacketsWindowDiscardEx(IHS_SessionPacketsWindow *window, uint32_t diff,
+                                            uint16_t *missing) {
+    if (missing) *missing = 0;
     uint16_t size = IHS_SessionPacketsWindowSize(window);
     if (!size)
         return 0;
@@ -268,6 +283,7 @@ uint16_t IHS_SessionPacketsWindowDiscard(IHS_SessionPacketsWindow *window, uint3
         WindowItem *item = &window->data[window->head.pos % window->capacity];
         if ((int32_t)(newest - item->senderTimestamp) <= (int32_t)diff)
             break;
+        if (missing && !FrameItemIsUsed(item)) ++*missing;
         FrameItemRecycle(item);
         window->head.pos = (window->head.pos + 1) % window->capacity;
         discarded++;

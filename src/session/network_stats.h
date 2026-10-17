@@ -45,5 +45,6 @@ bool IHS_NetworkVideoRecord(IHS_NetworkVideoStats *, uint32_t frameSend,
 
 struct IHS_Session;
 void IHS_SessionRecordNetworkReceived(struct IHS_Session *, uint32_t timestamp, int32_t bytes);
+void IHS_SessionRecordNetworkLost(struct IHS_Session *, uint32_t timestamp, uint32_t count);
 void IHS_SessionRecordNetworkSent(struct IHS_Session *, uint32_t timestamp, int32_t bytes);
 void IHS_SessionGetNetworkSample(struct IHS_Session *, float values[5]);

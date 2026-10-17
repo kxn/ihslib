@@ -103,3 +103,6 @@ bool IHS_SessionChannelDataBuildFeedback(IHS_SessionChannelData *, uint32_t now,
 
 /* Transfer an ordered, reassembled reliable frame to the decoder worker. */
 void IHS_SessionChannelDataReceiveReliableFrame(IHS_SessionChannel *, IHS_SessionFrame *);
+
+/* One worker polling step. Hold windowLock; publish missing outside that lock. */
+bool IHS_SessionChannelDataPollLocked(IHS_SessionChannelData *, IHS_SessionFrame *, uint16_t *missing);

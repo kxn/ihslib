@@ -43,6 +43,9 @@ void IHS_SessionPacketsWindowDestroy(IHS_SessionPacketsWindow *window);
 
 bool IHS_SessionPacketsWindowAdd(IHS_SessionPacketsWindow *window, IHS_SessionPacket *packet);
 
+/* accepted and newly inserted are distinct for old/duplicate packets (§58). */
+bool IHS_SessionPacketsWindowAddEx(IHS_SessionPacketsWindow *, IHS_SessionPacket *, bool *inserted);
+
 bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionFrame *frame);
 
 /**
@@ -51,6 +54,7 @@ bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionF
  * @param diff
  */
 uint16_t IHS_SessionPacketsWindowDiscard(IHS_SessionPacketsWindow *window, uint32_t diff);
+uint16_t IHS_SessionPacketsWindowDiscardEx(IHS_SessionPacketsWindow *, uint32_t diff, uint16_t *missing);
 
 /**
  * Recycle every pending packet and reset head/tail, regardless of its age or

@@ -3,6 +3,7 @@
  * owner destruction. Official arithmetic/branches have separate vectors. */
 #include "ihslib.h"
 #include "session/session_pri.h"
+#include "session/reliable.h"
 #include "test_session.h"
 #include <assert.h>
 #include <pthread.h>
@@ -14,6 +15,7 @@ static atomic_uint finished, writes;
 uint32_t __wrap_IHS_SessionPacketTimestamp(void) { return 1000000; }
 bool __wrap_IHS_BaseSend(IHS_Base *base, IHS_SocketAddress address, const IHS_Buffer *wire) {
     (void)base; (void)address;
+    if ((*IHS_BufferPointer(wire) & 127) != IHS_SessionPacketTypeReliable) return false;
     assert(wire->size == 28 && (*IHS_BufferPointer(wire) & 128));
     atomic_fetch_add(&writes, 1);
     return true;
@@ -44,6 +46,15 @@ static void *receive_packets(void *unused) {
         IHS_Buffer wire = IHS_BUFFER_INIT(128, 128);
         IHS_BufferAppendMem(&wire, p.body.data, IHS_SessionPacketSize(&p));
         session->base.callbacks.received(&session->base, &session->info.address, &wire);
+        IHS_BufferClear(&wire, false);
+        p.header.type = IHS_SessionPacketTypeReliable;
+        p.header.channelId = 4;
+        p.header.packetId = i;
+        p.header.retransmitCount = 2;
+        IHS_SessionPacketPopulateBuffer(&p);
+        IHS_BufferAppendMem(&wire, p.body.data, IHS_SessionPacketSize(&p));
+        session->base.callbacks.received(&session->base, &session->info.address, &wire);
+        IHS_SessionReliableUpdateChannel(session, 4);
         IHS_BufferClear(&wire, true);
         IHS_SessionPacketClear(&p, true);
     }
@@ -55,8 +66,8 @@ static void *read_snapshots(void *unused) {
     do {
         float values[5];
         IHS_SessionGetNetworkSample(session, values);
-        assert(values[0] == 0 && values[3] == 0 && values[4] == 0);
-        assert(values[1] >= 0 && values[1] <= 54 && values[2] >= 0 && values[2] <= 64);
+        assert(values[0] == 0 && values[3] == 0 && values[4] >= 0 && values[4] <= 100);
+        assert(values[1] >= 0 && values[1] <= 107 && values[2] >= 0 && values[2] <= 64);
         sched_yield();
     } while (atomic_load(&finished) != 2);
     return NULL;
@@ -78,10 +89,10 @@ int main(void) {
     assert(!pthread_create(&reader, NULL, read_snapshots, NULL));
     assert(!pthread_join(sender, NULL) && !pthread_join(receiver, NULL) && !pthread_join(reader, NULL));
     assert(atomic_load(&writes) == 1000);
-    assert(session->networkRates[0].bytes == 24000 && session->networkRates[1].bytes == 20000);
-    assert(session->networkPackets.total == 1000 && session->networkPackets.lost == 0);
+    assert(session->networkRates[0].bytes == 24000 && session->networkRates[1].bytes == 40000);
+    assert(session->networkPackets.total == 5000 && session->networkPackets.lost == 3000);
     assert(session->networkRates[0].queue.count == 1 && session->networkRates[1].queue.count == 1);
-    assert(session->networkPackets.queue.count == 1);
+    assert(session->networkPackets.queue.count == 2000);
     IHS_SessionDestroy(session);
     IHS_Quit();
     return 0;

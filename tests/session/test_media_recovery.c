@@ -168,9 +168,43 @@ static void expect_feedback(IHS_Session *s, uint16_t base, uint16_t confirmed, u
     }
     assert(!"missing expected UnreliableNack while decoder blocked");
 }
+/* Expired holes must publish even when the remaining head is incomplete and
+ * the decoder never receives a frame. Uses the actual cond-wait worker. */
+static void loss_without_frame(void) {
+    IHS_Session *s = IHS_TestSessionCreate();
+    s->state.connectionState = IHS_SessionConnectionStateHandshaking;
+    IHS_SessionChannel *c =
+        IHS_SessionChannelDataCreate(&cls, s, IHS_SessionChannelTypeDataVideo, 3, NULL);
+    assert(c);
+    deliver(c, 1, 1000);
+    IHS_SessionPacket p = {.header = {.type = IHS_SessionPacketTypeUnreliable,
+        .packetId = 3, .fragmentId = 1, .sendTimestamp = 10000,
+        .receiveTimestamp = IHS_SessionPacketTimestamp()}};
+    IHS_BufferInit(&p.body, 4, 4);
+    IHS_BufferAppendUInt8(&p.body, k_EStreamDataPacket);
+    c->cls->received(c, &p);
+    IHS_SessionPacketClear(&p, true);
+    uint32_t lost = 0;
+    uint64_t until = IHS_TimerNow() + 1000;
+    do {
+        IHS_BaseLock(&s->base);
+        lost = s->networkPackets.lost;
+        IHS_BaseUnlock(&s->base);
+        if (lost) break;
+        usleep(1000);
+    } while (IHS_TimerNow() < until);
+    assert(lost == 1);
+    pthread_mutex_lock(&lock);
+    assert(!entered);
+    pthread_mutex_unlock(&lock);
+    IHS_SessionChannelStop(c);
+    IHS_SessionChannelDestroy(c);
+    IHS_SessionDestroy(s);
+}
 int main(void) {
     IHS_Init();
     window_cases();
+    loss_without_frame();
     IHS_Session *s = IHS_TestSessionCreate();
     s->state.connectionState = IHS_SessionConnectionStateHandshaking;
     IHS_SessionChannel *c =
