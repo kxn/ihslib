@@ -2,6 +2,7 @@
  * controlled final I/O, with live session collectors. RX body consumers may
  * run, but their final sends are rejected/excluded like source adapters. */
 #include "ihslib.h"
+#include "endianness.h"
 #include "session/session_pri.h"
 #include "session/channels/ch_control.h"
 #include "session/frame_stats.h"
@@ -19,7 +20,8 @@ static IHS_Session *session;
 static uint32_t now;
 static bool receiving, sending;
 static unsigned resultCode, entryCount, writeCount, entries[512];
-static bool reportMetadata, lossMode, videoMode, cycleMode, networkMode, deadlineMode;
+static bool reportMetadata, lossMode, videoMode, cycleMode, networkMode, deadlineMode, admissionMode;
+static unsigned admitted[256], admittedCount;
 static IHS_SessionChannelData mediaStorage, *media = &mediaStorage;
 static unsigned deliveredCount;
 static char *delivered[256];
@@ -51,6 +53,12 @@ static void deliver(IHS_SessionFrame *f) {
         sprintf(hex + i * 2, "%02x", IHS_BufferPointer(&f->body)[i]);
     deliveredMetadata[deliveredCount] = f->header;
     delivered[deliveredCount++] = hex;
+    if (admissionMode && f->body.size >= 3 && *IHS_BufferPointer(&f->body) == k_EStreamDataPacket) {
+        assert(admittedCount < 256);
+        uint16_t id;
+        IHS_ReadUInt16LE(IHS_BufferPointerAt(&f->body, 1), &id);
+        admitted[admittedCount++] = id;
+    }
     if (videoMode) IHS_SessionChannelDataReceiveFrame(media, f);
 }
 IHS_ReliableDisposition __real_IHS_SessionDeliverReliableFrame(IHS_Session *, IHS_SessionFrame *);
@@ -171,9 +179,9 @@ IHS_SessionPacketReturn __wrap_IHS_SessionPacketParse(IHS_SessionPacket *packet,
 }
 bool __wrap_IHS_BaseSend(IHS_Base *base, IHS_SocketAddress address, const IHS_Buffer *wire) {
     (void)base; (void)address;
-    if (!sending && !cycleMode) { errno = EAGAIN; return false; }
+    if (!sending && !cycleMode && !admissionMode) { errno = EAGAIN; return false; }
     assert(writeCount < 256);
-    if (cycleMode) {
+    if (cycleMode || admissionMode) {
         assert(cycleWireCount < 256);
         char *hex = malloc(wire->size * 2 + 1); assert(hex); hex[0] = 0;
         for (size_t i = 0; i < wire->size; ++i)
@@ -249,6 +257,14 @@ static void report(void) {
         }
         deliveredCount = 0;
     }
+    if (admissionMode) {
+        printf(",\"client\":%u,\"client_paused\":%s,\"admitted\":[", session->state.connectionState,
+            session->transport.clientPaused ? "true" : "false");
+        for (unsigned i = 0; i < admittedCount; ++i) printf("%s%u", i ? "," : "", admitted[i]);
+        printf("],\"wires\":[");
+        for (unsigned i = 0; i < cycleWireCount; ++i) { printf("%s\"%s\"", i ? "," : "", cycleWires[i]); free(cycleWires[i]); }
+        printf("]"); admittedCount = cycleWireCount = 0;
+    }
     if (cycleMode) {
         printf(",\"waits\":[");
         for (unsigned i = 0; i < waitCount; ++i) printf("%s%u", i ? "," : "", waits[i]);
@@ -298,7 +314,8 @@ static IHS_SessionPacket packet(unsigned type, unsigned channel, unsigned crc,
 }
 int main(int argc, char **argv) {
     assert(argc >= 3 && argc <= 6);
-    videoMode = argc == 6 && !strcmp(argv[5], "video");
+    admissionMode = argc == 6 && !strcmp(argv[5], "admission");
+    videoMode = admissionMode || (argc == 6 && !strcmp(argv[5], "video"));
     deadlineMode = argc == 6 && !strcmp(argv[5], "deadline");
     networkMode = deadlineMode || (argc == 6 && !strcmp(argv[5], "network"));
     cycleMode = networkMode || (argc == 6 && !strcmp(argv[5], "cycle"));
@@ -369,6 +386,14 @@ int main(int argc, char **argv) {
             continue;
         }
         if (line[0] == 'Q') {
+            if (admissionMode) {
+                unsigned phase, paused;
+                assert(sscanf(line, "Q %u %u", &phase, &paused) == 2);
+                session->state.connectionState = phase;
+                session->transport.clientPaused = paused;
+                report();
+                continue;
+            }
             int priority;
             assert(cycleMode && sscanf(line, "Q %u %d", &ch, &priority) == 2 && ch < 32);
             IHS_OutgoingPriority(session, ch, priority);

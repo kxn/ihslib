@@ -84,6 +84,7 @@ int main(void) {
     IHS_Init();
     IHS_Session *s = IHS_TestSessionCreate();
     assert(s);
+    s->state.connectionState = IHS_SessionConnectionStateConnected;
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
     receive(s, true, 0, 10);
     assert(s->pendingDataCount == 1);

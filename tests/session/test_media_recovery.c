@@ -170,7 +170,7 @@ static void expect_feedback(IHS_SessionChannel *c, uint16_t base, uint16_t confi
  * the decoder never receives a frame. Uses the RX protocol step while the decoder waits. */
 static void loss_without_frame(void) {
     IHS_Session *s = IHS_TestSessionCreate();
-    s->state.connectionState = IHS_SessionConnectionStateHandshaking;
+    s->state.connectionState = IHS_SessionConnectionStateConnected;
     IHS_SessionChannel *c =
         IHS_SessionChannelDataCreate(&cls, s, IHS_SessionChannelTypeDataVideo, 3, NULL);
     assert(c);
@@ -205,7 +205,7 @@ int main(void) {
     window_cases();
     loss_without_frame();
     IHS_Session *s = IHS_TestSessionCreate();
-    s->state.connectionState = IHS_SessionConnectionStateHandshaking;
+    s->state.connectionState = IHS_SessionConnectionStateConnected;
     IHS_SessionChannel *c =
         IHS_SessionChannelDataCreate(&cls, s, IHS_SessionChannelTypeDataVideo, 3, NULL);
     assert(c);

@@ -605,7 +605,10 @@ IHS_ReliableDisposition IHS_SessionDeliverReliableFrame(IHS_Session *session,
     if (!frame->body.size) return IHS_ReliableDiscarded;
     if (id < IHS_SessionChannelIdDataStart || *IHS_BufferPointer(&frame->body) != k_EStreamDataPacket)
         return IHS_ReliableIgnored;
-    if (session->state.connectionState != IHS_SessionConnectionStateConnected)
+    /* OnStreamPacket 7ad00c..7ad01c gates OnDataPacket, including complete
+     * frames awaiting Start*Data. Reliable window/ACK progress is independent. */
+    if (session->state.connectionState != IHS_SessionConnectionStateConnected ||
+        session->transport.clientPaused)
         return IHS_ReliableDiscarded;
     IHS_SessionChannel *channel = IHS_SessionChannelFor(session, id);
     if (channel && (channel->type == IHS_SessionChannelTypeDataAudio ||

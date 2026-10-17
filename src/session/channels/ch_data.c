@@ -65,6 +65,17 @@ static bool PollFEC(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
 }
 
 static void QueueFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
+    /* Official client OnStreamPacket 7ad00c..7ad01c: transport windows,
+     * reconstruction and feedback still run while paused; gate complete data
+     * frames before handing them to the media consumer. Frames already owned
+     * by that consumer are not retrospectively discarded on Pause. */
+    IHS_Session *session = channel->base.session;
+    if (frame->body.size && *IHS_BufferPointer(&frame->body) == k_EStreamDataPacket &&
+        (session->state.connectionState != IHS_SessionConnectionStateConnected ||
+         session->transport.clientPaused)) {
+        IHS_BufferClear(&frame->body, true);
+        return;
+    }
     size_t size = frame->body.capacity + sizeof(IHS_FECFrameNode);
     if (size > channel->fecQueueLimit) {
         IHS_BufferClear(&frame->body, true);
