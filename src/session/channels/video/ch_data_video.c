@@ -60,7 +60,7 @@ typedef struct IHS_SessionChannelVideo {
         bool contentModeSeen, contentMode;
     } states;
     struct {
-        uint16_t expectedSubFrameStart;
+        uint32_t expectedSubFrameStart; /* Original next range is not a wire uint16. */
         IHS_VideoPartialFrames partial;
         IHS_Buffer buffer;
         IHS_StreamVideoFrameFlag flags;
@@ -504,13 +504,6 @@ static bool AssembleFrame(IHS_SessionChannel *channel) {
                     return false;
                 videoCh->assembly = partial->ticket;
             }
-        } else if (partial->frameId != videoCh->assemblyId ||
-                   (videoCh->tracked && partial->ticket != videoCh->assembly)) {
-            DiscardPending(videoCh);
-            videoCh->states.waitingKeyFrame = true;
-            videoCh->states.lastRecoveryRequest = IHS_SessionPacketTimestamp();
-            IHS_SessionChannelDataLost(channel);
-            return false;
         }
         // append buffer
         if (!AppendToFrameBuffer(videoCh, &partial->data, &partial->header)) {
@@ -519,6 +512,17 @@ static bool AssembleFrame(IHS_SessionChannel *channel) {
             return false;
         }
         if (partial->header.flags & VideoFrameFlagFrameFinish) {
+            /* Original OnThink 7b258c/261c selects the finishing fragment's
+             * identity. A wire-ID change does not invalidate assembled bytes.
+             * Transfer only local ownership; unresolved contributor metadata
+             * remains pending for the existing tracker settlement/epoch close. */
+            if (videoCh->tracked && partial->ticket != videoCh->assembly) {
+                if (!partial->ticket || !IHS_FrameTicketRetain(partial->ticket))
+                    return false;
+                if (videoCh->assembly) IHS_FrameTicketRelease(videoCh->assembly);
+                videoCh->assembly = partial->ticket;
+            }
+            videoCh->assemblyId = partial->frameId;
             videoCh->frame.contentMode = (partial->header.flags & VideoFrameFlagContentMode) != 0;
             videoCh->states.frameFinished = true;
         }

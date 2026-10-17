@@ -31,6 +31,18 @@ bool __wrap_IHS_SessionSendControlMessage(IHS_Session *s, EStreamControlMessage 
                                           const ProtobufCMessage *m) {
     (void)s; (void)m;
     if (t == k_EStreamControlVideoDecoderInfo) simple("info");
+#ifdef IHS_SUBFRAME_OBSERVER
+    if (t == k_EStreamControlVideoOverflow && recording) {
+        uint8_t bytes[32];
+        size_t size = protobuf_c_message_get_packed_size(m);
+        assert(size <= sizeof(bytes) && protobuf_c_message_pack(m, bytes) == size);
+        FILE *f = event();
+        fprintf(f, "[\"overflow\",%u,\"", action);
+        for (size_t n = 0; n < size; ++n) fprintf(f, "%02x", bytes[n]);
+        fprintf(f, "\"]");
+        assert(!fclose(f));
+    }
+#endif
     return true;
 }
 void __wrap_IHS_SessionChannelDataLost(IHS_SessionChannel *c) {
@@ -80,6 +92,10 @@ static IHS_StreamVideoSubmitResult submit(IHS_Session *s, const IHS_VideoEpochIn
                                           IHS_FrameTicket *ticket, IHS_Buffer *b,
                                           IHS_StreamVideoFrameFlag flags, bool *taken, void *x) {
     (void)s; (void)e; (void)flags; (void)x;
+#ifdef IHS_SUBFRAME_OBSERVER
+    IHS_FrameIdentity identity = IHS_FrameTicketIdentity(ticket);
+    assert(identity.frameId == id && identity.epoch == e->video_epoch);
+#endif
     assert(heldCount < 32 && IHS_FrameTicketRetain(ticket));
     held[heldCount] = ticket;
     pictures[heldCount++] = id;
@@ -93,17 +109,21 @@ static IHS_StreamVideoSubmitResult submit(IHS_Session *s, const IHS_VideoEpochIn
     }
     return IHS_StreamVideoSubmitOK;
 }
-static void feed(IHS_SessionChannel *ch, unsigned fid, unsigned seq, unsigned flags,
-                 const uint8_t *bytes, size_t size) {
+static void feedRange(IHS_SessionChannel *ch, unsigned fid, unsigned seq, unsigned flags,
+                      unsigned startRange, unsigned endRange, const uint8_t *bytes, size_t size) {
     IHS_Buffer b = IHS_BUFFER_INIT(64, 65536);
     IHS_BufferAppendUInt16LE(&b, seq);
     IHS_BufferAppendUInt8(&b, flags);
-    IHS_BufferAppendUInt16LE(&b, 0);
-    IHS_BufferAppendUInt16LE(&b, 0);
+    IHS_BufferAppendUInt16LE(&b, startRange);
+    IHS_BufferAppendUInt16LE(&b, endRange);
     IHS_BufferAppendMem(&b, bytes, size);
     IHS_SessionDataFrameHeader h = {.id = fid, .timestamp = 1000000};
     DataReceived(ch, &h, &b);
     IHS_BufferClear(&b, true);
+}
+static void feed(IHS_SessionChannel *ch, unsigned fid, unsigned seq, unsigned flags,
+                 const uint8_t *bytes, size_t size) {
+    feedRange(ch, fid, seq, flags, 0, 0, bytes, size);
 }
 int main(int argc, char **argv) {
     bool capacity = argc == 2 && !strcmp(argv[1], "--capacity");
@@ -150,16 +170,21 @@ int main(int argc, char **argv) {
     recording = true;
     char line[16384], raw[15000];
     while (fgets(line, sizeof(line), stdin)) {
-        if (line[0] == 'F') {
-            unsigned fid, seq, flags;
-            assert(sscanf(line, "F %u %u %u %14999s", &fid, &seq, &flags, raw) == 4);
+        if (line[0] == 'F' || line[0] == 'S') {
+            unsigned fid, seq, flags, startRange = 0, endRange = 0;
+            if (line[0] == 'S') {
+                assert(sscanf(line, "S %u %u %u %u %u %14999s", &fid, &seq, &flags,
+                              &startRange, &endRange, raw) == 6);
+            } else {
+                assert(sscanf(line, "F %u %u %u %14999s", &fid, &seq, &flags, raw) == 4);
+            }
             size_t len = !strcmp(raw, "-") ? 0 : strlen(raw) / 2;
             uint8_t bytes[7500];
             assert(!strcmp(raw, "-") || strlen(raw) == 2 * len);
             for (size_t n = 0; n < len; ++n) {
                 unsigned v; assert(sscanf(raw + 2 * n, "%2x", &v) == 1); bytes[n] = v;
             }
-            feed(ch, fid, seq, flags, bytes, len);
+            feedRange(ch, fid, seq, flags, startRange, endRange, bytes, len);
         } else if (line[0] == 'R') {
             IHS_SessionVideoHandlePendingReset(s);
         } else {
@@ -191,6 +216,19 @@ int main(int argc, char **argv) {
         for (unsigned n = 0; n < flowCount; ++n) printf("%s%s", n ? "," : "", flow[n]);
         printf("],\"player\":[");
         for (unsigned n = 0; n < heldCount; ++n) printf("%s%u", n ? "," : "", pictures[n]);
+#ifdef IHS_SUBFRAME_OBSERVER
+        printf("],\"next_range\":%u,\"next_seq\":%u,\"overflow_span\":%d,\"partial\":[",
+               video->frame.expectedSubFrameStart, video->states.expectedSequence,
+               video->states.overflowFrameSpan);
+        unsigned countParts = 0;
+        for (IHS_VideoPartialFrame *part = video->frame.partial.head; part; part = part->next) {
+            printf("%s[%u,%u,%u,%u,%u,\"", countParts++ ? "," : "", part->header.sequence,
+                   part->frameId, part->header.flags, part->header.subFrameStart, part->header.subFrameEnd);
+            for (size_t n = 0; n < part->data.size; ++n)
+                printf("%02x", IHS_BufferPointer(&part->data)[n]);
+            printf("\"]");
+        }
+#endif
         puts("]}");
         ++action;
     }
