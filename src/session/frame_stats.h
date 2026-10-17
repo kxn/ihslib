@@ -76,7 +76,8 @@ typedef struct IHS_FrameStatsAccumulator {
 } IHS_FrameStatsAccumulator;
 
 /**
- * 240-slot ring + lock + accumulator. One per session. All accessors take
+ * Video reporting ring + independent audio RX ring + shared input marks.
+ * One aggregator per session. All accessors take
  * `lock` internally; callers must not hold any other session lock when
  * invoking them to avoid lock-order inversion.
  */
@@ -113,7 +114,8 @@ typedef struct IHS_FrameStatsAggregator {
     /* Session/RX-owned consumer scratch; allocated with the aggregator before
      * workers start, released only after all workers have joined. */
     IHS_FrameStatsMessage messageScratch;
-    IHS_FrameStatsSlot ring[IHS_FRAME_STATS_RING_SIZE];
+    IHS_FrameStatsSlot ring[IHS_FRAME_STATS_RING_SIZE]; /* Video: existing reporting/tracker. */
+    IHS_FrameStatsSlot audioRing[IHS_FRAME_STATS_RING_SIZE]; /* Independent RX slots; shared marks. */
     IHS_FrameStatsAccumulator accumulator;
     uint16_t lastSentFrameId;
     uint16_t lastDisplayedFrameId;
@@ -179,6 +181,17 @@ void IHS_FrameStatsRecordComplete(IHS_FrameStatsAggregator *agg, uint16_t frameI
 void IHS_FrameStatsRecordReceived(IHS_FrameStatsAggregator *agg, uint16_t frameId,
                                   uint32_t senderFrameTimestamp, uint32_t senderSendTimestamp,
                                   uint32_t recvTimestamp, uint32_t frameSize, uint16_t inputMark);
+/* Original RecordFrameReceived selects one ring by media type, then consumes
+ * a matching input mark from the single client-wide mark table (§74). */
+typedef enum IHS_FrameStatsMedia {
+    IHS_FrameStatsMediaAudio = 0,
+    IHS_FrameStatsMediaVideo = 1,
+} IHS_FrameStatsMedia;
+void IHS_FrameStatsRecordMediaReceived(IHS_FrameStatsAggregator *, IHS_FrameStatsMedia,
+                                       uint16_t frameId, uint32_t frameTimestamp,
+                                       uint32_t sendTimestamp, uint32_t receiveTimestamp,
+                                       uint32_t frameSize, uint16_t inputMark,
+                                       uint32_t inputReceived);
 void IHS_FrameStatsRecordReceivedInput(IHS_FrameStatsAggregator *, uint16_t frameId,
                                        uint32_t frameTimestamp, uint32_t sendTimestamp,
                                        uint32_t receiveTimestamp, uint32_t frameSize,

@@ -293,7 +293,7 @@ void IHS_SessionChannelDataReceiveFrame(IHS_SessionChannelData *channel, IHS_Ses
             header.sendTimestamp -= frame->mediaOffset;
             if (header.inputRecvTimestamp) header.inputRecvTimestamp -= frame->mediaOffset;
             header.timestampsLocal = true;
-            header.receivedRecorded = channel->base.type == IHS_SessionChannelTypeDataVideo;
+            header.receivedRecorded = true;
         }
     }
     const IHS_SessionChannelDataClass *cls = (const IHS_SessionChannelDataClass *)channel->base.cls;

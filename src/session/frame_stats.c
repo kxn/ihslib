@@ -236,8 +236,21 @@ void IHS_FrameStatsRecordReceivedInput(IHS_FrameStatsAggregator *agg, uint16_t f
                                        uint32_t senderFrameTimestamp, uint32_t senderSendTimestamp,
                                        uint32_t recvTimestamp, uint32_t frameSize,
                                        uint16_t inputMark, uint32_t inputReceived) {
+    IHS_FrameStatsRecordMediaReceived(agg, IHS_FrameStatsMediaVideo, frameId, senderFrameTimestamp,
+                                      senderSendTimestamp, recvTimestamp, frameSize, inputMark,
+                                      inputReceived);
+}
+
+void IHS_FrameStatsRecordMediaReceived(IHS_FrameStatsAggregator *agg, IHS_FrameStatsMedia media,
+                                       uint16_t frameId, uint32_t senderFrameTimestamp,
+                                       uint32_t senderSendTimestamp, uint32_t recvTimestamp,
+                                       uint32_t frameSize, uint16_t inputMark,
+                                       uint32_t inputReceived) {
+    if (media != IHS_FrameStatsMediaAudio && media != IHS_FrameStatsMediaVideo)
+        return;
     IHS_MutexLock(agg->lock);
-    IHS_FrameStatsSlot *slot = &agg->ring[frameId % IHS_FRAME_STATS_RING_SIZE];
+    IHS_FrameStatsSlot *ring = media == IHS_FrameStatsMediaAudio ? agg->audioRing : agg->ring;
+    IHS_FrameStatsSlot *slot = &ring[frameId % IHS_FRAME_STATS_RING_SIZE];
     if (slot->frameId != frameId) {
         memset(slot, 0, sizeof(*slot));
         slot->frameId = frameId;

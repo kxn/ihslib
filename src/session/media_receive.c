@@ -17,15 +17,17 @@ void IHS_SessionChannelDataPrepareFrame(IHS_SessionChannel *channel, IHS_Session
         return;
     frame->mediaOffset = IHS_StreamClockOffset(&channel->session->clock);
     frame->mediaPrepared = true;
-    if (channel->type != IHS_SessionChannelTypeDataVideo)
-        return; /* Audio decoder metadata uses the same captured conversion. */
     uint32_t sent = frame->header.sendTimestamp - frame->mediaOffset;
     uint32_t input = h.inputRecvTimestamp ? h.inputRecvTimestamp - frame->mediaOffset : 0;
     uint32_t size = (uint32_t)(body.size - IHS_SESSION_DATA_FRAME_HEADER_SIZE);
-    IHS_SessionRecordNetworkVideo(channel->session, sent, frame->header.receiveBegin,
-                                  frame->header.receiveTimestamp, h.id, size);
+    if (channel->type == IHS_SessionChannelTypeDataVideo)
+        IHS_SessionRecordNetworkVideo(channel->session, sent, frame->header.receiveBegin,
+                                      frame->header.receiveTimestamp, h.id, size);
     if (channel->session->frameStats)
-        IHS_FrameStatsRecordReceivedInput(channel->session->frameStats, h.id,
-                                          h.timestamp - frame->mediaOffset, sent,
+        IHS_FrameStatsRecordMediaReceived(channel->session->frameStats,
+                                          channel->type == IHS_SessionChannelTypeDataAudio
+                                              ? IHS_FrameStatsMediaAudio
+                                              : IHS_FrameStatsMediaVideo,
+                                          h.id, h.timestamp - frame->mediaOffset, sent,
                                           frame->header.receiveTimestamp, size, h.inputMark, input);
 }

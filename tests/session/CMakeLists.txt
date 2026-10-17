@@ -29,6 +29,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(ihstest_frame_report_lifetime PRIVATE ihs-test-session)
     target_link_options(ihstest_frame_report_lifetime PRIVATE -Wl,--wrap=IHS_SessionChannelQueueFrameResult)
     set_tests_properties(frame_report_lifetime PROPERTIES TIMEOUT 20)
+    add_executable(ihs-media-input-oracle media_input_oracle.c)
+    target_include_directories(ihs-media-input-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-media-input-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-media-input-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-media-input-oracle PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
+        -Wl,--wrap=IHS_SessionChannelDataReceiveReliableFrame
+        -Wl,--wrap=IHS_SessionRecordNetworkVideo -Wl,--wrap=IHS_SessionChannelQueueFrameResult)
     add_executable(ihs-frame-stats-oracle frame_stats_oracle.c)
     target_include_directories(ihs-frame-stats-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-frame-stats-oracle PRIVATE ihs-test-session ihslib)
