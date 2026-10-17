@@ -6,9 +6,12 @@
 void IHS_SessionClientTransportClosed(IHS_Session *s) {
     /* Original CStreamClient::OnStreamDisconnected 7b00d0: only Streaming
      * enters Stopping; all other controlled phases return to Unconnected. */
-    s->state.connectionState = s->state.connectionState == IHS_SessionConnectionStateConnected
-                                   ? IHS_SessionConnectionStateStopping
-                                   : IHS_SessionConnectionStateUnconnected;
+    if (s->state.connectionState == IHS_SessionConnectionStateConnected) {
+        s->state.connectionState = IHS_SessionConnectionStateStopping;
+        s->transport.clientPaused = false; /* original client+19, 7b0154 */
+    } else {
+        s->state.connectionState = IHS_SessionConnectionStateUnconnected;
+    }
 }
 
 void IHS_SessionClientStopStreaming(IHS_Session *s) {

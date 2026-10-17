@@ -709,6 +709,7 @@ static void SessionFinalized(IHS_Base *base, void *context) {
     bool requested = session->transport.detached || atomic_load(&session->transport.shutdown) ||
                      atomic_load(&session->transport.closeRequested);
     IHS_SessionTransportClose(session);
+    session->transport.clientPaused = false; /* Client ResetConnection 7a52e8 */
     IHS_SessionChannelControlClearIncoming(session->channels[IHS_SessionChannelIdControl]);
     IHS_SessionTransportFinish(session);
     if (requested)

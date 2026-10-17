@@ -61,6 +61,7 @@ static void stopped(IHS_Session *s, void *ctx) {
     assert(IHS_SessionTransportState(s) ==
            (mode == 3 ? IHS_TransportClosing : IHS_TransportClosed));
     assert(s->state.hostConnectionId == (mode == 3 ? 34u : 0u));
+    assert(s->transport.clientPaused == (mode == 3));
     if (mode == 3) {
         IHS_SessionChannelControl *control = (void *)s->channels[1];
         assert(control->incomingCount == 1 && !s->transport.detached);
@@ -231,6 +232,11 @@ int main(void) {
                 IHS_BaseLock(&session->base);
                 session->state.connectionState = IHS_SessionConnectionStateConnected;
                 session->state.crcRequired = crc;
+                if (mode == 1 || mode == 3) {
+                    session->transport.clientPaused = session->transport.connectionPaused = true;
+                    session->transport.appliedGeneration = 1;
+                    atomic_store(&session->transport.lifecycleGeneration, 1);
+                }
                 IHS_SessionChannelControl *control = (void *)session->channels[1];
                 control->keepAliveTimestamp = control->frameEventsTimestamp = atomic_load(&now);
                 IHS_BaseUnlock(&session->base);
@@ -240,6 +246,7 @@ int main(void) {
                 assert(!session->base.worker && !session->sendThread &&
                        atomic_load(&goodbyes) == 1 && atomic_load(&stopOrder) == 3);
                 assert(session->state.connectionState == IHS_SessionConnectionStateUnconnected);
+                assert(!session->transport.clientPaused);
                 if (mode == 3) {
                     assert(!session->clientConfig && session->transport.detached);
                     assert(!((IHS_SessionChannelControl *)session->channels[1])->incomingCount);

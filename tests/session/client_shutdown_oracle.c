@@ -15,7 +15,7 @@
 
 static IHS_Session *session;
 static uint32_t now = 1000000;
-static bool input, readable;
+static bool input, readable, trackPaused;
 static IHS_Buffer datagram;
 static char *events[16], *wires[32], *configs[16];
 static unsigned configCount;
@@ -209,7 +209,12 @@ static void report(void) {
         free(wires[i]);
     }
     wireCount = 0;
-    printf("],\"config_events\":[");
+    if (trackPaused)
+        printf("],\"client_paused\":%s,\"connection_paused\":%s,\"config_events\":[",
+               session->transport.clientPaused ? "true" : "false",
+               session->transport.connectionPaused ? "true" : "false");
+    else
+        printf("],\"config_events\":[");
     for (unsigned i = 0; i < configCount; ++i) {
         printf("%s%s", i ? "," : "", configs[i]);
         free(configs[i]);
@@ -236,7 +241,7 @@ static void packet(unsigned type, unsigned id, unsigned sent, const char *raw) {
     IHS_SessionPacketClear(&p, true);
 }
 int main(int argc, char **argv) {
-    assert(argc == 4);
+    assert(argc == 4 || argc == 5);
     IHS_Init();
     session = IHS_TestSessionCreate();
     IHS_TimerTaskStopImmediate(session->retransmission.timer);
@@ -246,6 +251,12 @@ int main(int argc, char **argv) {
     session->state.connectionId = 12;
     session->state.hostConnectionId = 34;
     session->state.crcRequired = atoi(argv[3]);
+    trackPaused = argc == 5 && atoi(argv[4]);
+    if (trackPaused) {
+        session->transport.clientPaused = session->transport.connectionPaused = true;
+        session->transport.appliedGeneration = 1;
+        atomic_store(&session->transport.lifecycleGeneration, 1);
+    }
     session->transport.active = true;
     session->transport.lastReceive = 1000000;
     session->clock.lastEcho = 1000000;
