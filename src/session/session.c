@@ -583,8 +583,7 @@ static void SessionRecvAt(IHS_Base *base, const IHS_SocketAddress *address,
 
 IHS_ReliableDisposition IHS_SessionDeliverReliableFrame(IHS_Session *session,
                                                          IHS_SessionFrame *frame) {
-    if (!frame->body.size ||
-        session->state.connectionState == IHS_SessionConnectionStateUnconnected ||
+    if (session->state.connectionState == IHS_SessionConnectionStateUnconnected ||
         atomic_load(&session->transport.shutdown))
         return IHS_ReliableDiscarded;
     uint8_t id = frame->header.channelId;
@@ -592,6 +591,7 @@ IHS_ReliableDisposition IHS_SessionDeliverReliableFrame(IHS_Session *session,
         IHS_SessionChannelControlReceiveFrame(session->channels[1], frame);
         return IHS_ReliableControl;
     }
+    if (!frame->body.size) return IHS_ReliableDiscarded;
     if (id < IHS_SessionChannelIdDataStart || *IHS_BufferPointer(&frame->body) != k_EStreamDataPacket)
         return IHS_ReliableIgnored;
     if (session->state.connectionState != IHS_SessionConnectionStateConnected)
@@ -737,6 +737,10 @@ static void SessionUpdateAt(IHS_Base *base, void *context, uint32_t tick) {
     IHS_BaseUnlock(base);
     if (updateControl) {
         IHS_SessionReceiveUpdateAt(session, tick);
+        /* Official OnThink consumes ordinary control only after network
+         * updates, outside the network lock; handlers can join consumers. */
+        if (!base->interrupted && !session->transport.detached)
+            IHS_SessionChannelControlDrainIncoming(session->channels[IHS_SessionChannelIdControl]);
         /* Drain incoming reliable frames before choosing one client stage. */
         if (!base->interrupted && !session->transport.detached)
             IHS_SessionChannelControlUpdateStage(session->channels[IHS_SessionChannelIdControl],

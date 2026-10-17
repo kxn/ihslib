@@ -39,6 +39,13 @@
  * 8ms tick); reliable delivery is handled entirely by the transport
  * (retransmission until ACK/NACK). See docs/STEAMLINK_PROTOCOL_RE.md §9. */
 
+typedef struct IHS_IncomingControl {
+    struct IHS_IncomingControl *next;
+    EStreamControlMessage type;
+    IHS_Buffer body;
+    IHS_SessionPacketHeader header;
+} IHS_IncomingControl;
+
 typedef struct IHS_SessionChannelControl {
     IHS_SessionChannel base;
     /* Serializes encryption sequence and packet-ID assignment across RX
@@ -46,6 +53,11 @@ typedef struct IHS_SessionChannelControl {
     IHS_Mutex *sendLock;
     uint64_t sendEncryptSequence;
     uint64_t recvEncryptSequence;
+    /* Network delivery decrypts before handoff. Main/client-stage consumption
+     * holds neither this queue lock nor the network/Base lock. */
+    IHS_Mutex *incomingLock;
+    IHS_IncomingControl *incomingHead, *incomingTail;
+    unsigned incomingCount;
     uint64_t hidSubmitted;
     uint64_t hidCoalesced;
     uint64_t hidSent;
@@ -127,3 +139,7 @@ void IHS_ControlDiagnosticsQuit(void);
 void IHS_SessionChannelControlUpdateFeedback(IHS_SessionChannelControl *control);
 
 void IHS_SessionChannelControlReceiveFrame(IHS_SessionChannel *, IHS_SessionFrame *);
+void IHS_SessionChannelControlHandoff(IHS_SessionChannel *, EStreamControlMessage,
+                                      IHS_Buffer *, const IHS_SessionPacketHeader *);
+void IHS_SessionChannelControlDrainIncoming(IHS_SessionChannel *);
+void IHS_SessionChannelControlClearIncoming(IHS_SessionChannel *);

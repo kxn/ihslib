@@ -110,6 +110,7 @@ static void receive(IHS_Session *s, const uint8_t *payload, size_t n) {
         IHS_BufferAppendMem(&wire, p.body.data, IHS_SessionPacketSize(&p));
         s->base.callbacks.received(&s->base, &s->info.address, &wire);
         IHS_SessionChannelControlUpdateFeedback((void *)s->channels[1]);
+        IHS_SessionChannelControlDrainIncoming(s->channels[1]);
         IHS_BufferClear(&wire, true);
         IHS_SessionPacketClear(&p, true);
     }
@@ -175,6 +176,14 @@ int main(void) {
             IHS_SessionChannelControlOnNegotiation(s->channels[1], k_EStreamControlNegotiationInit,
                                                    &payload, &header);
             IHS_BufferClear(&payload, true);
+        } else if (!strncmp(line, "QUEUED ", 7)) {
+            IHS_Buffer plain = IHS_BUFFER_INIT(1024, 0);
+            IHS_BufferAppendMem(&plain, bytes, len / 2);
+            IHS_SessionPacketHeader header = {.channelId = 1};
+            IHS_SessionChannelControlHandoff(s->channels[1], k_EStreamControlSetStreamingClientConfig,
+                                              &plain, &header);
+            IHS_BufferClear(&plain, true);
+            IHS_SessionChannelControlDrainIncoming(s->channels[1]);
         } else
             receive(s, bytes, len / 2);
         free(bytes);

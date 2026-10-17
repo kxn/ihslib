@@ -222,6 +222,7 @@ int main(int argc, char **argv) {
             received(line + 3);
         else if (!strcmp(line, "DRAIN")) {
             IHS_SessionReliableUpdate(s);
+            IHS_SessionChannelControlDrainIncoming(s->channels[1]);
             report();
         } else {
             assert(sscanf(line, "UPDATE %u", &now) == 1);

@@ -113,6 +113,7 @@ static void nack_age_and_trailing_zeros(void) {
 }
 static void decrypt_attempts(void) {
     IHS_Session *s = session_new();
+    s->state.connectionState = IHS_SessionConnectionStateConnected;
     IHS_SessionChannelControl *c = (void *) s->channels[1];
     /* Malformed ciphertext consumes one attempted encrypted frame, no crash. */
     IHS_SessionPacket p;
@@ -120,6 +121,7 @@ static void decrypt_attempts(void) {
     IHS_BufferAppendUInt8(&p.body, k_EStreamControlSetInputTemporarilyDisabled);
     c->base.cls->received(&c->base, &p);
     IHS_SessionChannelControlUpdateFeedback(c);
+    IHS_SessionChannelControlDrainIncoming(&c->base);
     assert(c->recvEncryptSequence == 1);
     IHS_SessionPacketClear(&p, true);
     uint8_t msg[] = {0x08, 0x01}; /* disabled=true */
@@ -130,6 +132,7 @@ static void decrypt_attempts(void) {
     IHS_BufferAppendMem(&p.body, cipher, len);
     c->base.cls->received(&c->base, &p);
     IHS_SessionChannelControlUpdateFeedback(c);
+    IHS_SessionChannelControlDrainIncoming(&c->base);
     assert(c->recvEncryptSequence == 2);
     assert(s->state.inputTemporarilyDisabled);
     assert(IHS_SessionInputEnabled(s)); /* Informational dialog, not HID admission. */

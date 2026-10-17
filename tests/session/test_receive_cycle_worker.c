@@ -2,14 +2,18 @@
  * scripted IO costs match official batch_2 vectors. Separately test actual
  * POSIX readiness/nonblocking drain on loopback (no external peer). */
 #include "ihslib.h"
+#include "ihs_buffer.h"
+#include "ihs_buffer_ext.h"
 #include "session/session_pri.h"
 #include "session/reliable.h"
 #include "session/channels/ch_data.h"
+#include "session/channels/ch_control.h"
 #include "test_session.h"
 #include <assert.h>
 #include <netinet/in.h>
 #include <stdatomic.h>
 #include <sys/socket.h>
+#include <pthread.h>
 #include <unistd.h>
 
 static IHS_Session *s;
@@ -18,6 +22,9 @@ static atomic_bool scripted, handshake, acknowledged;
 static uint32_t start, batch;
 static bool crc;
 static bool ordinary;
+static bool controlQueue;
+static bool interruptQueue;
+static atomic_bool controlAckSeen;
 static IHS_SessionPacketsWindow *dataWindow;
 bool __real_IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *, IHS_SessionFrame *);
 bool __wrap_IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionFrame *f) {
@@ -54,12 +61,40 @@ IHS_SessionPacketReturn __wrap_IHS_SessionPacketParse(IHS_SessionPacket *p, IHS_
 }
 IHS_ReliableDisposition __real_IHS_SessionDeliverReliableFrame(IHS_Session *, IHS_SessionFrame *);
 IHS_ReliableDisposition __wrap_IHS_SessionDeliverReliableFrame(IHS_Session *session,IHS_SessionFrame *f) {
-    if (f->header.channelId==4) {
+    if (f->header.channelId==4 || (controlQueue && f->header.channelId==1)) {
         unsigned n=atomic_load(&frames);
         assert(n<2 && f->header.receiveBegin==batch+n*18 && f->header.receiveTimestamp==batch+n*18);
         atomic_fetch_add(&frames,1);
     }
     return __real_IHS_SessionDeliverReliableFrame(session,f);
+}
+static void *probe_consumer_locks(void *unused) {
+    (void)unused;
+    IHS_BaseLock(&s->base);
+    IHS_SessionChannelControl *control=(void *)s->channels[1];
+    IHS_MutexLock(control->incomingLock);
+    IHS_MutexUnlock(control->incomingLock);
+    IHS_BaseUnlock(&s->base);
+    return NULL;
+}
+void __real_IHS_SessionChannelControlOnMessageReceived(IHS_SessionChannel *,EStreamControlMessage,
+    IHS_Buffer *,const IHS_SessionPacketHeader *);
+void __wrap_IHS_SessionChannelControlOnMessageReceived(IHS_SessionChannel *ch,EStreamControlMessage type,
+    IHS_Buffer *body,const IHS_SessionPacketHeader *header) {
+    if(controlQueue && type==k_EStreamControlSetInputTemporarilyDisabled) {
+        assert(!interruptQueue);
+        assert(atomic_load(&controlAckSeen) && !s->state.inputTemporarilyDisabled);
+        assert(atomic_load(&phase)==7 && atomic_load(&frames)==2);
+        /* A real handler can join a consumer which still needs Base. Verify
+         * both network and queue locks are released before dispatch. */
+        pthread_t probe;assert(!pthread_create(&probe,NULL,probe_consumer_locks,NULL));
+        assert(!pthread_join(probe,NULL));
+    }
+    __real_IHS_SessionChannelControlOnMessageReceived(ch,type,body,header);
+    if(controlQueue && type==k_EStreamControlSetInputTemporarilyDisabled) {
+        assert(s->state.inputTemporarilyDisabled);
+        atomic_store(&acknowledged,true);
+    }
 }
 bool __real_IHS_BaseSend(IHS_Base *,IHS_SocketAddress,const IHS_Buffer *);
 bool __wrap_IHS_BaseSend(IHS_Base *base,IHS_SocketAddress address,const IHS_Buffer *b) {
@@ -74,6 +109,19 @@ bool __wrap_IHS_BaseSend(IHS_Base *base,IHS_SocketAddress address,const IHS_Buff
         assert(w[7]==1 && !w[8] && read32(w+9)==batch+136 && read32(w+13)==900119);
         assert(s->transport.updateTime==batch+36);
         atomic_store(&acknowledged,true);
+    }
+    if(controlQueue && type==7 && w[4]==1 && atomic_load(&phase)==7) {
+        IHS_SessionChannelControl *control=(void *)s->channels[1];
+        assert(control->recvEncryptSequence==2 && control->incomingCount==1);
+        assert(!s->state.inputTemporarilyDisabled && atomic_load(&frames)==2);
+        assert(read32(w+9)==batch+136 && read32(w+13)==900119);
+        atomic_store(&controlAckSeen,true);
+        if(interruptQueue) {
+            /* Local stop between network feedback and client consumption must
+             * leave the queued action for destruction, not restart consumers. */
+            IHS_SessionInterrupt(s);
+            atomic_store(&acknowledged,true);
+        }
     }
     return true;
 }
@@ -92,7 +140,15 @@ static int incoming(IHS_UDPPacket *rx,unsigned type,unsigned ch,unsigned id,unsi
     uint8_t bytes[4]={0};size_t size=4;
     if(type==5||type==3) {bytes[0]=6;bytes[1]=0xaa;bytes[2]=0xbb;size=3;}
     if(type==7) {uint32_t t=atomic_load(&now);for(unsigned n=0;n<4;++n)bytes[n]=t>>(n*8);}
-    IHS_BufferAppendMem(&p.body,bytes,size);IHS_SessionPacketPopulateBuffer(&p);
+    if(controlQueue && type==5 && ch==1) {
+        if(id==1) {
+            const uint8_t plain[]={0x08,0x01};uint8_t cipher[64];size_t cipherSize=sizeof(cipher);
+            assert(!IHS_SessionFrameEncrypt(s,plain,sizeof(plain),cipher,&cipherSize,1));
+            IHS_BufferAppendUInt8(&p.body,k_EStreamControlSetInputTemporarilyDisabled);
+            IHS_BufferAppendMem(&p.body,cipher,cipherSize);
+        }
+    } else IHS_BufferAppendMem(&p.body,bytes,size);
+    IHS_SessionPacketPopulateBuffer(&p);
     rx->address=s->info.address;IHS_BufferAppendMem(&rx->buffer,p.body.data,IHS_SessionPacketSize(&p));
     IHS_SessionPacketClear(&p,true);return 1;
 }
@@ -108,8 +164,14 @@ int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket,IHS_UDPPacket *rx) {
     case 3:atomic_store(&phase,4);return 0;
     case 4:case 5: {
         unsigned n=atomic_load(&phase)-4;assert(!atomic_load(&frames));
+        if(controlQueue) {
+            s->state.connectionState=IHS_SessionConnectionStateConnected;
+            IHS_SessionChannelControl *control=(void *)s->channels[1];
+            control->keepAliveTimestamp=control->frameEventsTimestamp=batch;
+            assert(!s->state.inputTemporarilyDisabled);
+        }
         atomic_fetch_add(&now,7);atomic_store(&work,11);atomic_fetch_add(&phase,1);
-        return incoming(rx,ordinary?3:5,ordinary?3:4,n,n);
+        return incoming(rx,ordinary?3:5,controlQueue?1:ordinary?3:4,n,n);
     }
     case 6:
         assert(!atomic_load(&frames));atomic_fetch_add(&now,100);atomic_store(&phase,7);return 0;
@@ -138,8 +200,9 @@ static void loopback(void) {
 }
 int main(void) {
     IHS_Init();loopback();
-    for(unsigned mode=0;mode<2;++mode)for(unsigned c=0;c<2;++c){
-        ordinary=mode;dataWindow=NULL;
+    for(unsigned mode=0;mode<4;++mode)for(unsigned c=0;c<2;++c){
+        ordinary=mode==1;controlQueue=mode>=2;interruptQueue=mode==3;dataWindow=NULL;
+        atomic_store(&controlAckSeen,false);
         crc=c;start=1000000;batch=start+1000;atomic_store(&now,start);
         atomic_store(&phase,0);atomic_store(&frames,0);atomic_store(&work,0);
         atomic_store(&handshake,false);atomic_store(&acknowledged,false);atomic_store(&scripted,true);

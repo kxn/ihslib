@@ -136,6 +136,7 @@ int main(int argc, char **argv) {
                 peer.port++;
             s->base.callbacks.received(&s->base, &peer, &buffer);
             IHS_SessionChannelControlUpdateFeedback((void *)s->channels[1]);
+        IHS_SessionChannelControlDrainIncoming(s->channels[1]);
             IHS_BufferClear(&buffer, true);
         } else if (sscanf(line, "FOREGROUND %u", &value) == 1) {
             IHS_SessionSetForeground(s, value != 0);

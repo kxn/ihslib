@@ -336,11 +336,15 @@ static void OnControlInit(IHS_SessionChannel *channel, const void *data) {
     IHS_UNUSED(data);
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *)channel;
     control->sendLock = IHS_MutexCreate();
+    control->incomingLock = IHS_MutexCreate();
+    channel->initFailed = !control->sendLock || !control->incomingLock;
 }
 
 static void OnControlDeinit(IHS_SessionChannel *channel) {
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *)channel;
-    IHS_MutexDestroy(control->sendLock);
+    IHS_SessionChannelControlClearIncoming(channel);
+    if (control->incomingLock) IHS_MutexDestroy(control->incomingLock);
+    if (control->sendLock) IHS_MutexDestroy(control->sendLock);
 }
 
 static void OnControlReceived(IHS_SessionChannel *channel, IHS_SessionPacket *packet) {
@@ -349,9 +353,13 @@ static void OnControlReceived(IHS_SessionChannel *channel, IHS_SessionPacket *pa
 
 void IHS_SessionChannelControlReceiveFrame(IHS_SessionChannel *channel, IHS_SessionFrame *frame) {
     IHS_SessionChannelControl *control = (void *)channel;
-    if (!frame->body.size) return;
-    EStreamControlMessage type = *IHS_BufferPointer(&frame->body);
-    IHS_BufferOffsetBy(&frame->body, 1);
+    int phase = channel->session->state.connectionState;
+    if (phase == IHS_SessionConnectionStateUnconnected || phase == 7 ||
+        atomic_load(&channel->session->transport.shutdown)) return;
+    /* Frame::SetPacket without a message byte leaves type zero; the original
+     * still consumes a decrypt attempt and rejects the missing cipher. */
+    EStreamControlMessage type = frame->body.size ? *IHS_BufferPointer(&frame->body) : 0;
+    if (frame->body.size) IHS_BufferOffsetBy(&frame->body, 1);
     if (IsMessageEncrypted(type)) {
         IHS_Buffer plain;
         IHS_BufferInit(&plain, 1024, 1024 * 1024);
@@ -361,7 +369,7 @@ void IHS_SessionChannelControlReceiveFrame(IHS_SessionChannel *channel, IHS_Sess
         switch (IHS_SessionFrameDecrypt(channel->session, &frame->body, &plain, expectSequence,
                                         &actualSequence)) {
         case IHS_SessionPacketResultOK: {
-            IHS_SessionChannelControlOnMessageReceived(channel, type, &plain, &frame->header);
+            IHS_SessionChannelControlHandoff(channel, type, &plain, &frame->header);
             break;
         }
         case IHS_SessionFrameDecryptHashMismatch:
@@ -387,7 +395,7 @@ void IHS_SessionChannelControlReceiveFrame(IHS_SessionChannel *channel, IHS_Sess
         }
         IHS_BufferClear(&plain, true);
     } else {
-        IHS_SessionChannelControlOnMessageReceived(channel, type, &frame->body, &frame->header);
+        IHS_SessionChannelControlHandoff(channel, type, &frame->body, &frame->header);
     }
 }
 
@@ -416,9 +424,8 @@ void IHS_SessionChannelControlOnMessageReceived(IHS_SessionChannel *channel,
         break;
     }
     case k_EStreamControlSetStreamingClientConfig: {
-        // Original queued dispatcher handles 99 only in client state 6.
-        if (channel->session->state.connectionState != IHS_SessionConnectionStateConnected)
-            break;
+        /* Receive/drain owns phase selection. The generic original table also
+         * accepts this in phases other than 6; OnSet* itself has no phase guard. */
         CSetStreamingClientConfig *message =
             IHS_UNPACK_BUFFER(cset_streaming_client_config__unpack, payload);
         if (message == NULL) {

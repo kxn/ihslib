@@ -67,6 +67,7 @@ IHS_SessionChannel *IHS_SessionChannelCreate(const IHS_SessionChannelClass *cls,
 }
 
 void IHS_SessionChannelStop(IHS_SessionChannel *channel) {
+    if (!channel) return; /* Partial initialization may have failed. */
     if (channel->cls->stopped == NULL) {
         return;
     }
@@ -74,6 +75,7 @@ void IHS_SessionChannelStop(IHS_SessionChannel *channel) {
 }
 
 void IHS_SessionChannelDestroy(IHS_SessionChannel *channel) {
+    if (!channel) return;
     if (channel->cls->deinit) {
         channel->cls->deinit(channel);
     }

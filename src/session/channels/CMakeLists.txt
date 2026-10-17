@@ -2,6 +2,7 @@ target_sources(ihslib PRIVATE
         channel.c
         ch_discovery.c
         ch_control.c
+        control_receive.c
         ch_control_authentication.c
         ch_control_negotiation.c
         ch_control_keepalive.c
