@@ -36,6 +36,7 @@
 #include "frame_stats.h"
 #include "frame_tracker.h"
 #include "session_pri.h"
+#include "session_queue.h"
 
 #include "protobuf/remoteplay.pb-c.h"
 #include "session/channels/ch_control.h"
@@ -45,16 +46,6 @@
 #include "session/channels/video/ch_data_video.h"
 
 #include "hid/manager.h"
-
-
-typedef struct IHS_QueueItem {
-    IHS_SessionPacket packet;
-    bool reliable;
-    uint32_t queuedAt;
-    uint16_t batchCount; /* reliable frame head: N; continuation: 0 */
-    struct IHS_QueueItem *batchNext;
-    bool pendingReliableFrame;
-} QueuedPacket;
 
 static void SessionRecvCallback(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data);
 
@@ -635,26 +626,6 @@ IHS_ReliableDisposition IHS_SessionDeliverReliableFrame(IHS_Session *session,
     IHS_QueueAppend(session->pendingData, (void *)queued);
     session->pendingDataCount++;
     return IHS_ReliablePending;
-}
-
-static bool PendingDataMatches(IHS_QueueItem *item, void *context) {
-    return ((QueuedPacket *)item)->packet.header.channelId == ((IHS_SessionChannel *)context)->id;
-}
-void IHS_SessionDrainPendingData(IHS_Session *session, IHS_SessionChannel *channel) {
-    QueuedPacket *queued;
-    while ((queued = (void *)IHS_QueuePollBy(session->pendingData, PendingDataMatches, channel))) {
-        session->pendingDataCount--;
-        if (queued->pendingReliableFrame) {
-            IHS_SessionFrame frame = {.header = queued->packet.header, .body = queued->packet.body};
-            memset(&queued->packet.body, 0, sizeof(queued->packet.body));
-            IHS_SessionDeliverReliableFrame(session, &frame);
-            IHS_SessionFrameClear(&frame, true);
-        } else {
-            IHS_SessionChannelReceivedPacket(channel, &queued->packet);
-        }
-        IHS_SessionPacketClear(&queued->packet, true);
-        IHS_QueueItemFree((void *)queued);
-    }
 }
 
 static void SessionInitialized(IHS_Base *base, void *context) {

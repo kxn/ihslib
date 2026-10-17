@@ -3,6 +3,7 @@ target_sources(ihslib PRIVATE
         lifecycle.c
         shutdown.c
         client_shutdown.c
+        media_pending.c
         connection_id.c
         client_config.c
         packet.c

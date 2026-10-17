@@ -235,10 +235,24 @@ int main(int argc, char **argv) {
             IHS_SessionReliableUpdateChannel(s, target);
             IHS_OutgoingUpdate(s, now);
         } else if (op == 'C') {
-            IHS_SessionChannel *c = IHS_SessionChannelDataCreate(
-                &cls, s, IHS_SessionChannelTypeDataAudio, target, NULL);
-            assert(c);
-            IHS_SessionChannelAdd(s, c);
+            unsigned configured = target;
+            sscanf(line, " %c %u %u", &op, &opTime, &configured);
+            IHS_SessionChannel *previous = IHS_SessionChannelForType(s, IHS_SessionChannelTypeDataAudio);
+            if (previous && previous->id != configured)
+                IHS_SessionChannelRemove(s, previous->id);
+            IHS_SessionChannel *c = IHS_SessionChannelFor(s, configured);
+            if (c) {
+                IHS_SessionDrainPendingData(s, c);
+            } else {
+                c = IHS_SessionChannelDataCreate(&cls, s, IHS_SessionChannelTypeDataAudio, configured, NULL);
+                assert(c);
+                IHS_SessionChannelAdd(s, c);
+            }
+        } else if (op == 'P' || op == 'T') {
+            unsigned value;
+            assert(sscanf(line, " %c %u %u", &op, &opTime, &value) == 3);
+            if (op == 'P') s->transport.clientPaused = value;
+            else s->state.connectionState = value;
         } else if (op == 'F') {
             assert(sscanf(line, " %c %u %2047s", &op, &opTime, encoded) == 3);
             IHS_SessionChannel endpoint = {.session = s, .id = target};
