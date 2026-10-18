@@ -238,25 +238,34 @@ void IHS_SessionSetVideoCallbacks(IHS_Session *session, const IHS_StreamVideoCal
 
 void IHS_SessionSetInputCallbacks(IHS_Session *session, const IHS_StreamInputCallbacks *callbacks, void *context);
 
-/**
- * Register microphone (client → server) callbacks. Setting non-NULL callbacks here
- * advertises the `enable_microphone_streaming` capability to the server during
- * negotiation; the server may then issue Start/Stop microphone control messages.
- *
- * Must be called before IHS_SessionConnect — capability negotiation happens once and
- * cannot be re-advertised mid-session.
- */
+/** Register optional local capture callbacks before Connect; see audio.h. */
 void IHS_SessionSetMicrophoneCallbacks(IHS_Session *session, const IHS_StreamMicrophoneCallbacks *callbacks,
                                        void *context);
 
 /**
- * Submit one encoded microphone frame for transmission. Call from the capture / encode
- * thread, once per Opus packet (or once per PCM chunk when codec=Raw). The payload is
- * wrapped in a data-frame header and queued for unreliable send on the mic data channel.
- *
- * Returns false if no microphone channel is currently active (the server hasn't issued
- * Start, or has issued Stop, or the session isn't connected); the caller can use this
- * as the cue to drop the frame.
+ * Start a local upstream microphone stream with already selected encoded format.
+ * Requires Streaming and the negotiated audio codec. Sends control 107, without
+ * waiting for a host Start command. Repeated Start allocates the next channel,
+ * resets frame ID and replaces local capture ownership without an implicit 108.
+ * codecData is borrowed only during this call; non-NULL represents presence.
+ * Payload/codecData limits are local 1 MiB resource guards, not measured limits.
+ * Start/Stop must be serialized by the application owner; data may race Stop.
+ * Returns control-queue admission, not host acknowledgement or device proof.
+ */
+bool IHS_SessionStartMicrophoneStream(IHS_Session *session, const IHS_StreamAudioConfig *config);
+
+/**
+ * Clear local sending, stop/join capture outside Base, then emit 108 if active.
+ * Returns whether a local stream was active, not a host acknowledgement.
+ */
+bool IHS_SessionStopMicrophoneStream(IHS_Session *session);
+
+/**
+ * Copy one encoded frame to the outgoing queue. Delivery follows negotiated
+ * reliable_data; ordinary unreliable delivery retains its bounded NACK window.
+ * Returns false without an active local stream, for oversized/invalid input or
+ * failed queue admission. Stop prevents subsequent admission; no RX table entry
+ * is borrowed. The caller retains its input buffer after this function returns.
  */
 bool IHS_SessionSendMicrophoneData(IHS_Session *session, const uint8_t *data, size_t len);
 

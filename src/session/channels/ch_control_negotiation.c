@@ -229,14 +229,7 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
     }
     if ((!complete && !clientConfig.has_enable_audio_streaming) || ihsConf.enableAudio != before.enableAudio)
         PROTOBUF_C_SET_VALUE(clientConfig, enable_audio_streaming, ihsConf.enableAudio);
-    // Mic streaming is opt-in: only advertise when the user has registered mic callbacks.
-    // Steam's server keys off this flag — without it the server never issues Start, so
-    // there's no point in advertising mic support we can't actually fulfil. Matches the
-    // capability semantics around CStreamingClientConfig.enable_microphone_streaming
-    // documented in the mic RE.
-    if (session->callbacks.microphone != NULL) {
-        PROTOBUF_C_SET_VALUE(clientConfig, enable_microphone_streaming, true);
-    }
+    /* Callback registration is not a user config edit (protocol RE §114). */
     if (!complete && !clientConfig.has_enable_video_streaming)
         PROTOBUF_C_SET_VALUE(clientConfig, enable_video_streaming, true);
     if ((!complete && !clientConfig.has_desired_framerate_numerator) || ihsConf.maxFps != before.maxFps) {

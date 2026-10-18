@@ -24,26 +24,8 @@
  */
 
 #pragma once
-
 #include "channel.h"
-#include "protobuf/remoteplay.pb-c.h"
 
-/**
- * Mic channel is send-only (client → server) so it doesn't reuse the receive-oriented
- * ch_data.c base class. Created when the server sends k_EStreamControlStartMicrophoneData;
- * destroyed when it sends k_EStreamControlStopMicrophoneData. The init message carries
- * the negotiated codec/freq/channel-count which we hand to the user via the registered
- * IHS_StreamMicrophoneCallbacks.start hook.
- */
-IHS_SessionChannel *IHS_SessionChannelDataMicrophoneCreate(IHS_Session *session, const CStartAudioDataMsg *message);
-
-/**
- * Wrap one user-supplied encoded mic payload in the data-frame layout Steam expects
- * (`k_EStreamDataPacket` type byte + 12-byte frame info trailer) and queue it on the
- * mic UDP channel as Unreliable. Reliability is intentional — Steam's mic path also
- * runs unreliable, voice frames are time-sensitive and a re-sent old frame is worse
- * than a dropped new one.
- *
- * Returns false if the queue refuses the packet. Safe to call from any thread.
- */
-bool IHS_SessionChannelDataMicrophoneSend(IHS_SessionChannel *channel, const uint8_t *data, size_t len);
+/* Caller holds Base through ID assignment, frame construction and admission. */
+bool IHS_SessionMicrophoneSendFrame(IHS_Session *session, uint8_t channelId, uint16_t frameId,
+                                     const uint8_t *data, size_t len, bool reliable);

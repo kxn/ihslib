@@ -169,6 +169,7 @@ void IHS_SessionDestroy(IHS_Session *session) {
     IHS_SessionInterrupt(session);
     if (session->base.worker)
         IHS_SessionThreadedJoin(session);
+    IHS_SessionMicrophoneClose(session, false);
     IHS_HIDManagerCloseAll(session->hidManager);
     /* Data workers may still call control/stats on stop: destroy them first. */
     for (int i = session->numChannels - 1; i >= 3; --i) {
@@ -215,6 +216,7 @@ void IHS_SessionDestroy(IHS_Session *session) {
  */
 
 static void SessionStopChannels(IHS_Session *session) {
+    IHS_SessionMicrophoneClose(session, false);
     for (int i = session->numChannels - 1; i >= 0; --i)
         IHS_SessionChannelStop(session->channels[i]);
 }

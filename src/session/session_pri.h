@@ -120,6 +120,14 @@ struct IHS_Session {
     atomic_bool destroying;
     atomic_bool hostVideoStopped;
     atomic_bool hostRequestedStop; /* Explicit inbound StopRequest / Disconnect only. */
+    /* Base-locked upstream producer state, independent of RX consumers. */
+    struct {
+        uint8_t channel, nextChannel;
+        uint16_t nextFrame;
+        bool reliable;
+        const IHS_StreamMicrophoneCallbacks *owner;
+        void *context;
+    } microphone;
     uint8_t numChannels;
     IHS_SessionChannel *channels[16];
     IHS_Thread *sendThread;
@@ -171,6 +179,7 @@ struct IHS_Session {
     IHS_BaseLog((IHS_Base *)(session), (level), (tag), __VA_ARGS__)
 
 void IHS_SessionInterrupt(IHS_Session *session);
+void IHS_SessionMicrophoneClose(IHS_Session *session, bool sendControl);
 
 /* Worker steps, also used by the protocol oracle with a controlled clock. */
 void IHS_SessionTransportBegin(IHS_Session *session, uint32_t now);

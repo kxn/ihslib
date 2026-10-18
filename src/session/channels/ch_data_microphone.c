@@ -23,105 +23,31 @@
  *
  */
 
-#include <stdlib.h>
-#include <memory.h>
-
+/* Official SendMicrophoneData -> Frame/Channel/Socket, protocol reference §114. */
 #include "ch_data_microphone.h"
-#include "ch_data.h"
-#include "session/session_pri.h"
 #include "ihs_buffer_ext.h"
-#include "ihs_thread.h"
+#include "session/session_pri.h"
 
-// Mirrors CStreamClient::SendMicrophoneData @ 0x1f805c. Steam's wire format for a mic
-// frame: data-channel frame, body = [k_EStreamDataPacket=1] [12-byte frame header]
-// [opus/PCM payload]. The frame header carries a monotonic frameId; the other three
-// fields (frameTimestamp, inputMark, inputRecvTimestamp) are written as zero — mic
-// frames don't participate in the video frame-timing / input-marking subsystem.
-typedef struct ChannelMicrophone {
-    IHS_SessionChannel base;
-    IHS_StreamAudioConfig config;
-    IHS_Mutex *sendLock;
-    uint16_t nextFrameId;
-} ChannelMicrophone;
-
-static void ChannelMicrophoneInit(IHS_SessionChannel *channel, const void *config);
-
-static void ChannelMicrophoneDeinit(IHS_SessionChannel *channel);
-
-static const IHS_SessionChannelClass ChannelClass = {
-        .init = ChannelMicrophoneInit,
-        .deinit = ChannelMicrophoneDeinit,
-        // Mic is send-only. The server may never send anything on this channel; if it
-        // does, drop it on the floor — we have no consumer side and Steam's reference
-        // client doesn't subscribe to anything here either.
-        .received = IHS_SessionChannelReceivedPacketNoop,
-        .stopped = NULL,
-        .instanceSize = sizeof(ChannelMicrophone),
-};
-
-IHS_SessionChannel *IHS_SessionChannelDataMicrophoneCreate(IHS_Session *session, const CStartAudioDataMsg *message) {
-    return IHS_SessionChannelCreate(&ChannelClass, session, IHS_SessionChannelTypeDataMicrophone, message->channel,
-                                    message);
-}
-
-static void ChannelMicrophoneInit(IHS_SessionChannel *channel, const void *config) {
-    ChannelMicrophone *mic = (ChannelMicrophone *) channel;
-    const CStartAudioDataMsg *message = config;
-    mic->config.channels = message->channels;
-    mic->config.frequency = message->frequency;
-    mic->config.codec = (IHS_StreamAudioCodec) message->codec;
-    if (message->has_codec_data) {
-        mic->config.codecDataLen = message->codec_data.len;
-        mic->config.codecData = malloc(message->codec_data.len);
-        memcpy(mic->config.codecData, message->codec_data.data, message->codec_data.len);
-    }
-    mic->sendLock = IHS_MutexCreate();
-    mic->nextFrameId = 0;
-
-    IHS_Session *session = channel->session;
-    const IHS_StreamMicrophoneCallbacks *callbacks = session->callbacks.microphone;
-    if (callbacks && callbacks->start) {
-        // The user is expected to open the platform capture device here. If they refuse
-        // (return non-zero), the channel still exists but nothing will ever Send — fine,
-        // since the server's Stop will tear it down soon enough.
-        callbacks->start(session, &mic->config, session->callbackContexts.microphone);
-    }
-}
-
-static void ChannelMicrophoneDeinit(IHS_SessionChannel *channel) {
-    ChannelMicrophone *mic = (ChannelMicrophone *) channel;
-    IHS_Session *session = channel->session;
-    const IHS_StreamMicrophoneCallbacks *callbacks = session->callbacks.microphone;
-    if (callbacks && callbacks->stop) {
-        callbacks->stop(session, session->callbackContexts.microphone);
-    }
-    if (mic->config.codecData) {
-        free(mic->config.codecData);
-    }
-    IHS_MutexDestroy(mic->sendLock);
-}
-
-bool IHS_SessionChannelDataMicrophoneSend(IHS_SessionChannel *channel, const uint8_t *data, size_t len) {
-    ChannelMicrophone *mic = (ChannelMicrophone *) channel;
+bool IHS_SessionMicrophoneSendFrame(IHS_Session *session, uint8_t channelId, uint16_t frameId,
+                                     const uint8_t *data, size_t len, bool reliable) {
+    /* Outgoing slots belong to the connection; a peer's downlink decoder may
+     * use this same numeric ID. Never publish a mic in the RX consumer table. */
+    IHS_SessionChannel channel = {.session = session, .id = channelId,
+                                  .type = IHS_SessionChannelTypeDataMicrophone};
     IHS_SessionFrame frame;
-    IHS_SessionChannelInitializeFrame(channel, &frame, IHS_SessionPacketTypeUnreliable, true, IHS_PACKET_ID_NEXT);
-    IHS_MutexLock(mic->sendLock);
-    uint16_t frameId = mic->nextFrameId++;
-    IHS_MutexUnlock(mic->sendLock);
-
-    // Body layout matches what ch_data.c:ReceivedFrame() expects on the inbound side:
-    // type byte + 12-byte data-frame header + payload.
+    IHS_SessionChannelInitializeFrame(&channel, &frame,
+        reliable ? IHS_SessionPacketTypeReliable : IHS_SessionPacketTypeUnreliable,
+        false, IHS_PACKET_ID_NEXT);
+    /* Input is bounded by the public producer. One frame can exceed one MTU. */
+    frame.body.maxCapacity = 0;
     IHS_BufferAppendUInt8(&frame.body, k_EStreamDataPacket);
     IHS_BufferAppendUInt16LE(&frame.body, frameId);
-    IHS_BufferAppendUInt32LE(&frame.body, 0); // frameTimestamp — Steam sends 0 for mic
-    IHS_BufferAppendUInt16LE(&frame.body, 0); // inputMark
-    IHS_BufferAppendUInt32LE(&frame.body, 0); // inputRecvTimestamp
-    IHS_BufferAppendMem(&frame.body, data, len);
-
-    // Ordinary unreliable delivery includes the official bounded NACK resend
-    // window; it is not reliable delivery until ACK. Never describe this path
-    // as having no retransmission merely because reliable_data is false.
-    bool ret = IHS_SessionChannelQueueFrame(channel, &frame, false);
+    IHS_BufferAppendUInt32LE(&frame.body, 0);
+    IHS_BufferAppendUInt16LE(&frame.body, 0);
+    IHS_BufferAppendUInt32LE(&frame.body, 0);
+    if (len)
+        IHS_BufferAppendMem(&frame.body, data, len);
+    bool sent = IHS_SessionChannelQueueFrame(&channel, &frame, reliable);
     IHS_BufferClear(&frame.body, true);
-    return ret;
+    return sent;
 }

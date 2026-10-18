@@ -24,6 +24,7 @@ void IHS_SessionClientStopStreaming(IHS_Session *s) {
         if (channel)
             IHS_SessionChannelRemove(s, channel->id);
     }
+    IHS_SessionMicrophoneClose(s, false);
     IHS_SessionNotifyDisconnected(s);
     IHS_HIDManagerCloseAll(s->hidManager);
     /* Official CNetworkStats scoring/persistence is a separate platform
