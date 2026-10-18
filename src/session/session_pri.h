@@ -40,8 +40,9 @@
 #include "protobuf/remoteplay.pb-c.h"
 
 /**
- * Connection phase. Advances monotonically from Unconnected to Connected; never goes
- * backwards within a single session lifetime (a re-connect requires a fresh session).
+ * Connection phase. Normal startup advances from Unconnected to Connected;
+ * transport/authentication failure returns to Unconnected during shutdown
+ * (a re-connect requires a fresh session).
  * Guards on the message-handling entry points use this to drop stale or replayed
  * packets that would otherwise re-trigger an earlier phase.
  *

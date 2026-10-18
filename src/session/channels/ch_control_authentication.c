@@ -33,6 +33,77 @@
 
 static void OnAuthenticationResponse(IHS_SessionChannel *channel, const CAuthenticationResponseMsg *message);
 
+/* Original proto2 response parser (Linux 3207d0, protocol reference §108):
+ * unknown enum values do not overwrite a prior known scalar. protobuf-c's
+ * final enum values cannot recover that ordering. This message is consumed
+ * locally; only its two scalar getters/presence bits need to be retained. */
+static bool AuthVarint(const uint8_t *data, size_t size, size_t *offset, uint64_t *value) {
+    *value = 0;
+    for (unsigned n = 0; n < 10 && *offset < size; ++n) {
+        uint8_t byte = data[(*offset)++];
+        *value |= (uint64_t)(byte & 127u) << (7u * n);
+        if (!(byte & 128u)) return true;
+    }
+    return false;
+}
+
+static bool AuthSkip(const uint8_t *data, size_t size, size_t *offset, uint32_t tag, unsigned depth) {
+    uint64_t value;
+    switch (tag & 7u) {
+    case 0: return AuthVarint(data, size, offset, &value);
+    case 1:
+        if (size - *offset < 8) return false;
+        *offset += 8;
+        return true;
+    case 2:
+        if (!AuthVarint(data, size, offset, &value) || value > size - *offset) return false;
+        *offset += (size_t)value;
+        return true;
+    case 3:
+        if (depth >= 100) return false;
+        while (*offset < size) {
+            if (!AuthVarint(data, size, offset, &value) || !value || value > UINT32_MAX) return false;
+            uint32_t nested = (uint32_t)value;
+            if (!(nested >> 3)) return false;
+            if ((nested & 7u) == 4) return (nested >> 3) == (tag >> 3);
+            if (!AuthSkip(data, size, offset, nested, depth + 1)) return false;
+        }
+        return false;
+    case 5:
+        if (size - *offset < 4) return false;
+        *offset += 4;
+        return true;
+    default: return false;
+    }
+}
+
+static bool ParseAuthResponse(const IHS_Buffer *payload, CAuthenticationResponseMsg *message) {
+    const uint8_t *data = IHS_BufferPointer(payload);
+    size_t size = payload->size, offset = 0;
+    while (offset < size) {
+        uint64_t value;
+        if (!AuthVarint(data, size, &offset, &value) || !value || value > UINT32_MAX) return false;
+        uint32_t tag = (uint32_t)value, field = tag >> 3;
+        if (!field) return false;
+        if ((tag & 7u) == 0 && (field == 1 || field == 2)) {
+            if (!AuthVarint(data, size, &offset, &value)) return false;
+            /* Original enum reads int32: discard high bits before checking
+             * its two known values. Unknown values retain the previous one. */
+            uint32_t scalar = (uint32_t)value;
+            if (scalar <= 1) {
+                if (field == 1) {
+                    message->has_result = true;
+                    message->result = (CAuthenticationResponseMsg__AuthenticationResult)scalar;
+                } else {
+                    message->has_version = true;
+                    message->version = (EStreamVersion)scalar;
+                }
+            }
+        } else if (!AuthSkip(data, size, &offset, tag, 0)) return false;
+    }
+    return true;
+}
+
 void IHS_SessionChannelControlRequestAuthentication(IHS_SessionChannel *channel) {
     IHS_Session *session = channel->session;
     if (session->state.connectionState >= IHS_SessionConnectionStateAuthenticating) {
@@ -61,14 +132,12 @@ void IHS_SessionChannelControlOnAuthentication(IHS_SessionChannel *channel, EStr
                                                IHS_Buffer *payload, const IHS_SessionPacketHeader *header) {
     IHS_UNUSED(header);
     assert(type == k_EStreamControlAuthenticationResponse);
-    CAuthenticationResponseMsg *message = cauthentication_response_msg__unpack(NULL, payload->size,
-                                                                               IHS_BufferPointer(payload));
-    if (message == NULL) {
+    CAuthenticationResponseMsg message = CAUTHENTICATION_RESPONSE_MSG__INIT;
+    if (!ParseAuthResponse(payload, &message)) {
         IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Control", "Malformed CAuthenticationResponseMsg");
         return;
     }
-    OnAuthenticationResponse(channel, message);
-    cauthentication_response_msg__free_unpacked(message, NULL);
+    OnAuthenticationResponse(channel, &message);
 }
 
 static void OnAuthenticationResponse(IHS_SessionChannel *channel, const CAuthenticationResponseMsg *message) {
@@ -77,8 +146,13 @@ static void OnAuthenticationResponse(IHS_SessionChannel *channel, const CAuthent
     if (session->state.connectionState != IHS_SessionConnectionStateAuthenticating) {
         return;
     }
-    if (!message->has_result || message->result != CAUTHENTICATION_RESPONSE_MSG__AUTHENTICATION_RESULT__SUCCEEDED) {
-        IHS_SessionLog(session, IHS_LogLevelError, "Session", "Failed to authenticate");
+    if (!message->has_version || message->version != k_EStreamVersionCurrent ||
+        message->result == CAUTHENTICATION_RESPONSE_MSG__AUTHENTICATION_RESULT__FAILED) {
+        IHS_SessionLog(session, IHS_LogLevelError, "Session", "Authentication or stream version rejected");
+        /* Stop on the RX owner without joining it from inside its handler.
+         * Existing finalization joins producers and releases the socket. */
+        IHS_SessionDisconnect(session);
+        IHS_SessionClientTransportClosed(session);
         return;
     }
     // Auth succeeded — the server will follow with NegotiationInit. Advance state so
