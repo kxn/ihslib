@@ -39,9 +39,6 @@ typedef struct IHS_AuthorizationState {
     char pin[16];
     uint32_t requestId;
     IHS_AuthorizationKeyExchange keyExchange;
-    uint8_t *lastAuthKey;
-    size_t lastAuthKeyLen;
-    ERemoteDeviceAuthorizationResult lastAuthResult;
     unsigned keyExchangeAttempts;
     bool terminal;
     bool timerFailed;
@@ -301,11 +298,15 @@ static void AuthorizationConfigureTicket(IHS_Client *client, IHS_AuthorizationSt
 static void AuthorizationKeyExchange(IHS_Client *client, IHS_AuthorizationState *state,
                                      IHS_TimerTask *task,
                                      const CMsgRemoteDeviceAuthorizationResponse *resp) {
+    IHS_AuthorizationCache *cache = &client->authorizationCache;
     size_t count = resp->auth_key.len;
-    bool cached = count == state->lastAuthKeyLen &&
-                  (!count || !memcmp(resp->auth_key.data, state->lastAuthKey, count));
+    IHS_BaseLock(&client->base);
+    bool cached = count == cache->keyLen &&
+                  (!count || !memcmp(resp->auth_key.data, cache->key, count));
+    ERemoteDeviceAuthorizationResult cachedResult = cache->result;
+    IHS_BaseUnlock(&client->base);
     if (cached) {
-        AuthorizationConfirm(client, state->host.address, state->lastAuthResult);
+        AuthorizationConfirm(client, state->host.address, cachedResult);
         return; /* Cached success confirms again but never advances twice. */
     }
     uint8_t *key = count ? malloc(count) : NULL;
@@ -322,15 +323,17 @@ static void AuthorizationKeyExchange(IHS_Client *client, IHS_AuthorizationState 
                                                    count, resp->device_token.data,
                                                    resp->device_token.len, client->base.deviceId,
                                                    secretKey);
-    free(state->lastAuthKey);
-    state->lastAuthKey = key;
-    state->lastAuthKeyLen = count;
-    state->lastAuthResult = ok ? k_ERemoteDeviceAuthorizationSuccess : k_ERemoteDeviceAuthorizationDenied;
+    IHS_BaseLock(&client->base);
+    free(cache->key);
+    cache->key = key;
+    cache->keyLen = count;
+    cache->result = ok ? k_ERemoteDeviceAuthorizationSuccess : k_ERemoteDeviceAuthorizationDenied;
+    IHS_BaseUnlock(&client->base);
     if (exhausted) {
         state->terminal = true;
         IHS_TimerTaskStop(task);
         AuthorizationSendCancel(client, &state->host);
-        AuthorizationConfirm(client, state->host.address, state->lastAuthResult);
+        AuthorizationConfirm(client, state->host.address, cache->result);
         if (client->callbacks.authorization && client->callbacks.authorization->failed)
             client->callbacks.authorization->failed(client, &state->host, IHS_AuthorizationDenied,
                                                     client->callbackContexts.authorization);
@@ -343,7 +346,7 @@ static void AuthorizationKeyExchange(IHS_Client *client, IHS_AuthorizationState 
                 secretKey, client->callbackContexts.authorization);
     }
     memset(secretKey, 0, sizeof(secretKey));
-    AuthorizationConfirm(client, state->host.address, state->lastAuthResult);
+    AuthorizationConfirm(client, state->host.address, cache->result);
     if (!ok)
         return;
     state->terminal = true;
@@ -356,7 +359,7 @@ static void AuthorizationKeyExchange(IHS_Client *client, IHS_AuthorizationState 
 static void AuthorizationRequestCleanup(void *data) {
     IHS_AuthorizationState *state = data;
     IHS_AuthorizationKeyExchangeClear(&state->keyExchange);
-    free(state->lastAuthKey);
+    /* Most-recent public auth_key/result outlive this private request material. */
     if (state->timerFailed && state->client->callbacks.authorization &&
         state->client->callbacks.authorization->failed)
         state->client->callbacks.authorization->failed(state->client, &state->host,

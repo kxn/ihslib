@@ -73,6 +73,7 @@ static IHS_BaseRunCallbacks ClientRunCallbacks = {
 IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config) {
     IHS_Client *client = malloc(sizeof(IHS_Client));
     memset(client, 0, sizeof(IHS_Client));
+    client->authorizationCache.result = k_ERemoteDeviceAuthorizationFailed;
     atomic_init(&client->deferAuthorization, false);
     IHS_BaseInit(&client->base, config, ClientRecvCallback, true);
     IHS_BaseSetRunCallbacks(&client->base, &ClientRunCallbacks, NULL);
@@ -147,6 +148,7 @@ void IHS_ClientDestroy(IHS_Client *client) {
                                client->authorizationQueue[index].message);
     }
     IHS_TimerDestroy(client->timers);
+    free(client->authorizationCache.key);
     IHS_ClientLog(client, IHS_LogLevelInfo, "Client", "Destroying client, bye!");
     IHS_BaseDestroy(&client->base);
     free(client);

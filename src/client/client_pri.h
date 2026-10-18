@@ -35,6 +35,14 @@
 typedef void (IHS_MessageCallback)(IHS_Client *client, const IHS_SocketAddress *address,
                                    CMsgRemoteClientBroadcastHeader *header, ProtobufCMessage *message);
 
+/* One most-recent key/result for the manager lifetime, not per request or host.
+ * Timer visitors serialize writers, Base protects inspection; free after timer join. */
+typedef struct IHS_AuthorizationCache {
+    uint8_t *key;
+    size_t keyLen;
+    ERemoteDeviceAuthorizationResult result;
+} IHS_AuthorizationCache;
+
 struct IHS_Client {
     IHS_Base base;
     struct {
@@ -45,6 +53,7 @@ struct IHS_Client {
     IHS_HostInfo lastLaunchHost;
     uint32_t lastLaunchId;
     bool lastLaunchHasTicket; /* Successful reply retains explicit-cancel ownership. */
+    IHS_AuthorizationCache authorizationCache;
     atomic_bool deferAuthorization;
     struct {
         IHS_SocketAddress address;

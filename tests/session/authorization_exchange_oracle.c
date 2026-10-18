@@ -13,6 +13,7 @@
 #include <time.h>
 #include <unistd.h>
 static atomic_uint admitted, derives, successes, failures, progress, persist_calls;
+static atomic_uint keypairs;
 static unsigned persist_at_confirm[64];
 static atomic_uint confirm_count;
 static atomic_int failure_result;
@@ -29,6 +30,8 @@ static unsigned tags[64], results[64], messages;
 static char bodies[64][1024];
 static struct sockaddr_in receiver;
 static int peer;
+static uint64_t response_host = 123;
+static unsigned successes_before_request, failures_before_request;
 int __real_clock_gettime(clockid_t, struct timespec *);
 int __wrap_clock_gettime(clockid_t id, struct timespec *t) {
     if (virtual_clock && id == CLOCK_MONOTONIC) {
@@ -45,6 +48,8 @@ static uint64_t millis(void) {
     return (uint64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 int __wrap_IHS_CryptoRandomBytes(uint8_t *out, size_t n) {
+    if (n == 32)
+        atomic_fetch_add(&keypairs, 1);
     for (size_t i = 0; i < n; ++i)
         out[i] = (uint8_t)i;
     return 0;
@@ -174,7 +179,8 @@ static void snapshot(IHS_Client *c) {
     drain(10);
     bool pending = IHS_TimerTaskVisitOwned(c->timers, &c->taskHandles.authorization, noop, NULL);
     uint64_t until = millis() + 2000;
-    while (pending && (atomic_load(&successes) || atomic_load(&failures))) {
+    while (pending && (atomic_load(&successes) > successes_before_request ||
+                       atomic_load(&failures) > failures_before_request)) {
         assert(millis() < until);
         poll(NULL, 0, 1);
         pending = IHS_TimerTaskVisitOwned(c->timers, &c->taskHandles.authorization, noop, NULL);
@@ -193,12 +199,16 @@ static void snapshot(IHS_Client *c) {
     unsigned count = atomic_load_explicit(&confirm_count, memory_order_acquire);
     for (unsigned n = 0; n < count; ++n)
         printf("%s%u", n ? "," : "", persist_at_confirm[n]);
-    puts("]}");
+    printf("],\"keypairs\":%u,\"cache\":\"", atomic_load(&keypairs));
+    IHS_BaseLock(&c->base);
+    hex(c->authorizationCache.key, c->authorizationCache.keyLen);
+    printf("\",\"cached_result\":%d}\n", (int)c->authorizationCache.result);
+    IHS_BaseUnlock(&c->base);
 }
 static void send_response(const uint8_t *body, size_t bytes) {
     CMsgRemoteClientBroadcastHeader h = CMSG_REMOTE_CLIENT_BROADCAST_HEADER__INIT;
     h.has_client_id = h.has_msg_type = true;
-    h.client_id = 123;
+    h.client_id = response_host;
     h.msg_type = k_ERemoteDeviceAuthorizationResponse;
     IHS_Buffer wire = IHS_BUFFER_INIT(1024, 0);
     IHS_BufferAppendMem(&wire, test_discovery_magic, 8);
@@ -234,8 +244,9 @@ int main(int argc, char **argv) {
     IHS_ClientAuthorizationCallbacks cb = {
         .success = success, .failed = failed, .progress = progressed, .persist = persisted};
     IHS_ClientSetAuthorizationCallbacks(c, &cb, NULL);
-    bool deferred =
-        !strcmp(argv[1], "pump") || !strcmp(argv[1], "drop") || !strcmp(argv[1], "queue_full");
+    bool lifetime = !strcmp(argv[1], "lifetime") || !strcmp(argv[1], "lifetime_pump");
+    bool deferred = !strcmp(argv[1], "pump") || !strcmp(argv[1], "drop") ||
+                    !strcmp(argv[1], "queue_full") || !strcmp(argv[1], "lifetime_pump");
     if (deferred)
         IHS_ClientSetAuthorizationDeferred(c, true);
     bool ready = false;
@@ -291,8 +302,21 @@ int main(int argc, char **argv) {
             drain(due ? 2000 : 25);
             snapshot(c);
         }
-    } else if (!strcmp(argv[1], "normal") || deferred) {
+    } else if (!strcmp(argv[1], "normal") || deferred || lifetime) {
+        unsigned responses = 0;
         for (int j = 2; j < argc; ++j) {
+            if (lifetime && argv[j][0] == '@') {
+                IHS_ClientAuthorizationCancel(c);
+                snapshot(c);
+                response_host = strtoull(argv[j] + 1, NULL, 10);
+                host.clientId = response_host;
+                successes_before_request = atomic_load(&successes);
+                failures_before_request = atomic_load(&failures);
+                assert(IHS_ClientAuthorizationRequest(c, &host, "0042"));
+                drain(2000);
+                snapshot(c);
+                continue;
+            }
             size_t bytes = strlen(argv[j]) / 2;
             assert(bytes < 2048 && !(strlen(argv[j]) & 1));
             uint8_t data[2048];
@@ -326,12 +350,13 @@ int main(int argc, char **argv) {
                     assert(millis() < until);
                     poll(NULL, 0, 1);
                 }
-                assert(atomic_load(&admitted) == (unsigned)(j - 2));
+                assert(atomic_load(&admitted) == responses);
                 if (!strcmp(argv[1], "drop"))
                     break;
                 assert(IHS_ClientPumpAuthorization(c, 1) == 1);
             }
-            while (atomic_load(&admitted) < (unsigned)(j - 1)) {
+            ++responses;
+            while (atomic_load(&admitted) < responses) {
                 assert(millis() < until);
                 poll(NULL, 0, 1);
             }

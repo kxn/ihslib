@@ -295,7 +295,8 @@ void IHS_ClientStreamingCallback(IHS_Client *client, const IHS_SocketAddress *ad
                                  CMsgRemoteClientBroadcastHeader *header,
                                  ProtobufCMessage *message) {
     if (!message)
-        return; /* An invalid protobuf never reaches the original handler. */
+        return; /* Local guard. Official BProcess has parse-error fallbacks;
+                 * envelope/admission equivalence remains separate (RE §130). */
     if (header->msg_type == k_ERemoteDeviceStreamingResponse) {
         CMsgRemoteDeviceStreamingResponse *resp = (void *)message;
         IHS_HostInfo knownHost;
