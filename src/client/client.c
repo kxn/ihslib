@@ -133,10 +133,23 @@ size_t IHS_ClientPumpAuthorization(IHS_Client *client, size_t budget) {
         --client->authorizationCount;
         IHS_BaseUnlock(&client->base);
         /* Match BaseWorker's dispatch order: no Base lock around timer visitors. */
-        client->privCallbacks.authorization(client, &address, header, message);
+        if (header->msg_type == k_ERemoteDeviceAuthorizationResponse ||
+            header->msg_type == k_ERemoteDeviceAuthorizationConfirmed ||
+            header->msg_type == k_ERemoteDeviceAuthorizationRequest ||
+            header->msg_type == k_ERemoteDeviceAuthorizationCancelRequest)
+            client->privCallbacks.authorization(client, &address, header, message);
+        else
+            client->privCallbacks.streaming(client, &address, header, message);
         FreeAuthorizationFrame(header, message);
         ++dispatched;
     }
+    IHS_BaseLock(&client->base);
+    bool drained = client->authorizationCount == 0;
+    IHS_BaseUnlock(&client->base);
+    /* Original Update processes inbound packets before due sends. A bounded
+     * pump which leaves queued work must not retry an already-obsolete phase. */
+    if (budget && drained && atomic_load_explicit(&client->deferAuthorization, memory_order_acquire))
+        IHS_ClientStreamingUpdate(client);
     return dispatched;
 }
 
@@ -295,6 +308,12 @@ static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
     case k_ERemoteDeviceAuthorizationResponse:
     case k_ERemoteDeviceAuthorizationCancelRequest:
     case k_ERemoteDeviceAuthorizationConfirmed:
+    case k_ERemoteDeviceStreamingRequest:
+    case k_ERemoteDeviceStreamingResponse:
+    case k_ERemoteDeviceStreamingProgress:
+    case k_ERemoteDeviceStreamingCancelRequest:
+    case k_ERemoteDeviceProofRequest:
+    case k_ERemoteDeviceProofResponse:
         if (atomic_load_explicit(&client->deferAuthorization, memory_order_acquire)) {
             IHS_BaseLock(base);
             if (client->authorizationCount < 32) {
@@ -310,15 +329,11 @@ static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
             }
             return; /* Queue owns header/message; a full queue drops and frees them. */
         }
-        client->privCallbacks.authorization(client, address, header, message);
-        break;
-    case k_ERemoteDeviceStreamingRequest:
-    case k_ERemoteDeviceStreamingResponse:
-    case k_ERemoteDeviceStreamingProgress:
-    case k_ERemoteDeviceStreamingCancelRequest:
-    case k_ERemoteDeviceProofRequest:
-    case k_ERemoteDeviceProofResponse:
-        client->privCallbacks.streaming(client, address, header, message);
+        if (type == k_ERemoteDeviceAuthorizationResponse || type == k_ERemoteDeviceAuthorizationConfirmed ||
+            type == k_ERemoteDeviceAuthorizationRequest || type == k_ERemoteDeviceAuthorizationCancelRequest)
+            client->privCallbacks.authorization(client, address, header, message);
+        else
+            client->privCallbacks.streaming(client, address, header, message);
         break;
     case k_ERemoteClientBroadcastMsgPairingState:
     case k_ERemoteClientBroadcastMsgPairingExclusivity:

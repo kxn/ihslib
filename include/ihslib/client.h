@@ -128,7 +128,7 @@ typedef struct IHS_ClientAuthorizationCallbacks {
 
     /** Attempt host-key persistence after selecting the new secret and before
      * AuthorizationConfirmed. Failure is an application diagnostic, not a
-     * different protocol result. Never destroy the client from this callback. */
+     * different protocol result. Do not destroy/cancel/replace a request from this observer; enqueue actions. */
     void (*persist)(IHS_Client *client, const IHS_HostInfo *host, uint64_t steamId,
                     const uint8_t secretKey[32], void *context);
 } IHS_ClientAuthorizationCallbacks;
@@ -141,6 +141,14 @@ typedef struct IHS_ClientStreamingCallbacks {
 
     void (*failed)(IHS_Client *client, const IHS_HostInfo *host, IHS_StreamingResult result,
                    void *context);
+    /** Same stream owner enters authorization (pin is four digits), or resumes
+     * streaming/accepts credentials (pin=NULL). Pairing and connect PIN differ.
+     * Callbacks may enqueue actions; do not synchronously replace/cancel/destroy
+     * this owner from authorization or persist observers. */
+    void (*authorization)(IHS_Client *, const IHS_HostInfo *, const char *pin,
+                          uint64_t steamId, void *context);
+    void (*authorizationFailed)(IHS_Client *, const IHS_HostInfo *, IHS_AuthorizationResult,
+                                void *context);
 } IHS_ClientStreamingCallbacks;
 
 IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config);
@@ -177,7 +185,7 @@ void IHS_ClientSetAuthorizationCallbacks(IHS_Client *client,
                                          void *context);
 
 /** Configure before starting requests. Deferred delivery serializes authorization
- * callbacks with an application's own state/storage actor. The RX worker queues
+ * and streaming handshake callbacks with an application's state/storage actor. The RX worker queues
  * bounded owned messages; Pump releases them after dispatch. Keep the client
  * alive through each Pump, and stop/join RX before destroying it. */
 void IHS_ClientSetAuthorizationDeferred(IHS_Client *client, bool deferred);
@@ -220,10 +228,11 @@ bool IHS_ClientAuthorizationCancel(IHS_Client *client);
  * - Streaming functions
  * ---------------------------------------------------- */
 
-/** Request ordinary streaming or a network-test ticket. Waiting/Busy retries
- * every second until a terminal response or explicit StreamingCancel; this
- * API does not invent a silent-host deadline. Unauthorized is returned to
- * the caller's separate pairing UI. Credentials are borrowed during success.
+/** Request ordinary streaming or a network-test ticket. Waiting/Busy stream
+ * sends use time()+1; the same owner's authorization sends use time()+3 until
+ * a terminal response or explicit StreamingCancel. This
+ * API does not invent a silent-host deadline. Unauthorized enters same-owner
+ * authorization; callbacks report the pairing code and resume. Credentials are borrowed during success.
  * A repeated request to the same host while waiting is ignored. A new request
  * replaces ticket ownership without sending Cancel; explicit Cancel is separate. */
 bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
@@ -234,5 +243,6 @@ bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
 bool IHS_ClientStreamingCancel(IHS_Client *client);
 
 /** Stop waiting after consuming the ticket. Keep the ID available for explicit
- * Cancel; replacement Request retires it without cancellation (RE §124). */
+ * Cancel; replacement Request retires it without cancellation (RE §124).
+ * Handshake ownership remains alive for late authorization/Proof messages. */
 void IHS_ClientStreamingEstablished(IHS_Client *client);

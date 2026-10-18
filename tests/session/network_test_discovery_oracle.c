@@ -12,7 +12,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-static unsigned successes, failures, progress;
+static unsigned successes, failures, progress, auth_prompts;
 static int failure_result;
 static uint8_t received_key[128];
 static size_t key_size;
@@ -29,6 +29,7 @@ int __wrap_clock_gettime(clockid_t clock, struct timespec *time) {
     }
     return __real_clock_gettime(clock, time);
 }
+time_t __wrap_time(time_t *out) { time_t n = virtual_clock ? atomic_load(&virtual_now)/1000 : 1000; if(out)*out=n; return n; }
 uint32_t __wrap_IHS_CryptoRandomUInt32(void) {
     return 17;
 }
@@ -61,17 +62,17 @@ static void hex(const uint8_t *p, size_t count) {
         printf("%02x", p[i]);
 }
 static void completed_send(IHS_TimerTask *task, void *context) {
-    unsigned *runs = context;
-    *runs = (unsigned)IHS_TimerTaskGetRunCount(task);
+    (void)task; (void)context;
 }
-static void wait_send_return(IHS_Client *client, unsigned sends) {
-    unsigned runs = 0;
-    /* Receiving the datagram precedes TaskExecute publishing nextExecution.
-     * Hold the owner lock before advancing the artificial clock, so a slow
-     * sanitizer/OS schedule cannot move that pending callback's deadline. */
+static void wait_send_return(IHS_Client *client) {
+    /* A visitor acquires the owner lock after the send callback returns. Poll
+     * run-count is not send-count now that deadlines are wall-clock predicates. */
     assert(IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.streaming,
-                                  completed_send, &runs));
-    assert(runs == sends);
+                                  completed_send, NULL));
+}
+static void authorization(IHS_Client *c, const IHS_HostInfo *h, const char *pin, uint64_t id, void *ctx) {
+    (void)c; (void)h; (void)id; (void)ctx;
+    if(pin) { assert(strlen(pin)==4); ++auth_prompts; }
 }
 int main(int argc, char **argv) {
     assert(argc >= 4 && argc <= 6);
@@ -103,10 +104,10 @@ int main(int argc, char **argv) {
             poll(NULL, 0, 1);
     }
     assert(ready);
-    IHS_HostInfo host = {.clientId = 123, .address.port = ntohs(peer.sin_port)};
+    IHS_HostInfo host = {.clientId = 123, .universe = IHS_SteamUniversePublic, .address.port = ntohs(peer.sin_port)};
     assert(IHS_IPAddressFromString(&host.address.ip, "127.0.0.1"));
     IHS_ClientStreamingCallbacks cb = {
-        .success = success, .failed = failure, .progress = progressed};
+        .success = success, .failed = failure, .progress = progressed, .authorization = authorization};
     if (argc == 6) {
         cb.success = NULL;
         if (atoi(argv[5]) == 2)
@@ -134,7 +135,7 @@ int main(int argc, char **argv) {
     if (virtual_clock) {
         const uint64_t offsets[] = {0, 1000, 1000, 2000, 15000, 300000, 85400000};
         unsigned sends = 1;
-        wait_send_return(c, sends);
+        wait_send_return(c);
         printf("{\"sends\":[");
         for (unsigned i = 0; i < 7; ++i) {
             atomic_store(&virtual_now, 1000025 + offsets[i]);
@@ -145,7 +146,7 @@ int main(int argc, char **argv) {
             if (ready) {
                 assert(recv(fd, request, sizeof(request), 0) > 16);
                 ++sends;
-                wait_send_return(c, sends);
+                wait_send_return(c);
             }
             printf("%s%u", i ? "," : "", sends);
         }
@@ -205,7 +206,7 @@ int main(int argc, char **argv) {
            "\"key\":\"",
            successes, failures, failure_result, progress, received_address.port);
     hex(received_key, key_size);
-    printf("\",\"configured\":%s,\"hmac\":\"", configured ? "true" : "false");
+    printf("\",\"authorizing\":%s,\"configured\":%s,\"hmac\":\"", auth_prompts ? "true" : "false", configured ? "true" : "false");
     if (configured)
         hex(hmac, hmac_count);
     printf("\",\"cancels\":[");

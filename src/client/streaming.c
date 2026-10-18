@@ -25,6 +25,9 @@
 
 #include "client_pri.h"
 #include "crypto.h"
+#include "authorization_flow.h"
+#include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -33,6 +36,9 @@ typedef struct IHS_StreamingState {
     IHS_HostInfo host;
     IHS_StreamingRequest request;
     uint32_t requestId;
+    IHS_AuthorizationFlow authorization;
+    bool authorizing, ticket;
+    int64_t nextSendWallSecond;
     bool terminal;
     bool timerFailed;
     uint8_t encryptedPin[3 * IHS_CRYPTO_AES_BLOCK_SIZE];
@@ -42,6 +48,39 @@ typedef struct IHS_StreamingState {
 static uint64_t StreamingRequestTimer(int runCount, void *context);
 
 static void StreamingRequestCleanup(void *context);
+static bool SendStreamingRequest(IHS_StreamingState *state);
+static bool SendCurrentRequest(IHS_StreamingState *state);
+
+static void SetAuthorizing(IHS_StreamingState *state, bool value) {
+    state->authorizing = value;
+    IHS_BaseLock(&state->client->base);
+    state->client->lastLaunchAuthorizing = value;
+    IHS_BaseUnlock(&state->client->base);
+}
+static void ClearLaunch(IHS_StreamingState *state) {
+    IHS_Client *client = state->client;
+    IHS_BaseLock(&client->base);
+    if (client->lastLaunchId == state->requestId) {
+        client->lastLaunchId = 0;
+        client->lastLaunchHasTicket = client->lastLaunchAuthorizing = false;
+    }
+    IHS_BaseUnlock(&client->base);
+}
+static void NotifyAuthorization(IHS_StreamingState *state, const char *pin, uint64_t steamId) {
+    IHS_Client *client = state->client;
+    if (client->callbacks.streaming && client->callbacks.streaming->authorization)
+        client->callbacks.streaming->authorization(client, &state->host, pin, steamId,
+                                                    client->callbackContexts.streaming);
+}
+static void NotifyAuthorizationFailure(IHS_Client *client, const IHS_HostInfo *host,
+                                        IHS_AuthorizationResult result) {
+    if (client->callbacks.streaming && client->callbacks.streaming->authorizationFailed)
+        client->callbacks.streaming->authorizationFailed(client, host, result,
+                                                          client->callbackContexts.streaming);
+    else if (client->callbacks.streaming && client->callbacks.streaming->failed)
+        client->callbacks.streaming->failed(client, host, IHS_StreamingFailed,
+                                             client->callbackContexts.streaming);
+}
 
 static void SendCancel(IHS_Client *client, const IHS_HostInfo *host, uint32_t id) {
     CMsgRemoteDeviceStreamingCancelRequest msg = CMSG_REMOTE_DEVICE_STREAMING_CANCEL_REQUEST__INIT;
@@ -64,7 +103,7 @@ static void RetireForReplacement(IHS_Client *client) {
         client->canceled[i].requestId = client->lastLaunchId;
     }
     client->lastLaunchId = 0;
-    client->lastLaunchHasTicket = false;
+    client->lastLaunchHasTicket = client->lastLaunchAuthorizing = false;
     IHS_BaseUnlock(&client->base);
 }
 bool IHS_ClientStreamingCancel(IHS_Client *client) {
@@ -72,6 +111,7 @@ bool IHS_ClientStreamingCancel(IHS_Client *client) {
     IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.streaming, CancelVisit, client);
     IHS_BaseLock(&client->base);
     uint32_t id = client->lastLaunchId;
+    bool authorizing = client->lastLaunchAuthorizing;
     IHS_HostInfo host = client->lastLaunchHost;
     if (id) {
         unsigned i = client->canceledNext++ % 8;
@@ -79,9 +119,12 @@ bool IHS_ClientStreamingCancel(IHS_Client *client) {
         client->canceled[i].requestId = id;
         client->lastLaunchId = 0;
     }
-    client->lastLaunchHasTicket = false;
+    client->lastLaunchHasTicket = client->lastLaunchAuthorizing = false;
     IHS_BaseUnlock(&client->base);
-    if (id) SendCancel(client, &host, id);
+    if (id) {
+        if (authorizing) IHS_ClientAuthorizationSendCancel(client, &host);
+        else SendCancel(client, &host, id);
+    }
     return id != 0;
 }
 
@@ -89,13 +132,14 @@ bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
                                 const IHS_StreamingRequest *request) {
     IHS_BaseLock(&client->base);
     bool sameWaitingHost = client->lastLaunchId && !client->lastLaunchHasTicket &&
+                           !client->lastLaunchAuthorizing &&
                            client->lastLaunchHost.clientId == host->clientId;
     IHS_BaseUnlock(&client->base);
     if (sameWaitingHost)
         return true;
     IHS_ClientLog(client, IHS_LogLevelInfo, "Client", "Begin sending streaming request to host %s",
                   host->hostname);
-    IHS_StreamingState *state = malloc(sizeof(IHS_StreamingState));
+    IHS_StreamingState *state = calloc(1, sizeof(IHS_StreamingState));
     if (!state)
         return false;
     state->terminal = state->timerFailed = false;
@@ -115,8 +159,23 @@ bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
     IHS_BaseLock(&client->base);
     client->lastLaunchId = state->requestId;
     client->lastLaunchHost = *host;
-    client->lastLaunchHasTicket = false;
+    client->lastLaunchHasTicket = client->lastLaunchAuthorizing = false;
     IHS_BaseUnlock(&client->base);
+    uint32_t random;
+    do {
+        if (IHS_CryptoRandomBytes((uint8_t *)&random, sizeof(random)) != 0) {
+            ClearLaunch(state);
+            free(state);
+            return false;
+        }
+    } while (random % 10000 == 0);
+    char pairingPin[5];
+    snprintf(pairingPin, sizeof(pairingPin), "%04u", (unsigned)(random % 10000));
+    if (!IHS_ClientAuthorizationFlowInit(&state->authorization, pairingPin)) {
+        ClearLaunch(state);
+        free(state);
+        return false;
+    }
     /* Official BSetStreamingPIN encrypts once when creating the transaction.
      * Retries and Unauthorized resumption reuse that blob (protocol RE §129). */
     state->encryptedPinLen = 0;
@@ -130,6 +189,7 @@ bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
         memset(secret, 0, sizeof(secret));
         if (result != 0) {
             IHS_ClientStreamingCancel(client);
+            IHS_AuthorizationKeyExchangeClear(&state->authorization.keyExchange);
             free(state);
             return false;
         }
@@ -139,9 +199,10 @@ bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
         IHS_BaseLock(&client->base);
         if (client->lastLaunchId == state->requestId) {
             client->lastLaunchId = 0;
-            client->lastLaunchHasTicket = false;
+            client->lastLaunchHasTicket = client->lastLaunchAuthorizing = false;
         }
         IHS_BaseUnlock(&client->base);
+        IHS_AuthorizationKeyExchangeClear(&state->authorization.keyExchange);
         free(state);
         return false;
     }
@@ -162,6 +223,7 @@ static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
     ProtobufCMessage *message = responseContext->message;
     IHS_StreamingState *state = IHS_TimerTaskGetContext(timer);
     if (state->terminal || !IHS_ClientMatchesHost(&state->host, responseContext->address, header)) return;
+    if (state->ticket && header->msg_type != k_ERemoteDeviceProofRequest) return;
     uint32_t id;
     switch (header->msg_type) {
     case k_ERemoteDeviceProofRequest: {
@@ -189,9 +251,12 @@ static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
         uint8_t encrypted[1024];
         response.response.data = encrypted;
         response.response.len = sizeof(encrypted);
+        uint8_t secret[32];
+        IHS_BaseGetSecretKey(&client->base, secret);
         int encryptRet = IHS_CryptoSymmetricEncrypt(
-            request->challenge.data, request->challenge.len, client->base.secretKey,
-            sizeof(client->base.secretKey), response.response.data, &response.response.len);
+            request->challenge.data, request->challenge.len, secret,
+            sizeof(secret), response.response.data, &response.response.len);
+        memset(secret, 0, sizeof(secret));
         if (encryptRet != 0) {
             // Mirrors CServerManager::HandleStreamingProofRequest (0x1e1ad0):
             // log and drop, let the server retry / time out. Sending the response
@@ -226,65 +291,64 @@ static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
                                                       client->callbackContexts.streaming);
             }
             return;
+        case k_ERemoteDeviceStreamingUnauthorized: {
+            bool entering = !state->authorizing;
+            SetAuthorizing(state, true);
+            if (!SendCurrentRequest(state)) {
+                IHS_TimerTaskStop(timer);
+                return;
+            }
+            if (entering) NotifyAuthorization(state, state->authorization.pin, 0);
+            return;
+        }
         case k_ERemoteDeviceStreamingSuccess: {
-            state->terminal = true;
             ProtobufCBinaryData enc = response->encrypted_session_key;
             uint8_t key[128];
             size_t keyLen = sizeof(key);
+            uint8_t secret[32];
+            IHS_BaseGetSecretKey(&client->base, secret);
             int decryptRet = IHS_CryptoSymmetricDecrypt(
-                enc.data, enc.len, client->base.secretKey,
-                sizeof(client->base.secretKey), key, &keyLen);
+                enc.data, enc.len, secret, sizeof(secret), key, &keyLen);
+            memset(secret, 0, sizeof(secret));
             if (decryptRet != 0) {
-                IHS_ClientLog(client, IHS_LogLevelWarn, "Client",
-                              "Session key decrypt failed for host %s: %d",
-                              state->host.hostname, decryptRet);
-                SendCancel(client, &state->host, state->requestId);
-                IHS_BaseLock(&client->base);
-                if (client->lastLaunchId == state->requestId) {
-                    client->lastLaunchId = 0;
-                    client->lastLaunchHasTicket = false;
-                }
-                IHS_BaseUnlock(&client->base);
+                state->terminal = true;
+                IHS_TimerTaskStop(timer);
+                /* Invalid credentials stop the current protocol phase. */
+                if (state->authorizing) IHS_ClientAuthorizationSendCancel(client, &state->host);
+                else SendCancel(client, &state->host, state->requestId);
+                ClearLaunch(state);
                 if (client->callbacks.streaming && client->callbacks.streaming->failed)
-                    client->callbacks.streaming->failed(
-                        client, &state->host, IHS_StreamingFailed,
-                        client->callbackContexts.streaming);
-            } else {
-                IHS_BaseLock(&client->base);
-                if (client->lastLaunchId == state->requestId)
-                    client->lastLaunchHasTicket = true;
-                IHS_BaseUnlock(&client->base);
-                if (client->callbacks.streaming && client->callbacks.streaming->success) {
-                    IHS_SocketAddress streamingAddress = {state->host.address.ip, response->port};
-                    client->callbacks.streaming->success(client, &state->host, &streamingAddress,
-                                                         key, keyLen,
+                    client->callbacks.streaming->failed(client, &state->host, IHS_StreamingFailed,
                                                          client->callbackContexts.streaming);
-                }
+                return;
             }
-            break;
+            bool wasAuthorizing = state->authorizing;
+            SetAuthorizing(state, false);
+            state->ticket = true;
+            IHS_BaseLock(&client->base);
+            client->lastLaunchHasTicket = true;
+            IHS_BaseUnlock(&client->base);
+            if (wasAuthorizing) NotifyAuthorization(state, NULL, 0);
+            /* Authorization notification may enqueue work but must not replace
+             * this owner synchronously; see the callback contract. */
+            if (client->callbacks.streaming && client->callbacks.streaming->success) {
+                IHS_SocketAddress streamingAddress = {state->host.address.ip, response->port};
+                client->callbacks.streaming->success(client, &state->host, &streamingAddress,
+                                                     key, keyLen, client->callbackContexts.streaming);
+            }
+            return;
         }
         default:
             state->terminal = true;
-            /* Unauthorized is handed to the caller's separate pairing UI.
-             * All other terminal errors follow the original cancel path. */
-            if (response->result != k_ERemoteDeviceStreamingUnauthorized)
-                SendCancel(client, &state->host, state->requestId);
-            IHS_BaseLock(&client->base);
-            if (client->lastLaunchId == state->requestId) {
-                client->lastLaunchId = 0;
-                client->lastLaunchHasTicket = false;
-            }
-            IHS_BaseUnlock(&client->base);
-            IHS_ClientLog(client, IHS_LogLevelWarn, "Client", "Streaming request failed: host %s",
-                          state->host.hostname);
-            if (client->callbacks.streaming && client->callbacks.streaming->failed) {
-                IHS_StreamingResult result = (IHS_StreamingResult)response->result;
-                client->callbacks.streaming->failed(client, &state->host, result,
-                                                    client->callbackContexts.streaming);
-            }
-            break;
+            IHS_TimerTaskStop(timer);
+            if (state->authorizing) IHS_ClientAuthorizationSendCancel(client, &state->host);
+            else SendCancel(client, &state->host, state->requestId);
+            ClearLaunch(state);
+            if (client->callbacks.streaming && client->callbacks.streaming->failed)
+                client->callbacks.streaming->failed(client, &state->host,
+                    (IHS_StreamingResult)response->result, client->callbackContexts.streaming);
+            return;
         }
-        IHS_TimerTaskStop(timer);
         break;
     }
     default:
@@ -330,9 +394,7 @@ void IHS_ClientStreamingCallback(IHS_Client *client, const IHS_SocketAddress *ad
                             &context);
 }
 
-static uint64_t StreamingRequestTimer(int runCount, void *context) {
-    (void)runCount;
-    IHS_StreamingState *state = context;
+static bool SendStreamingRequest(IHS_StreamingState *state) {
     IHS_Client *client = state->client;
     IHS_HostInfo host = state->host;
     IHS_StreamingRequest request = state->request;
@@ -392,17 +454,7 @@ static uint64_t StreamingRequestTimer(int runCount, void *context) {
     IHS_BaseGetSecretKey(&client->base, secret);
     bool tokenReady = IHS_ClientCreateDeviceToken(client, secret, token);
     memset(secret, 0, sizeof(secret));
-    if (!tokenReady) {
-        state->terminal = state->timerFailed = true;
-        SendCancel(client, &state->host, state->requestId);
-        IHS_BaseLock(&client->base);
-        if (client->lastLaunchId == state->requestId) {
-            client->lastLaunchId = 0;
-            client->lastLaunchHasTicket = false;
-        }
-        IHS_BaseUnlock(&client->base);
-        return 0;
-    }
+    if (!tokenReady) return false;
     message.has_device_token = true;
     message.device_token.data = token;
     message.device_token.len = sizeof(token);
@@ -435,11 +487,12 @@ static uint64_t StreamingRequestTimer(int runCount, void *context) {
                   "Sending streaming request packet to host %s", host.hostname);
     IHS_ClientSend(client, host.address, k_ERemoteDeviceStreamingRequest,
                    (ProtobufCMessage *)&message);
-    return 1000; /* Official nextSend = time() + 1, while waiting (RE §120). */
+    return true;
 }
 
 static void StreamingRequestCleanup(void *context) {
     IHS_StreamingState *state = context;
+    IHS_AuthorizationKeyExchangeClear(&state->authorization.keyExchange);
     if (state->timerFailed && state->client->callbacks.streaming &&
         state->client->callbacks.streaming->failed)
         state->client->callbacks.streaming->failed(state->client, &state->host,
@@ -448,11 +501,87 @@ static void StreamingRequestCleanup(void *context) {
 }
 
 void IHS_ClientStreamingEstablished(IHS_Client *client) {
-    IHS_TimerTaskStopOwned(client->timers, &client->taskHandles.streaming);
     IHS_BaseLock(&client->base);
     /* The successful manager state keeps its ID until explicit Stop or a
      * replacement Start. Matching InProgress must not become a stale cancel. */
     if (client->lastLaunchId)
         client->lastLaunchHasTicket = true;
     IHS_BaseUnlock(&client->base);
+}
+
+/* Sender failure policy is shared by immediate responses and due Updates.
+ * No failure callback runs on the timer hot path: cleanup observes retirement. */
+static bool SendCurrentRequest(IHS_StreamingState *state) {
+    IHS_Client *client = state->client;
+    bool ok = state->authorizing
+        ? IHS_ClientSendAuthorizationRequest(client, &state->host, &state->authorization, state->requestId)
+        : SendStreamingRequest(state);
+    if (!ok) {
+        state->terminal = state->timerFailed = true;
+        if (state->authorizing) IHS_ClientAuthorizationSendCancel(client, &state->host);
+        else SendCancel(client, &state->host, state->requestId);
+        ClearLaunch(state);
+        return false;
+    }
+    int64_t sent = (int64_t)time(NULL);
+    state->nextSendWallSecond = (int64_t)((uint64_t)sent + (state->authorizing ? 3u : 1u));
+    return true;
+}
+static uint64_t StreamingRequestTimer(int runCount, void *context) {
+    (void)runCount;
+    IHS_StreamingState *state = context;
+    if (state->terminal) return 0;
+    if (atomic_load_explicit(&state->client->deferAuthorization, memory_order_acquire)) return 1;
+    if (state->ticket || (int64_t)time(NULL) < state->nextSendWallSecond) return 1;
+    return SendCurrentRequest(state) ? 1 : 0;
+}
+static void StreamingUpdateVisit(IHS_TimerTask *task, void *context) {
+    (void)context;
+    IHS_StreamingState *state = IHS_TimerTaskGetContext(task);
+    if (!state->terminal && !state->ticket && (int64_t)time(NULL) >= state->nextSendWallSecond)
+        if (!SendCurrentRequest(state)) IHS_TimerTaskStop(task);
+}
+void IHS_ClientStreamingUpdate(IHS_Client *client) {
+    IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.streaming, StreamingUpdateVisit, NULL);
+}
+
+static void StreamingAuthorizationVisit(IHS_TimerTask *task, void *context) {
+    StreamingResponseContext *response = context;
+    IHS_Client *client = response->client;
+    IHS_StreamingState *state = IHS_TimerTaskGetContext(task);
+    if (response->header->msg_type != k_ERemoteDeviceAuthorizationResponse || !response->message) return;
+    CMsgRemoteDeviceAuthorizationResponse *resp = (void *)response->message;
+    if (!IHS_ClientMatchesHost(&state->host, response->address, response->header)) return;
+    if (state->terminal || state->ticket || !state->authorizing) {
+        if (resp->has_auth_key) IHS_ClientAuthorizationConfirm(client, *response->address, k_ERemoteDeviceAuthorizationCanceled);
+        return;
+    }
+    IHS_AuthorizationExchangeOutcome outcome = IHS_AuthorizationExchangeAccepted;
+    if (resp->result == k_ERemoteDeviceAuthorizationSuccess && resp->has_auth_key) {
+        outcome = IHS_ClientAuthorizationExchange(client, &state->host, &state->authorization, resp);
+        if (outcome == IHS_AuthorizationExchangeWaiting) return;
+    } else if (resp->result == k_ERemoteDeviceAuthorizationInProgress) return;
+    if (resp->result != k_ERemoteDeviceAuthorizationSuccess ||
+        outcome == IHS_AuthorizationExchangeExhausted || outcome == IHS_AuthorizationExchangeResourceFailure) {
+        state->terminal = true;
+        IHS_TimerTaskStop(task);
+        if (outcome != IHS_AuthorizationExchangeExhausted) IHS_ClientAuthorizationSendCancel(client, &state->host);
+        ClearLaunch(state);
+        IHS_AuthorizationResult result = outcome == IHS_AuthorizationExchangeExhausted ? IHS_AuthorizationDenied :
+            outcome == IHS_AuthorizationExchangeResourceFailure ? IHS_AuthorizationFailed : (IHS_AuthorizationResult)resp->result;
+        NotifyAuthorizationFailure(client, &state->host, result);
+        return;
+    }
+    SetAuthorizing(state, false);
+    if (!SendCurrentRequest(state)) {
+        IHS_TimerTaskStop(task);
+        return;
+    }
+    NotifyAuthorization(state, NULL, resp->steamid);
+}
+bool IHS_ClientStreamingAuthorizationCallback(IHS_Client *client, const IHS_SocketAddress *address,
+        CMsgRemoteClientBroadcastHeader *header, ProtobufCMessage *message) {
+    StreamingResponseContext context = {client, header, message, address};
+    return IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.streaming,
+                                   StreamingAuthorizationVisit, &context);
 }

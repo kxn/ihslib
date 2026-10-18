@@ -52,6 +52,7 @@ struct IHS_Client {
     unsigned canceledNext;
     IHS_HostInfo lastLaunchHost;
     uint32_t lastLaunchId;
+    bool lastLaunchAuthorizing;
     bool lastLaunchHasTicket; /* Successful reply retains explicit-cancel ownership. */
     IHS_AuthorizationCache authorizationCache;
     atomic_bool deferAuthorization;
@@ -117,3 +118,7 @@ static inline bool IHS_ClientMatchesHost(const IHS_HostInfo *host,
         header->has_client_id && header->client_id == host->clientId &&
         (!host->instanceId || !header->has_instance_id || header->instance_id == host->instanceId);
 }
+
+bool IHS_ClientStreamingAuthorizationCallback(IHS_Client *, const IHS_SocketAddress *,
+        CMsgRemoteClientBroadcastHeader *, ProtobufCMessage *);
+void IHS_ClientStreamingUpdate(IHS_Client *);

@@ -25,6 +25,7 @@ int __wrap_clock_gettime(clockid_t id, struct timespec *t) {
     }
     return __real_clock_gettime(id, t);
 }
+time_t __wrap_time(time_t *out) { time_t n=atomic_load(&tick)/1000; if(out)*out=n; return n; }
 uint32_t __wrap_IHS_CryptoRandomUInt32(void) {
     return 17;
 }

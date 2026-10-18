@@ -11,6 +11,15 @@ ihs_add_test(video_control test_video_control.c)
 target_link_libraries(ihstest_video_control PRIVATE ihs-test-session)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ihs-auto-authorization-oracle auto_authorization_oracle.c)
+    target_include_directories(ihs-auto-authorization-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-auto-authorization-oracle PRIVATE ihslib)
+    target_compile_options(ihs-auto-authorization-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-auto-authorization-oracle PRIVATE -Wl,--wrap=time
+        -Wl,--wrap=IHS_CryptoRandomBytes -Wl,--wrap=IHS_CryptoRandomUInt32
+        -Wl,--wrap=IHS_CryptoKeyExchange -Wl,--wrap=IHS_CryptoSymmetricEncrypt
+        -Wl,--wrap=IHS_CryptoRSAEncrypt -Wl,--wrap=IHS_ClientSend)
+
     add_executable(ihs-device-token-oracle device_token_oracle.c)
     target_include_directories(ihs-device-token-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-device-token-oracle PRIVATE ihslib)
@@ -23,7 +32,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(ihs-streaming-pin-oracle PRIVATE ihslib)
     target_compile_options(ihs-streaming-pin-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
     target_link_options(ihs-streaming-pin-oracle PRIVATE -Wl,--wrap=IHS_CryptoRandomUInt32
-        -Wl,--wrap=IHS_CryptoSymmetricEncrypt -Wl,--wrap=clock_gettime)
+        -Wl,--wrap=IHS_CryptoSymmetricEncrypt -Wl,--wrap=clock_gettime -Wl,--wrap=time)
     add_executable(ihs-authorization-exchange-oracle authorization_exchange_oracle.c)
     target_include_directories(ihs-authorization-exchange-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-authorization-exchange-oracle PRIVATE ihslib)
@@ -40,7 +49,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_include_directories(ihs-streaming-transaction-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-streaming-transaction-oracle PRIVATE ihslib)
     target_compile_options(ihs-streaming-transaction-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
-    target_link_options(ihs-streaming-transaction-oracle PRIVATE -Wl,--wrap=IHS_CryptoRandomUInt32)
+    target_link_options(ihs-streaming-transaction-oracle PRIVATE -Wl,--wrap=IHS_CryptoRandomUInt32 -Wl,--wrap=time)
     add_executable(ihs-network-test-connect-oracle network_test_connect_oracle.c)
     target_include_directories(ihs-network-test-connect-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-network-test-connect-oracle PRIVATE ihs-test-session ihslib)
@@ -52,7 +61,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(ihs-network-test-discovery-oracle PRIVATE ihslib)
     target_compile_options(ihs-network-test-discovery-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
     target_link_options(ihs-network-test-discovery-oracle PRIVATE -Wl,--wrap=IHS_CryptoRandomUInt32
-        -Wl,--wrap=clock_gettime)
+        -Wl,--wrap=clock_gettime -Wl,--wrap=time)
     ihs_add_test(network_test_lifetime test_network_test_lifetime.c)
     target_link_libraries(ihstest_network_test_lifetime PRIVATE ihs-test-session)
     target_link_options(ihstest_network_test_lifetime PRIVATE -Wl,--wrap=realloc

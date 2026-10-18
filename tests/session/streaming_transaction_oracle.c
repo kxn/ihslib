@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
+time_t __wrap_time(time_t *out) { if(out)*out=1000; return 1000; }
 static unsigned random_index, message_count;
 static struct {
     unsigned tag, id, target;
