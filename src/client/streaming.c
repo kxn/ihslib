@@ -50,6 +50,20 @@ static void CancelVisit(IHS_TimerTask *task, void *context) {
     IHS_Client *client = context;
     IHS_TimerTaskStopOwned(client->timers, &client->taskHandles.streaming);
 }
+/* Stop waiting before changing ownership, but send no cancellation: original
+ * StartStreaming replaces state5(other host)/state6 directly (RE §124). */
+static void RetireForReplacement(IHS_Client *client) {
+    IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.streaming, CancelVisit, client);
+    IHS_BaseLock(&client->base);
+    if (client->lastLaunchId) {
+        unsigned i = client->canceledNext++ % 8;
+        client->canceled[i].host = client->lastLaunchHost;
+        client->canceled[i].requestId = client->lastLaunchId;
+    }
+    client->lastLaunchId = 0;
+    client->lastLaunchHasTicket = false;
+    IHS_BaseUnlock(&client->base);
+}
 bool IHS_ClientStreamingCancel(IHS_Client *client) {
     /* Visit locks out callbacks/retries before retiring the transaction. */
     IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.streaming, CancelVisit, client);
@@ -62,6 +76,7 @@ bool IHS_ClientStreamingCancel(IHS_Client *client) {
         client->canceled[i].requestId = id;
         client->lastLaunchId = 0;
     }
+    client->lastLaunchHasTicket = false;
     IHS_BaseUnlock(&client->base);
     if (id) SendCancel(client, &host, id);
     return id != 0;
@@ -69,6 +84,12 @@ bool IHS_ClientStreamingCancel(IHS_Client *client) {
 
 bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
                                 const IHS_StreamingRequest *request) {
+    IHS_BaseLock(&client->base);
+    bool sameWaitingHost = client->lastLaunchId && !client->lastLaunchHasTicket &&
+                           client->lastLaunchHost.clientId == host->clientId;
+    IHS_BaseUnlock(&client->base);
+    if (sameWaitingHost)
+        return true;
     IHS_ClientLog(client, IHS_LogLevelInfo, "Client", "Begin sending streaming request to host %s",
                   host->hostname);
     IHS_StreamingState *state = malloc(sizeof(IHS_StreamingState));
@@ -78,7 +99,7 @@ bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
     state->client = client;
     state->host = *host;
     state->request = *request;
-    IHS_ClientStreamingCancel(client);
+    RetireForReplacement(client);
     bool collision;
     do {
         state->requestId = IHS_CryptoRandomUInt32();
@@ -91,9 +112,16 @@ bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
     IHS_BaseLock(&client->base);
     client->lastLaunchId = state->requestId;
     client->lastLaunchHost = *host;
+    client->lastLaunchHasTicket = false;
     IHS_BaseUnlock(&client->base);
     if (!IHS_TimerTaskStartOwned(client->timers, &client->taskHandles.streaming,
                                  StreamingRequestTimer, StreamingRequestCleanup, 25, state)) {
+        IHS_BaseLock(&client->base);
+        if (client->lastLaunchId == state->requestId) {
+            client->lastLaunchId = 0;
+            client->lastLaunchHasTicket = false;
+        }
+        IHS_BaseUnlock(&client->base);
         free(state);
         return false;
     }
@@ -192,18 +220,26 @@ static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
                               state->host.hostname, decryptRet);
                 SendCancel(client, &state->host, state->requestId);
                 IHS_BaseLock(&client->base);
-                if (client->lastLaunchId == state->requestId)
+                if (client->lastLaunchId == state->requestId) {
                     client->lastLaunchId = 0;
+                    client->lastLaunchHasTicket = false;
+                }
                 IHS_BaseUnlock(&client->base);
                 if (client->callbacks.streaming && client->callbacks.streaming->failed)
                     client->callbacks.streaming->failed(
                         client, &state->host, IHS_StreamingFailed,
                         client->callbackContexts.streaming);
-            } else if (client->callbacks.streaming && client->callbacks.streaming->success) {
-                IHS_SocketAddress streamingAddress = {state->host.address.ip, response->port};
-                client->callbacks.streaming->success(client, &state->host, &streamingAddress,
-                                                     key, keyLen,
-                                                     client->callbackContexts.streaming);
+            } else {
+                IHS_BaseLock(&client->base);
+                if (client->lastLaunchId == state->requestId)
+                    client->lastLaunchHasTicket = true;
+                IHS_BaseUnlock(&client->base);
+                if (client->callbacks.streaming && client->callbacks.streaming->success) {
+                    IHS_SocketAddress streamingAddress = {state->host.address.ip, response->port};
+                    client->callbacks.streaming->success(client, &state->host, &streamingAddress,
+                                                         key, keyLen,
+                                                         client->callbackContexts.streaming);
+                }
             }
             break;
         }
@@ -214,8 +250,10 @@ static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
             if (response->result != k_ERemoteDeviceStreamingUnauthorized)
                 SendCancel(client, &state->host, state->requestId);
             IHS_BaseLock(&client->base);
-            if (client->lastLaunchId == state->requestId)
+            if (client->lastLaunchId == state->requestId) {
                 client->lastLaunchId = 0;
+                client->lastLaunchHasTicket = false;
+            }
             IHS_BaseUnlock(&client->base);
             IHS_ClientLog(client, IHS_LogLevelWarn, "Client", "Streaming request failed: host %s",
                           state->host.hostname);
@@ -371,6 +409,9 @@ static void StreamingRequestCleanup(void *context) {
 void IHS_ClientStreamingEstablished(IHS_Client *client) {
     IHS_TimerTaskStopOwned(client->timers, &client->taskHandles.streaming);
     IHS_BaseLock(&client->base);
-    client->lastLaunchId = 0;
+    /* The successful manager state keeps its ID until explicit Stop or a
+     * replacement Start. Matching InProgress must not become a stale cancel. */
+    if (client->lastLaunchId)
+        client->lastLaunchHasTicket = true;
     IHS_BaseUnlock(&client->base);
 }

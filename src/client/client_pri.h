@@ -44,6 +44,7 @@ struct IHS_Client {
     unsigned canceledNext;
     IHS_HostInfo lastLaunchHost;
     uint32_t lastLaunchId;
+    bool lastLaunchHasTicket; /* Successful reply retains explicit-cancel ownership. */
     IHS_Timer *timers;
     IHS_TimerTask *discoveryTimer;
     uint32_t discoveryInterval;
