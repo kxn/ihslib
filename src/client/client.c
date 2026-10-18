@@ -73,6 +73,7 @@ static IHS_BaseRunCallbacks ClientRunCallbacks = {
 IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config) {
     IHS_Client *client = malloc(sizeof(IHS_Client));
     memset(client, 0, sizeof(IHS_Client));
+    atomic_init(&client->deferAuthorization, false);
     IHS_BaseInit(&client->base, config, ClientRecvCallback, true);
     IHS_BaseSetRunCallbacks(&client->base, &ClientRunCallbacks, NULL);
     client->timers = IHS_TimerCreate();
@@ -105,7 +106,46 @@ void IHS_ClientThreadedJoin(IHS_Client *client) {
     IHS_BaseWaitWorker(&client->base);
 }
 
+static void FreeAuthorizationFrame(CMsgRemoteClientBroadcastHeader *header, ProtobufCMessage *message) {
+    cmsg_remote_client_broadcast_header__free_unpacked(header, NULL);
+    if (message) protobuf_c_message_free_unpacked(message, NULL);
+}
+
+void IHS_ClientSetAuthorizationDeferred(IHS_Client *client, bool deferred) {
+    atomic_store_explicit(&client->deferAuthorization, deferred, memory_order_release);
+}
+
+size_t IHS_ClientPumpAuthorization(IHS_Client *client, size_t budget) {
+    if (!client) return 0;
+    size_t dispatched = 0;
+    while (dispatched < budget) {
+        IHS_BaseLock(&client->base);
+        if (!client->authorizationCount) {
+            IHS_BaseUnlock(&client->base);
+            break;
+        }
+        unsigned index = client->authorizationHead;
+        IHS_SocketAddress address = client->authorizationQueue[index].address;
+        CMsgRemoteClientBroadcastHeader *header = client->authorizationQueue[index].header;
+        ProtobufCMessage *message = client->authorizationQueue[index].message;
+        client->authorizationHead = (index + 1) % 32;
+        --client->authorizationCount;
+        IHS_BaseUnlock(&client->base);
+        /* Match BaseWorker's dispatch order: no Base lock around timer visitors. */
+        client->privCallbacks.authorization(client, &address, header, message);
+        FreeAuthorizationFrame(header, message);
+        ++dispatched;
+    }
+    return dispatched;
+}
+
 void IHS_ClientDestroy(IHS_Client *client) {
+    /* The caller has joined RX; queued callbacks must not outlive their client. */
+    for (unsigned n = 0; n < client->authorizationCount; ++n) {
+        unsigned index = (client->authorizationHead + n) % 32;
+        FreeAuthorizationFrame(client->authorizationQueue[index].header,
+                               client->authorizationQueue[index].message);
+    }
     IHS_TimerDestroy(client->timers);
     IHS_ClientLog(client, IHS_LogLevelInfo, "Client", "Destroying client, bye!");
     IHS_BaseDestroy(&client->base);
@@ -241,6 +281,21 @@ static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
     case k_ERemoteDeviceAuthorizationResponse:
     case k_ERemoteDeviceAuthorizationCancelRequest:
     case k_ERemoteDeviceAuthorizationConfirmed:
+        if (atomic_load_explicit(&client->deferAuthorization, memory_order_acquire)) {
+            IHS_BaseLock(base);
+            if (client->authorizationCount < 32) {
+                unsigned index = (client->authorizationHead + client->authorizationCount++) % 32;
+                client->authorizationQueue[index].address = *address;
+                client->authorizationQueue[index].header = header;
+                client->authorizationQueue[index].message = message;
+                IHS_BaseUnlock(base);
+            } else {
+                ++client->authorizationDropped;
+                IHS_BaseUnlock(base);
+                FreeAuthorizationFrame(header, message);
+            }
+            return; /* Queue owns header/message; a full queue drops and frees them. */
+        }
         client->privCallbacks.authorization(client, address, header, message);
         break;
     case k_ERemoteDeviceStreamingRequest:

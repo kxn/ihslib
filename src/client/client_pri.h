@@ -45,6 +45,13 @@ struct IHS_Client {
     IHS_HostInfo lastLaunchHost;
     uint32_t lastLaunchId;
     bool lastLaunchHasTicket; /* Successful reply retains explicit-cancel ownership. */
+    atomic_bool deferAuthorization;
+    struct {
+        IHS_SocketAddress address;
+        CMsgRemoteClientBroadcastHeader *header;
+        ProtobufCMessage *message;
+    } authorizationQueue[32]; /* Local memory budget, not a Steam protocol limit. */
+    unsigned authorizationHead, authorizationCount, authorizationDropped;
     IHS_Timer *timers;
     IHS_TimerTask *discoveryTimer;
     uint32_t discoveryInterval;

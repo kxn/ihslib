@@ -336,8 +336,12 @@ static void AuthorizationKeyExchange(IHS_Client *client, IHS_AuthorizationState 
                                                     client->callbackContexts.authorization);
         return;
     }
-    if (ok)
+    if (ok) {
         IHS_BaseSetSecretKey(&client->base, secretKey);
+        if (client->callbacks.authorization && client->callbacks.authorization->persist)
+            client->callbacks.authorization->persist(client, &state->host, resp->steamid,
+                secretKey, client->callbackContexts.authorization);
+    }
     memset(secretKey, 0, sizeof(secretKey));
     AuthorizationConfirm(client, state->host.address, state->lastAuthResult);
     if (!ok)

@@ -125,6 +125,12 @@ typedef struct IHS_ClientAuthorizationCallbacks {
 
     void (*failed)(IHS_Client *client, const IHS_HostInfo *host, IHS_AuthorizationResult result,
                    void *context);
+
+    /** Attempt host-key persistence after selecting the new secret and before
+     * AuthorizationConfirmed. Failure is an application diagnostic, not a
+     * different protocol result. Never destroy the client from this callback. */
+    void (*persist)(IHS_Client *client, const IHS_HostInfo *host, uint64_t steamId,
+                    const uint8_t secretKey[32], void *context);
 } IHS_ClientAuthorizationCallbacks;
 
 typedef struct IHS_ClientStreamingCallbacks {
@@ -169,6 +175,13 @@ void IHS_ClientSetDiscoveryCallbacks(IHS_Client *client,
 void IHS_ClientSetAuthorizationCallbacks(IHS_Client *client,
                                          const IHS_ClientAuthorizationCallbacks *callbacks,
                                          void *context);
+
+/** Configure before starting requests. Deferred delivery serializes authorization
+ * callbacks with an application's own state/storage actor. The RX worker queues
+ * bounded owned messages; Pump releases them after dispatch. Keep the client
+ * alive through each Pump, and stop/join RX before destroying it. */
+void IHS_ClientSetAuthorizationDeferred(IHS_Client *client, bool deferred);
+size_t IHS_ClientPumpAuthorization(IHS_Client *client, size_t budget);
 
 void IHS_ClientSetStreamingCallbacks(IHS_Client *client,
                                      const IHS_ClientStreamingCallbacks *callbacks, void *context);

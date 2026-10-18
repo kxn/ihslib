@@ -34,6 +34,8 @@ typedef struct IHS_StreamingState {
     IHS_StreamingRequest request;
     uint32_t requestId;
     bool terminal;
+    uint8_t encryptedPin[3 * IHS_CRYPTO_AES_BLOCK_SIZE];
+    size_t encryptedPinLen;
 } IHS_StreamingState;
 
 static uint64_t StreamingRequestTimer(int runCount, void *context);
@@ -114,6 +116,23 @@ bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
     client->lastLaunchHost = *host;
     client->lastLaunchHasTicket = false;
     IHS_BaseUnlock(&client->base);
+    /* Official BSetStreamingPIN encrypts once when creating the transaction.
+     * Retries and Unauthorized resumption reuse that blob (protocol RE §129). */
+    state->encryptedPinLen = 0;
+    size_t pinLen = strnlen(request->pin, sizeof(request->pin));
+    if (pinLen) {
+        uint8_t secret[32];
+        IHS_BaseGetSecretKey(&client->base, secret);
+        state->encryptedPinLen = sizeof(state->encryptedPin);
+        int result = IHS_CryptoSymmetricEncrypt((const uint8_t *)request->pin, pinLen,
+            secret, sizeof(secret), state->encryptedPin, &state->encryptedPinLen);
+        memset(secret, 0, sizeof(secret));
+        if (result != 0) {
+            IHS_ClientStreamingCancel(client);
+            free(state);
+            return false;
+        }
+    }
     if (!IHS_TimerTaskStartOwned(client->timers, &client->taskHandles.streaming,
                                  StreamingRequestTimer, StreamingRequestCleanup, 25, state)) {
         IHS_BaseLock(&client->base);
@@ -323,8 +342,8 @@ static uint64_t StreamingRequestTimer(int runCount, void *context) {
     message.client_id = host.clientId;
 
     message.has_pin = true;
-    message.pin.len = strnlen(request.pin, sizeof(request.pin));
-    message.pin.data = (uint8_t *)request.pin;
+    message.pin.len = state->encryptedPinLen;
+    message.pin.data = state->encryptedPin;
 
     message.has_maximum_resolution_x = request.maxResolution.x > 0;
     message.maximum_resolution_x = request.maxResolution.x;
