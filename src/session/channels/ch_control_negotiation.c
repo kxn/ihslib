@@ -282,8 +282,8 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
     EStreamAudioCodec supportedAudioCodecs[] = {k_EStreamAudioCodecRaw, k_EStreamAudioCodecOpus};
     clientCaps.supported_audio_codecs = supportedAudioCodecs;
     clientCaps.n_supported_audio_codecs = clientConfig.enable_audio_uncompressed ? 1 : 2;
-    if (hevcAvailable)
-        PROTOBUF_C_SET_VALUE(clientCaps, supports_video_hevc_obsolete, true);
+    if (caps->hasLegacyHevcCapability)
+        PROTOBUF_C_SET_VALUE(clientCaps, supports_video_hevc_obsolete, caps->legacyHevcCapability);
 
     CNegotiationSetConfigMsg response = CNEGOTIATION_SET_CONFIG_MSG__INIT;
     response.config = &config;

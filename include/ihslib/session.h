@@ -87,6 +87,10 @@ typedef struct IHS_StreamClientCapabilities {
      * H264 is required by this library. Unset keeps legacy caller behavior. */
     bool hasVideoDecoderCapabilities;
     bool supportsVideoHevc;
+    /* Independent legacy protobuf capability, not inferred from decoder
+     * availability. Unset omits the obsolete field (protocol reference §109). */
+    bool hasLegacyHevcCapability;
+    bool legacyHevcCapability;
 } IHS_StreamClientCapabilities;
 
 /** Set before Connect or creation of data channels. Strings are copied; the

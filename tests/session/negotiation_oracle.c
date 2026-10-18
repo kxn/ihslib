@@ -70,12 +70,19 @@ static IHS_Buffer bytes(const char *encoded) {
     return b;
 }
 int main(int argc, char **argv) {
-    assert(argc == 3);
+    assert(argc == 4);
     IHS_Init();
     session = IHS_TestSessionCreate();
     IHS_TimerTaskStopImmediate(session->retransmission.timer);
     IHS_StreamClientCapabilities caps = {.hasVideoDecoderCapabilities = true,
                                          .supportsVideoHevc = atoi(argv[2]) != 0};
+    IHS_Buffer inputCaps = bytes(argv[3]);
+    CStreamingClientCaps *initialCaps = cstreaming_client_caps__unpack(NULL, inputCaps.size, IHS_BufferPointer(&inputCaps));
+    assert(initialCaps);
+    caps.hasLegacyHevcCapability = initialCaps->has_supports_video_hevc_obsolete;
+    caps.legacyHevcCapability = initialCaps->supports_video_hevc_obsolete;
+    cstreaming_client_caps__free_unpacked(initialCaps, NULL);
+    IHS_BufferClear(&inputCaps, true);
     assert(IHS_SessionSetClientCapabilities(session, &caps));
     IHS_Buffer initial = bytes(argv[1]);
     assert(IHS_SessionSetStreamingClientConfig(session, IHS_BufferPointer(&initial), initial.size,
