@@ -398,6 +398,15 @@ const IHS_SessionInfo *IHS_SessionGetInfo(const IHS_Session *session) {
     return &session->info;
 }
 
+bool IHS_SessionIsConnectionPending(const IHS_Session *session) {
+    if (!session || atomic_load(&session->transport.closeRequested) ||
+        atomic_load(&session->transport.shutdown))
+        return false;
+    IHS_SessionConnectionState phase = atomic_load(&session->state.connectionState);
+    return phase == IHS_SessionConnectionStateUnconnected ||
+           phase == IHS_SessionConnectionStateConnecting;
+}
+
 void IHS_SessionGetReliabilityStats(IHS_Session *session, IHS_SessionReliabilityStats *stats) {
     if (stats == NULL) {
         return;

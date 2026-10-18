@@ -332,6 +332,11 @@ void IHS_SessionSetLogFunction(IHS_Session *session, IHS_LogFunction *logFunctio
 
 const IHS_SessionInfo *IHS_SessionGetInfo(const IHS_Session *session);
 
+/** Whether the first transport Connected has not yet been accepted. Includes
+ * a newly created session before its worker starts. False in handshake/auth,
+ * negotiation/streaming and stop/disconnect. Caller must own the session. */
+bool IHS_SessionIsConnectionPending(const IHS_Session *session);
+
 void IHS_SessionGetReliabilityStats(IHS_Session *session,
                                     IHS_SessionReliabilityStats *stats);
 
