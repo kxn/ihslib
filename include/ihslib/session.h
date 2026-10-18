@@ -333,3 +333,18 @@ const IHS_SessionInfo *IHS_SessionGetInfo(const IHS_Session *session);
 
 void IHS_SessionGetReliabilityStats(IHS_Session *session,
                                     IHS_SessionReliabilityStats *stats);
+
+/** Video-frame network statistics, separate from transport packet loss.
+ * Final means/result are populated by stream stopping. Empty windows and
+ * equal window weighting follow the official client (protocol reference §117).
+ * Reading does not change FEC, transport or reporting. Thread-safe. */
+typedef struct IHS_SessionMediaNetworkStats {
+    uint16_t nextFrameId;
+    uint32_t frameSpan, windowFrameSpan, windowReceived, windows;
+    float windowLossPercent, windowMeanNetworkMs, windowDeviationMs;
+    float lossPercent, meanNetworkMs, deviationMs;
+    unsigned result; /* Official 0/1/2 classification; not an adaptive policy. */
+    bool valid; /* False after local allocation failure; Start resets it. */
+    bool finalized;
+} IHS_SessionMediaNetworkStats;
+void IHS_SessionGetMediaNetworkStats(IHS_Session *, IHS_SessionMediaNetworkStats *);

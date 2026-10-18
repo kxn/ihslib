@@ -27,7 +27,10 @@ void IHS_SessionClientStopStreaming(IHS_Session *s) {
     IHS_SessionMicrophoneClose(s, false);
     IHS_SessionNotifyDisconnected(s);
     IHS_HIDManagerCloseAll(s->hidManager);
-    /* Official CNetworkStats scoring/persistence is a separate platform
-     * consumer; no final protocol report is invented here. */
+    IHS_BaseLock(&s->base);
+    IHS_MediaNetworkStatsStop(&s->mediaNetworkStats);
+    IHS_BaseUnlock(&s->base);
+    /* Source statistics-file persistence is a separate platform consumer;
+     * stopping does not invent a final protocol report. */
     s->state.connectionState = IHS_SessionConnectionStateUnconnected;
 }

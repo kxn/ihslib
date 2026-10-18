@@ -94,6 +94,7 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig,
     session->pendingData = IHS_QueueCreate(sizeof(QueuedPacket));
     session->timers = IHS_TimerCreate();
     IHS_StreamClockInit(&session->clock);
+    IHS_MediaNetworkStatsInit(&session->mediaNetworkStats);
     IHS_OutgoingInit(session, IHS_SessionPacketTimestamp());
     IHS_RetransmissionInit(&session->retransmission, session);
     session->hidManager = IHS_HIDManagerCreate();
@@ -194,6 +195,7 @@ void IHS_SessionDestroy(IHS_Session *session) {
     IHS_NetworkSampleQueueDestroy(&session->networkRates[1].queue);
     IHS_NetworkSampleQueueDestroy(&session->networkPackets.queue);
     IHS_NetworkSampleQueueDestroy(&session->networkVideo.queue);
+    IHS_MediaNetworkStatsDestroy(&session->mediaNetworkStats);
     if (session->clientConfig)
         cstreaming_client_config__free_unpacked(session->clientConfig, NULL);
     if (session->negotiatedConfig)

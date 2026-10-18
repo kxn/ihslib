@@ -326,6 +326,11 @@ void IHS_SessionChannelControlUpdateStage(IHS_SessionChannel *channel, uint32_t 
         control->frameEventsTimestamp = now;
         IHS_SendAdmission result = IHS_SessionChannelControlCompleteLocked(control);
         IHS_MutexUnlock(control->sendLock);
+        /* Source Complete5 -> CNetworkStats::Start -> player notification.
+         * Release the producer lock before taking Base. */
+        IHS_BaseLock(&session->base);
+        IHS_MediaNetworkStatsStart(&session->mediaNetworkStats);
+        IHS_BaseUnlock(&session->base);
         /* Closing may stop workers that also send control. Never do so while
          * holding the producer lock, including the local allocation-failure path. */
         if (result == IHS_SendAdmissionLocalFailure && !session->transport.shutdown &&

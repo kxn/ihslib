@@ -20,9 +20,14 @@ void IHS_SessionChannelDataPrepareFrame(IHS_SessionChannel *channel, IHS_Session
     uint32_t sent = frame->header.sendTimestamp - frame->mediaOffset;
     uint32_t input = h.inputRecvTimestamp ? h.inputRecvTimestamp - frame->mediaOffset : 0;
     uint32_t size = (uint32_t)(body.size - IHS_SESSION_DATA_FRAME_HEADER_SIZE);
-    if (channel->type == IHS_SessionChannelTypeDataVideo)
+    if (channel->type == IHS_SessionChannelTypeDataVideo) {
+        IHS_BaseLock(&channel->session->base);
+        IHS_MediaNetworkStatsRecord(&channel->session->mediaNetworkStats, h.id, sent,
+                                     frame->header.receiveTimestamp);
+        IHS_BaseUnlock(&channel->session->base);
         IHS_SessionRecordNetworkVideo(channel->session, sent, frame->header.receiveBegin,
                                       frame->header.receiveTimestamp, h.id, size);
+    }
     if (channel->session->frameStats)
         IHS_FrameStatsRecordMediaReceived(channel->session->frameStats,
                                           channel->type == IHS_SessionChannelTypeDataAudio

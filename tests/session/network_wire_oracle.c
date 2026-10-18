@@ -10,6 +10,7 @@
 #include "session/reliable.h"
 #include "session/channels/video/ch_data_video.h"
 #include "test_session.h"
+#include "media_network_snapshot.h"
 #include <assert.h>
 #include <errno.h>
 #include <stdio.h>
@@ -22,7 +23,7 @@ static bool receiving, sending;
 static unsigned resultCode, entryCount, writeCount, entries[512];
 static bool reportMetadata, lossMode, videoMode, cycleMode, networkMode, deadlineMode, admissionMode, earlyMode;
 static unsigned admitted[256], admittedCount;
-static bool earlyClosing, clockMode;
+static bool earlyClosing, clockMode, qualityMode;
 static char *acceptedClock[32], *decodedClock[32];
 static unsigned acceptedClockCount, decodedClockCount;
 static IHS_SessionChannelData mediaStorage, *media = &mediaStorage;
@@ -364,6 +365,7 @@ static void report(void) {
     }
     for (unsigned i = 0; i < frameCount; ++i) free(frames[i].body);
     frameCount = 0;
+    if (qualityMode) { printf(",\"quality\":"); quality_report(session); }
     printf("}\n");
     entryCount = writeCount = 0;
 }
@@ -382,7 +384,8 @@ int main(int argc, char **argv) {
     earlyClosing = argc == 6 && !strcmp(argv[5], "early-closing");
     earlyMode = clockMode || earlyClosing || (argc == 6 && !strcmp(argv[5], "early"));
     admissionMode = earlyMode || (argc == 6 && !strcmp(argv[5], "admission"));
-    videoMode = admissionMode || (argc == 6 && !strcmp(argv[5], "video"));
+    qualityMode = argc == 6 && !strcmp(argv[5], "quality");
+    videoMode = qualityMode || admissionMode || (argc == 6 && !strcmp(argv[5], "video"));
     deadlineMode = argc == 6 && !strcmp(argv[5], "deadline");
     networkMode = deadlineMode || (argc == 6 && !strcmp(argv[5], "network"));
     cycleMode = networkMode || (argc == 6 && !strcmp(argv[5], "cycle"));
@@ -420,6 +423,11 @@ int main(int argc, char **argv) {
     char line[8192];
     while (fgets(line, sizeof(line), stdin)) {
         unsigned type, ch, crc, source, dest, size, bad;
+        if (qualityMode && (line[0] == 'Z' || line[0] == 'E')) {
+            if (line[0] == 'Z') IHS_MediaNetworkStatsStart(&session->mediaNetworkStats);
+            else assert(IHS_MediaNetworkStatsStop(&session->mediaNetworkStats));
+            report(); continue;
+        }
         if (clockMode && line[0] == 'V') {
             unsigned id;
             assert(sscanf(line, "V %u %u", &id, &now) == 2);

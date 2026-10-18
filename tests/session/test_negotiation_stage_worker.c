@@ -143,6 +143,9 @@ static void onConnected(IHS_Session *session, void *ctx) {
     (void)ctx;
     assert(pthread_equal(pthread_self(), receiver));
     assert(!atomic_exchange(&connected, true));
+    IHS_SessionMediaNetworkStats stats;
+    IHS_SessionGetMediaNetworkStats(s, &stats);
+    assert(stats.valid && !stats.finalized && !stats.frameSpan && !stats.windows);
     assert(s->state.connectionState == IHS_SessionConnectionStateConnected);
 }
 static bool endBatch;
@@ -173,6 +176,9 @@ int main(void) {
                 atomic_store(&done, false);
                 phase = 0;
                 s = IHS_TestSessionCreate();
+                /* Starting must reset prior data before connected callback. */
+                assert(IHS_MediaNetworkStatsRecord(&s->mediaNetworkStats, 12, 1000, 1100));
+                assert(IHS_MediaNetworkStatsStop(&s->mediaNetworkStats));
                 s->outgoing.rate[0] = s->outgoing.rate[1] = 0;
                 const IHS_StreamSessionCallbacks callbacks = {.connected = onConnected};
                 IHS_SessionSetSessionCallbacks(s, &callbacks, NULL);
