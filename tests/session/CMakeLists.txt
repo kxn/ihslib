@@ -417,3 +417,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         -Wl,--wrap=IHS_SessionChannelDataAudioCreate -Wl,--wrap=IHS_SessionUnreliableSetDelay
         -Wl,--wrap=IHS_SessionDrainPendingData -Wl,--wrap=IHS_SessionChannelDataReceiveReliableFrame)
 endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ihs-microphone-schedule-oracle microphone_schedule_oracle.c)
+    target_include_directories(ihs-microphone-schedule-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-microphone-schedule-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-microphone-schedule-oracle PRIVATE -UNDEBUG)
+    target_link_options(ihs-microphone-schedule-oracle PRIVATE -Wl,--wrap=IHS_BaseSend
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_SessionFrameEncrypt)
+endif()
