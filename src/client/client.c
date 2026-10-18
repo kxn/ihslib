@@ -277,9 +277,14 @@ static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
         IHS_BaseLog(base, IHS_LogLevelDebug, "Client", "Malformed broadcast header");
         return;
     }
+    /* Fixed official LAN BProcess rejects zero/default identity before dispatch. */
+    if (!header->has_client_id || !header->client_id) {
+        cmsg_remote_client_broadcast_header__free_unpacked(header, NULL);
+        return;
+    }
     IHS_BufferOffsetBy(data, (int)header_size);
     IHS_BufferOffsetBy(data, (int)IHS_ReadUInt32LE(IHS_BufferPointer(data), &payload_size));
-    if (payload_size > data->size) {
+    if (payload_size != data->size) {
         cmsg_remote_client_broadcast_header__free_unpacked(header, NULL);
         return;
     }
@@ -296,6 +301,10 @@ static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
         descriptor
             ? protobuf_c_message_unpack(descriptor, NULL, payload_size, IHS_BufferPointer(data))
             : NULL;
+    if (type == k_ERemoteDeviceProofRequest && !message) {
+        cmsg_remote_client_broadcast_header__free_unpacked(header, NULL);
+        return;
+    }
     IHS_Client *client = (IHS_Client *)base;
     switch (type) {
     case k_ERemoteClientBroadcastMsgDiscovery:

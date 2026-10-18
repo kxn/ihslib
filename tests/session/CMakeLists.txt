@@ -18,7 +18,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(ihs-auto-authorization-oracle PRIVATE -Wl,--wrap=time
         -Wl,--wrap=IHS_CryptoRandomBytes -Wl,--wrap=IHS_CryptoRandomUInt32
         -Wl,--wrap=IHS_CryptoKeyExchange -Wl,--wrap=IHS_CryptoSymmetricEncrypt
-        -Wl,--wrap=IHS_CryptoRSAEncrypt -Wl,--wrap=IHS_ClientSend)
+        -Wl,--wrap=IHS_CryptoRSAEncrypt -Wl,--wrap=IHS_ClientSend
+        -Wl,--wrap=IHS_CryptoSHA256 -Wl,--wrap=IHS_ClientStreamingCallback -Wl,--wrap=IHS_BaseInit)
 
     add_executable(ihs-device-token-oracle device_token_oracle.c)
     target_include_directories(ihs-device-token-oracle PRIVATE ${TEST_INCLUDES})

@@ -89,7 +89,7 @@ int main(void) {
     uint8_t bytes[4096];ssize_t n=recv(fd,bytes,sizeof(bytes),0);assert(n>16);
     unsigned hs=le(bytes+8), ps=le(bytes+12+hs);
     CMsgRemoteDeviceProofResponse *pr=cmsg_remote_device_proof_response__unpack(NULL,ps,bytes+16+hs);
-    assert(pr && !pr->has_request_id && pr->has_updated_secret && !pr->updated_secret);
+    assert(pr && pr->has_request_id && pr->request_id == current && pr->has_updated_secret && pr->updated_secret);
     assert(pr->response.len>0);cmsg_remote_device_proof_response__free_unpacked(pr,NULL);
     /* Original waiting state retries, including beyond the former invented
      * 15s deadline; stale Progress never belongs to the current transaction. */

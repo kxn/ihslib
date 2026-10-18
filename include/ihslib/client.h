@@ -108,6 +108,9 @@ typedef struct IHS_StreamingRequest {
      * Session, configure its network-test mode, then connect; no game/decoder
      * or settings change is implied. False requests ordinary streaming. */
     bool networkTest;
+    /** Selected host identity for caller-side key lookup and Proof writes. Captured
+     * at creation, never serialized or replaced by AuthorizationResponse.steamid. */
+    uint64_t keySteamId;
 } IHS_StreamingRequest;
 
 typedef struct IHS_ClientDiscoveryCallbacks {
@@ -149,6 +152,12 @@ typedef struct IHS_ClientStreamingCallbacks {
                           uint64_t steamId, void *context);
     void (*authorizationFailed)(IHS_Client *, const IHS_HostInfo *, IHS_AuthorizationResult,
                                 void *context);
+    /** Proof rotation selected a new secret. Attempt storage before encryption/
+     * reply, using the original request's keySteamId. Failure does not change
+     * the protocol result. Enqueue actions; do not reenter/cancel/replace/destroy
+     * the owner or change its secret from this observer. */
+    void (*persistProof)(IHS_Client *, const IHS_HostInfo *, uint64_t keySteamId,
+                         const uint8_t secret[32], void *context);
 } IHS_ClientStreamingCallbacks;
 
 IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config);

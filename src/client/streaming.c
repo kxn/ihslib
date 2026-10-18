@@ -37,7 +37,7 @@ typedef struct IHS_StreamingState {
     IHS_StreamingRequest request;
     uint32_t requestId;
     IHS_AuthorizationFlow authorization;
-    bool authorizing, ticket;
+    bool authorizing, ticket, proofUpdated;
     int64_t nextSendWallSecond;
     bool terminal;
     bool timerFailed;
@@ -226,53 +226,12 @@ static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
     if (state->ticket && header->msg_type != k_ERemoteDeviceProofRequest) return;
     uint32_t id;
     switch (header->msg_type) {
-    case k_ERemoteDeviceProofRequest: {
-        CMsgRemoteDeviceProofRequest *proof = (void *)message;
-        id = proof->has_request_id ? proof->request_id : state->requestId;
-        break;
-    }
     case k_ERemoteDeviceStreamingResponse: id = ((CMsgRemoteDeviceStreamingResponse *)message)->request_id; break;
     case k_ERemoteDeviceStreamingProgress: id = ((CMsgRemoteDeviceStreamingProgress *)message)->request_id; break;
     default: return;
     }
     if (id != state->requestId) return;
     switch (header->msg_type) {
-    case k_ERemoteDeviceProofRequest: {
-        CMsgRemoteDeviceProofRequest *request = (CMsgRemoteDeviceProofRequest *)message;
-        CMsgRemoteDeviceProofResponse response = CMSG_REMOTE_DEVICE_PROOF_RESPONSE__INIT;
-        response.has_request_id = request->has_request_id;
-        /* The caller selects the host's negotiated secret or its legacy installation
-         * secret before streaming. Rotation is not implemented: acknowledge only
-         * proof, without claiming to have persisted a replacement host secret. */
-        response.has_updated_secret = true;
-        response.updated_secret = false;
-        response.request_id = request->request_id;
-
-        uint8_t encrypted[1024];
-        response.response.data = encrypted;
-        response.response.len = sizeof(encrypted);
-        uint8_t secret[32];
-        IHS_BaseGetSecretKey(&client->base, secret);
-        int encryptRet = IHS_CryptoSymmetricEncrypt(
-            request->challenge.data, request->challenge.len, secret,
-            sizeof(secret), response.response.data, &response.response.len);
-        memset(secret, 0, sizeof(secret));
-        if (encryptRet != 0) {
-            // Mirrors CServerManager::HandleStreamingProofRequest (0x1e1ad0):
-            // log and drop, let the server retry / time out. Sending the response
-            // anyway would ship uninitialized stack bytes that the server would
-            // reject as a bad HMAC — same observable outcome, but with no client
-            // log trail for a real crypto regression.
-            IHS_ClientLog(client, IHS_LogLevelWarn, "Client",
-                          "Proof challenge encrypt failed for host %s: %d", state->host.hostname,
-                          encryptRet);
-            break;
-        }
-
-        IHS_ClientSend(client, state->host.address, k_ERemoteDeviceProofResponse,
-                       (ProtobufCMessage *)&response);
-        break;
-    }
     case k_ERemoteDeviceStreamingProgress:
         if (client->callbacks.streaming && client->callbacks.streaming->progress)
             client->callbacks.streaming->progress(client, &state->host, client->callbackContexts.streaming);
@@ -356,12 +315,95 @@ static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
     }
 }
 
+static void SendEmptyProof(IHS_Client *client, IHS_SocketAddress address) {
+    CMsgRemoteDeviceProofResponse response = CMSG_REMOTE_DEVICE_PROOF_RESPONSE__INIT;
+    IHS_ClientSend(client, address, k_ERemoteDeviceProofResponse, (ProtobufCMessage *)&response);
+}
+static void ProofVisit(IHS_TimerTask *task, void *context) {
+    StreamingResponseContext *incoming = context;
+    IHS_Client *client = incoming->client;
+    IHS_StreamingState *state = IHS_TimerTaskGetContext(task);
+    const CMsgRemoteDeviceProofRequest *request = (void *)incoming->message;
+    /* Original handler tests client identity before optional request_id. Port/
+     * instance are not a substitute for the current target (RE §133). */
+    if (state->terminal || !incoming->header->client_id ||
+        incoming->header->client_id != state->host.clientId) {
+        SendEmptyProof(client, *incoming->address);
+        return;
+    }
+    if (request->has_request_id && request->request_id != state->requestId)
+        return;
+    uint8_t secret[32];
+    IHS_BaseGetSecretKey(&client->base, secret);
+    if (request->update_secret && !state->proofUpdated) {
+        if (request->challenge.len > SIZE_MAX - sizeof(secret)) {
+            memset(secret, 0, sizeof(secret));
+            return;
+        }
+        size_t count = sizeof(secret) + request->challenge.len;
+        uint8_t *input = malloc(count);
+        if (!input) {
+            memset(secret, 0, sizeof(secret));
+            return;
+        } /* Local allocation failure, not a Source OOM claim. */
+        memcpy(input, secret, sizeof(secret));
+        if (request->challenge.len)
+            memcpy(input + sizeof(secret), request->challenge.data, request->challenge.len);
+        int hashed = IHS_CryptoSHA256(input, count, secret);
+        memset(input, 0, sizeof(secret));
+        free(input);
+        if (hashed != 0) {
+            memset(secret, 0, sizeof(secret));
+            return;
+        }
+        IHS_BaseSetSecretKey(&client->base, secret);
+        if (client->callbacks.streaming && client->callbacks.streaming->persistProof)
+            client->callbacks.streaming->persistProof(client, &state->host,
+                                                      state->request.keySteamId, secret,
+                                                      client->callbackContexts.streaming);
+        state->proofUpdated = true;
+    }
+    /* Original CUtlBuffer allocates from challenge length. Do not inherit the
+     * former fixed 1024-byte output limit for valid discovery packets. */
+    if (request->challenge.len > SIZE_MAX - 2 * IHS_CRYPTO_AES_BLOCK_SIZE) {
+        memset(secret, 0, sizeof(secret));
+        return;
+    }
+    size_t capacity =
+        (request->challenge.len / IHS_CRYPTO_AES_BLOCK_SIZE + 2) * IHS_CRYPTO_AES_BLOCK_SIZE;
+    uint8_t *encrypted = malloc(capacity);
+    if (!encrypted) {
+        memset(secret, 0, sizeof(secret));
+        return;
+    }
+    size_t length = capacity;
+    int result = IHS_CryptoSymmetricEncrypt(request->challenge.data, request->challenge.len, secret,
+                                            sizeof(secret), encrypted, &length);
+    memset(secret, 0, sizeof(secret));
+    if (result == 0 && length <= capacity) {
+        CMsgRemoteDeviceProofResponse response = CMSG_REMOTE_DEVICE_PROOF_RESPONSE__INIT;
+        response.has_request_id = response.has_updated_secret = true;
+        response.request_id = state->requestId;
+        response.updated_secret = request->update_secret;
+        response.response = (ProtobufCBinaryData){length, encrypted};
+        IHS_ClientSend(client, *incoming->address, k_ERemoteDeviceProofResponse,
+                       (ProtobufCMessage *)&response);
+    }
+    free(encrypted);
+}
+
 void IHS_ClientStreamingCallback(IHS_Client *client, const IHS_SocketAddress *address,
                                  CMsgRemoteClientBroadcastHeader *header,
                                  ProtobufCMessage *message) {
     if (!message)
         return; /* Local guard. Official BProcess has parse-error fallbacks;
                  * envelope/admission equivalence remains separate (RE §130). */
+    if (header->msg_type == k_ERemoteDeviceProofRequest) {
+        StreamingResponseContext context = {client, header, message, address};
+        if (!IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.streaming, ProofVisit, &context))
+            SendEmptyProof(client, *address);
+        return;
+    }
     if (header->msg_type == k_ERemoteDeviceStreamingResponse) {
         CMsgRemoteDeviceStreamingResponse *resp = (void *)message;
         IHS_HostInfo knownHost;

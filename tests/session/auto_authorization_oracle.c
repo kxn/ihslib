@@ -13,6 +13,49 @@
 #include <time.h>
 #include <unistd.h>
 static atomic_int_fast64_t wall;
+static atomic_uint received_count;
+static IHS_BaseReceivedFunction *original_received;
+static void received(IHS_Base *b, const IHS_SocketAddress *a, IHS_Buffer *wire) {
+    original_received(b, a, wire);
+    atomic_fetch_add_explicit(&received_count, 1, memory_order_release);
+}
+void __real_IHS_BaseInit(IHS_Base *, const IHS_ClientConfig *, IHS_BaseReceivedFunction *, bool);
+void __wrap_IHS_BaseInit(IHS_Base *b, const IHS_ClientConfig *cfg, IHS_BaseReceivedFunction *fn,
+                         bool broadcast) {
+    original_received = fn;
+    __real_IHS_BaseInit(b, cfg, received, broadcast);
+}
+static _Thread_local bool in_proof;
+static bool fail_proof_encrypt;
+static struct {
+    const char *op;
+    char plain[8192], secret[65];
+    uint64_t client, steam;
+    unsigned tag;
+} proof_ops[128];
+static unsigned proof_count, random_id;
+static void text_hex(char *out, const uint8_t *p, size_t n) {
+    assert(n * 2 < 8192);
+    for (size_t i = 0; i < n; ++i)
+        sprintf(out + 2 * i, "%02x", p[i]);
+}
+int __real_IHS_CryptoSHA256(const uint8_t *, size_t, uint8_t *);
+int __wrap_IHS_CryptoSHA256(const uint8_t *p, size_t n, uint8_t *out) {
+    if (in_proof) {
+        assert(proof_count < 128);
+        proof_ops[proof_count].op = "hash";
+        text_hex(proof_ops[proof_count++].plain, p, n);
+    }
+    return __real_IHS_CryptoSHA256(p, n, out);
+}
+void __real_IHS_ClientStreamingCallback(IHS_Client *, const IHS_SocketAddress *,
+                                        CMsgRemoteClientBroadcastHeader *, ProtobufCMessage *);
+void __wrap_IHS_ClientStreamingCallback(IHS_Client *c, const IHS_SocketAddress *a,
+                                        CMsgRemoteClientBroadcastHeader *h, ProtobufCMessage *m) {
+    in_proof = h->msg_type == k_ERemoteDeviceProofRequest;
+    __real_IHS_ClientStreamingCallback(c, a, h, m);
+    in_proof = false;
+}
 static unsigned keypairs, derives, saves, prompts, resumes, success_count, failures, iv_index;
 static int failure_result;
 static uint8_t accepted_key[32];
@@ -31,7 +74,9 @@ time_t __wrap_time(time_t *out) {
     return n;
 }
 uint32_t __wrap_IHS_CryptoRandomUInt32(void) {
-    return 17;
+    const unsigned ids[] = {17, 19, 23, 29};
+    assert(random_id < 4);
+    return ids[random_id++];
 }
 int __wrap_IHS_CryptoRandomBytes(uint8_t *out, size_t n) {
     if (n == 4) {
@@ -52,6 +97,14 @@ int __wrap_IHS_CryptoKeyExchange(const uint8_t *a, const uint8_t *b, uint8_t *s)
 }
 int __wrap_IHS_CryptoSymmetricEncrypt(const uint8_t *p, size_t n, const uint8_t *k, size_t z,
                                       uint8_t *out, size_t *size) {
+    if (in_proof) {
+        assert(proof_count < 128 && z == 32);
+        proof_ops[proof_count].op = "encrypt";
+        text_hex(proof_ops[proof_count].plain, p, n);
+        text_hex(proof_ops[proof_count++].secret, k, z);
+        if (fail_proof_encrypt)
+            return -1;
+    }
     uint8_t iv[16];
     for (unsigned i = 0; i < 16; ++i)
         iv[i] = (uint8_t)(16 * iv_index + i);
@@ -75,6 +128,11 @@ bool __real_IHS_ClientSend(IHS_Client *, IHS_SocketAddress, ERemoteClientBroadca
                            ProtobufCMessage *);
 bool __wrap_IHS_ClientSend(IHS_Client *c, IHS_SocketAddress address, ERemoteClientBroadcastMsg tag,
                            ProtobufCMessage *m) {
+    if (in_proof) {
+        assert(proof_count < 128);
+        proof_ops[proof_count].op = "send";
+        proof_ops[proof_count++].tag = tag;
+    }
     assert(observed_count < 64);
     observed_tags[observed_count] = tag;
     observed_saves[observed_count++] = saves;
@@ -89,6 +147,15 @@ static void persist(IHS_Client *c, const IHS_HostInfo *h, uint64_t id, const uin
     IHS_ClientGetSecretKey(c, selected);
     assert(!memcmp(s, selected, 32));
     ++saves;
+}
+static void persist_proof(IHS_Client *c, const IHS_HostInfo *h, uint64_t id, const uint8_t key[32],
+                          void *ctx) {
+    assert(in_proof && proof_count < 128);
+    proof_ops[proof_count].op = "save";
+    proof_ops[proof_count].client = h->clientId;
+    proof_ops[proof_count].steam = id;
+    text_hex(proof_ops[proof_count++].secret, key, 32);
+    persist(c, h, id, key, ctx);
 }
 static void authorization(IHS_Client *c, const IHS_HostInfo *h, const char *pin, uint64_t id,
                           void *ctx) {
@@ -192,6 +259,14 @@ static void snapshot(IHS_Client *c) {
         hex(ticket_secrets[i], 32);
         printf("\"");
     }
+    printf("],\"proof_ops\":[");
+    for (unsigned i = 0; i < proof_count; ++i) {
+        printf("%s{\"op\":\"%s\",\"plain\":\"%s\",\"secret\":\"%s\",\"client\":%llu,\"steamid\":%"
+               "llu,\"tag\":%u}",
+               i ? "," : "", proof_ops[i].op, proof_ops[i].plain, proof_ops[i].secret,
+               (unsigned long long)proof_ops[i].client, (unsigned long long)proof_ops[i].steam,
+               proof_ops[i].tag);
+    }
     puts("]}");
 }
 static void packet(IHS_Client *c, unsigned tag, uint64_t host, const char *body, bool dispatch) {
@@ -226,7 +301,7 @@ static void packet(IHS_Client *c, unsigned tag, uint64_t host, const char *body,
         IHS_ClientPumpAuthorization(c, 32);
 }
 int main(int argc, char **argv) {
-    assert(argc == 2);
+    assert(argc == 2 || argc == 3);
     atomic_store(&wall, 1000);
     IHS_Init();
     peer = socket(AF_INET, SOCK_DGRAM, 0);
@@ -247,7 +322,8 @@ int main(int argc, char **argv) {
     IHS_ClientStreamingCallbacks sc = {.authorization = authorization,
                                        .authorizationFailed = authorized_fail,
                                        .success = accepted,
-                                       .failed = failed};
+                                       .failed = failed,
+                                       .persistProof = persist_proof};
     IHS_ClientSetAuthorizationCallbacks(c, &ac, NULL);
     IHS_ClientSetStreamingCallbacks(c, &sc, NULL);
     bool ready = false;
@@ -262,7 +338,8 @@ int main(int argc, char **argv) {
     IHS_HostInfo host = {
         .clientId = 123, .universe = IHS_SteamUniversePublic, .address.port = ntohs(a.sin_port)};
     assert(IHS_IPAddressFromString(&host.address.ip, "127.0.0.1"));
-    IHS_StreamingRequest request = {.networkTest = atoi(argv[1]) != 0};
+    IHS_StreamingRequest request = {.networkTest = atoi(argv[1]) != 0,
+                                    .keySteamId = argc == 3 ? strtoull(argv[2], NULL, 10) : 0};
     strcpy(request.pin, "9876");
     assert(IHS_ClientStreamingRequest(c, &host, &request));
     IHS_ClientPumpAuthorization(c, 32);
@@ -273,12 +350,49 @@ int main(int argc, char **argv) {
         long long time;
         assert(sscanf(line, "%c %lld", &op, &time) == 2);
         atomic_store(&wall, time);
-        if (op == 'p' || op == 'q') {
+        if (op == 'p' || op == 'q' || op == 'd') {
             unsigned tag;
             unsigned long long id;
             char body[4096];
             assert(sscanf(line, "%c %lld %u %llu %4095s", &op, &time, &tag, &id, body) == 5);
-            packet(c, tag, id, body, op == 'p');
+            if (op == 'd') {
+                uint8_t raw[2048];
+                size_t size = unhex(body, raw);
+                ProtobufCMessage *m = protobuf_c_message_unpack(
+                    &cmsg_remote_device_proof_request__descriptor, NULL, size, raw);
+                assert(m && tag == 7);
+                CMsgRemoteClientBroadcastHeader h = CMSG_REMOTE_CLIENT_BROADCAST_HEADER__INIT;
+                h.has_client_id = h.has_msg_type = true;
+                h.client_id = id;
+                h.msg_type = tag;
+                IHS_ClientStreamingCallback(c, &host.address, &h, m);
+                protobuf_c_message_free_unpacked(m, NULL);
+            } else
+                packet(c, tag, id, body, op == 'p');
+        } else if (op == 'r') {
+            char body[4096];
+            assert(sscanf(line, "%c %lld %4095s", &op, &time, body) == 3);
+            uint8_t raw[2048];
+            size_t size = unhex(body, raw);
+            unsigned before = atomic_load_explicit(&received_count, memory_order_acquire);
+            assert(sendto(peer, raw, size, 0, (void *)&destination, sizeof(destination)) ==
+                   (ssize_t)size);
+            bool done = false;
+            for (unsigned n = 0; n < 2000 && !done; ++n) {
+                done = atomic_load_explicit(&received_count, memory_order_acquire) > before;
+                if (!done)
+                    poll(NULL, 0, 1);
+            }
+            assert(done);
+            IHS_ClientPumpAuthorization(c, 32);
+        } else if (op == 'f') {
+            unsigned failed;
+            assert(sscanf(line, "%c %lld %u", &op, &time, &failed) == 3);
+            fail_proof_encrypt = failed != 0;
+        } else if (op == 's') {
+            request.pin[0] = 0; /* §133 replacement Start receives empty PIN. */
+            assert(IHS_ClientStreamingRequest(c, &host, &request));
+            IHS_ClientPumpAuthorization(c, 32);
         } else if (op == 'b') {
             unsigned budget;
             assert(sscanf(line, "%c %lld %u", &op, &time, &budget) == 3);
