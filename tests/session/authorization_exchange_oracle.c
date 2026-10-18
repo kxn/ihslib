@@ -16,6 +16,13 @@ static atomic_uint admitted, derives, successes, failures, progress;
 static atomic_int failure_result;
 static bool rsa_failure, virtual_clock;
 static atomic_uint_fast64_t virtual_now;
+static atomic_int_fast64_t virtual_wall;
+time_t __wrap_time(time_t *out) {
+    time_t now = (time_t)atomic_load(&virtual_wall);
+    if (out)
+        *out = now;
+    return now;
+}
 static unsigned tags[64], results[64], messages;
 static char bodies[64][1024];
 static struct sockaddr_in receiver;
@@ -172,8 +179,10 @@ static void send_response(const uint8_t *body, size_t bytes) {
 int main(int argc, char **argv) {
     assert(argc >= 2);
     rsa_failure = !strcmp(argv[1], "rsa");
-    virtual_clock = !strcmp(argv[1], "retry");
-    atomic_store(&virtual_now, 1000000);
+    virtual_clock = !strcmp(argv[1], "retry") || !strcmp(argv[1], "wall_clock") ||
+                    !strcmp(argv[1], "wall_rollback");
+    atomic_store(&virtual_now, !strcmp(argv[1], "wall_clock") ? 1000900 : 1000000);
+    atomic_store(&virtual_wall, 1000);
     IHS_Init();
     peer = socket(AF_INET, SOCK_DGRAM, 0);
     assert(peer >= 0);
@@ -216,13 +225,31 @@ int main(int argc, char **argv) {
         }
     }
     snapshot(c);
-    if (virtual_clock) {
+    if (!strcmp(argv[1], "retry")) {
         const unsigned offsets[] = {0, 1000, 2000, 3000, 3000, 5000, 6000, 300000};
         for (unsigned n = 0; n < 8; ++n) {
             /* Taking the owner lock observes TaskExecute's published deadline. */
             assert(IHS_TimerTaskVisitOwned(c->timers, &c->taskHandles.authorization, noop, NULL));
+            atomic_store(&virtual_wall, 1000 + offsets[n] / 1000);
             atomic_store(&virtual_now, 1000000 + offsets[n]);
             bool due = n == 3 || n == 6 || n == 7;
+            drain(due ? 2000 : 25);
+            snapshot(c);
+        }
+    } else if (virtual_clock) {
+        const int64_t phase[][2] = {{1001000, 1001}, {1002000, 1002}, {1002999, 1002},
+                                    {1003000, 1003}, {1003000, 1003}, {1006000, 1006}};
+        const int64_t rollback[][2] = {
+            {1000020, 999}, {1000040, 998}, {1000060, 1002}, {1000080, 1003}, {1000100, 1300}};
+        bool back = !strcmp(argv[1], "wall_rollback");
+        unsigned count = back ? 5 : 6;
+        for (unsigned i = 0; i < count; ++i) {
+            assert(IHS_TimerTaskVisitOwned(c->timers, &c->taskHandles.authorization, noop, NULL));
+            int64_t mono = back ? rollback[i][0] : phase[i][0],
+                    wall = back ? rollback[i][1] : phase[i][1];
+            atomic_store(&virtual_wall, wall);
+            atomic_store(&virtual_now, mono);
+            bool due = back ? (i >= 3) : (i == 3 || i == 5);
             drain(due ? 2000 : 25);
             snapshot(c);
         }

@@ -30,6 +30,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <time.h>
 
 typedef struct IHS_AuthorizationState {
     IHS_Client *client;
@@ -44,6 +45,7 @@ typedef struct IHS_AuthorizationState {
     unsigned keyExchangeAttempts;
     bool terminal;
     bool timerFailed;
+    int64_t nextSendWallSecond;
 } IHS_AuthorizationState;
 
 static uint64_t AuthorizationRequestTimer(int runCount, void *data);
@@ -223,9 +225,12 @@ void IHS_ClientAuthorizationCallback(IHS_Client *client, const IHS_SocketAddress
 }
 
 static uint64_t AuthorizationRequestTimer(int runCount, void *data) {
-    (void) runCount;
     IHS_AuthorizationState *state = data;
     IHS_Client *client = state->client;
+    int64_t now = (int64_t)time(NULL);
+    /* Original manager Update compares whole wall seconds, including clock
+     * changes. The existing 1ms timer worker supplies our update cadence. */
+    if (runCount && now < state->nextSendWallSecond) return 1;
     uint8_t pubKey[384];
     size_t pubKeyLen = sizeof(pubKey);
     if (!IHS_ClientAuthorizationPubKey(client, state->host.universe, pubKey, &pubKeyLen)) {
@@ -269,7 +274,9 @@ static uint64_t AuthorizationRequestTimer(int runCount, void *data) {
 
     IHS_SocketAddress address = state->host.address;
     IHS_ClientSend(client, address, k_ERemoteDeviceAuthorizationRequest, (ProtobufCMessage *) &request);
-    return 3000;
+    int64_t sentAt = (int64_t)time(NULL);
+    state->nextSendWallSecond = (int64_t)((uint64_t)sentAt + 3);
+    return 1;
 }
 
 static void AuthorizationConfigureTicket(IHS_Client *client, IHS_AuthorizationState *state,
