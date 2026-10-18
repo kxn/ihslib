@@ -44,6 +44,7 @@ typedef struct IHS_RetransmissionStats {
 typedef struct IHS_SessionRetransmission {
     IHS_Session *session;
     IHS_Mutex *lock;
+    IHS_Mutex *sendLock; /* Serialize attempts without holding the ACK/NACK lock. */
     IHS_RetransmissionPending *head;
     IHS_TimerTask *timer;
     IHS_RetransmissionStats stats;
@@ -59,6 +60,10 @@ bool IHS_RetransmissionIsTracked(const IHS_SessionRetransmission *retransmission
 
 bool IHS_RetransmissionTrack(IHS_SessionRetransmission *retransmission,
                              const IHS_SessionPacket *packet, uint64_t nowMs);
+void IHS_RetransmissionActivate(IHS_SessionRetransmission *, uint8_t channel, uint16_t firstId,
+                                uint16_t count);
+/* Roll back a staged, never-published registration; not a peer ACK. */
+void IHS_RetransmissionCancelUnsent(IHS_SessionRetransmission *, const IHS_SessionPacketHeader *);
 
 bool IHS_RetransmissionAcknowledge(IHS_SessionRetransmission *retransmission,
                                    IHS_SessionChannelId channelId, uint16_t packetId,
@@ -97,3 +102,12 @@ void IHS_RetransmissionGetStats(IHS_SessionRetransmission *retransmission,
 
 size_t IHS_RetransmissionNackBefore(IHS_SessionRetransmission *r, IHS_SessionChannelId channel,
                                     uint16_t id, bool below, uint32_t cutoff, uint64_t nowMs);
+
+/* Production timer uses the official strict 16.16 timestamp boundary. The ms
+ * entry remains for standalone legacy test callers without a session clock. */
+size_t IHS_RetransmissionProcessTicks(IHS_SessionRetransmission *, uint64_t nowMs,
+                                      uint32_t nowTicks, IHS_RetransmissionSendFunction, void *);
+
+size_t IHS_RetransmissionProcessChannel(IHS_SessionRetransmission *, uint64_t nowMs,
+                                        uint32_t nowTicks, uint8_t channel,
+                                        IHS_RetransmissionSendFunction, void *);

@@ -39,7 +39,26 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
 static void OnNegotiationSetConfig(IHS_SessionChannel *channel, const CNegotiationSetConfigMsg *message,
                                    uint16_t packetId);
 
-static void OnConnected(IHS_SessionChannel *channel);
+/* Generated C protobuf has no CopyFrom: round-trip the complete value so
+ * presence, repeated/nested values and unknown fields survive replacement. */
+static bool StoreNegotiatedConfig(IHS_Session *session, const CNegotiatedConfig *config) {
+    size_t size = cnegotiated_config__get_packed_size(config);
+    uint8_t *wire = malloc(size ? size : 1);
+    if (!wire)
+        return false;
+    cnegotiated_config__pack(config, wire);
+    CNegotiatedConfig *copy = cnegotiated_config__unpack(NULL, size, wire);
+    free(wire);
+    if (!copy)
+        return false;
+    if (session->negotiatedConfig)
+        cnegotiated_config__free_unpacked(session->negotiatedConfig, NULL);
+    session->negotiatedConfig = copy;
+    session->negotiatedVideoCodec = copy->selected_video_codec;
+    session->negotiationRemoteHid = !!copy->enable_remote_hid;
+    session->negotiationTouchInput = !!copy->enable_touch_input;
+    return true;
+}
 
 void IHS_SessionChannelControlOnNegotiation(IHS_SessionChannel *channel, EStreamControlMessage type,
                                             IHS_Buffer *payload, const IHS_SessionPacketHeader *header) {
@@ -76,16 +95,38 @@ void IHS_SessionChannelControlOnNegotiation(IHS_SessionChannel *channel, EStream
 }
 
 static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationInitMsg *message, uint16_t packetId) {
-    IHS_SessionConfig ihsConf = {
-            .enableAudio = true,
-            .enableHevc = false,
-            .maxWidth = 1920,
-            .maxHeight = 1080,
-            .maxFps = 60,
-            .maxBitrateKbps = 15000,
-    };
-
     IHS_Session *session = channel->session;
+    IHS_BaseLock(&session->base);
+    bool complete = session->clientConfig != NULL;
+    CStreamingClientConfig *retained = IHS_SessionClientConfigCopy(session);
+    IHS_BaseUnlock(&session->base);
+    if (!retained) {
+        IHS_SessionDisconnect(session);
+        return;
+    }
+    /* An explicitly supplied complete value includes all optional defaults.
+     * Only unconfigured legacy callers receive the convenience defaults below. */
+    CStreamingClientConfig clientConfig = *retained;
+    /* Official removes the per-session runtime limit before copying SetConfig.
+     * The retained clone still owns this pointer and frees it after sending. */
+    clientConfig.runtime_limit = NULL;
+    uint32_t denominator = clientConfig.desired_framerate_denominator;
+    uint32_t fps = clientConfig.desired_framerate_numerator;
+    if (fps && denominator)
+        fps = ((uint64_t)fps + denominator / 2) / denominator;
+    IHS_SessionConfig ihsConf = {
+            .enableAudio = clientConfig.enable_audio_streaming,
+            .enableHevc = clientConfig.enable_video_hevc,
+            .enableUnreliableFec = clientConfig.enable_unreliable_fec,
+            .maxWidth = clientConfig.desired_resolution_x ? clientConfig.desired_resolution_x : 1920,
+            .maxHeight = clientConfig.desired_resolution_y ? clientConfig.desired_resolution_y : 1080,
+            .maxFps = fps ? fps : 60,
+            .maxBitrateKbps = clientConfig.desired_bitrate_kbps > 0 ?
+                (uint32_t)clientConfig.desired_bitrate_kbps : 15000,
+            .quality = (IHS_StreamQuality)clientConfig.quality,
+    };
+    const IHS_SessionConfig before = ihsConf;
+
     if (session->callbacks.session && session->callbacks.session->configuring) {
         session->callbacks.session->configuring(session, &ihsConf, session->callbackContexts.session);
     }
@@ -106,9 +147,6 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
         default: break; /* Default, Balanced and invalid caller values. */
     }
     IHS_SessionLog(session, IHS_LogLevelInfo, "Negotiation", "Encoding quality preference=%d", quality);
-    IHS_SessionLog(session, IHS_LogLevelInfo, "Negotiation", "Requesting at most %ux%u @ %u fps, %u kbps%s%s",
-                   ihsConf.maxWidth, ihsConf.maxHeight, ihsConf.maxFps, ihsConf.maxBitrateKbps,
-                   ihsConf.enableHevc ? ", HEVC" : "", ihsConf.enableAudio ? ", audio" : "");
     IHS_SessionLog(session, IHS_LogLevelInfo, "Negotiation",
                    "Host init offers: reliable_data=%d supports_remote_hid=%d supports_touch_input=%d",
                    message->has_reliable_data ? (int) message->reliable_data : -1,
@@ -122,44 +160,29 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
                        message->supported_video_codecs[i] == k_EStreamVideoCodecH264 ? " (H264)" : "");
     }
 
+    const IHS_StreamClientCapabilities *caps = &session->clientCapabilities;
+    bool hevcAvailable = caps->hasVideoDecoderCapabilities ? caps->supportsVideoHevc : ihsConf.enableHevc;
     EStreamAudioCodec audioCodec = k_EStreamAudioCodecNone;
+    for (size_t i = 0; i < message->n_supported_audio_codecs; ++i) {
+        EStreamAudioCodec codec = message->supported_audio_codecs[i];
+        if (codec == k_EStreamAudioCodecRaw ||
+            (codec == k_EStreamAudioCodecOpus && !clientConfig.enable_audio_uncompressed)) {
+            audioCodec = codec;
+            break;
+        }
+    }
     EStreamVideoCodec videoCodec = k_EStreamVideoCodecNone;
-    if (ihsConf.enableAudio) {
-        for (int i = 0; i < message->n_supported_audio_codecs; i++) {
-            EStreamAudioCodec codec = message->supported_audio_codecs[i];
-            if (codec == k_EStreamAudioCodecOpus) {
-                audioCodec = codec;
-            }
+    for (size_t i = 0; i < message->n_supported_video_codecs; ++i) {
+        EStreamVideoCodec codec = message->supported_video_codecs[i];
+        if (codec == k_EStreamVideoCodecH264 || (codec == k_EStreamVideoCodecHEVC && hevcAvailable)) {
+            videoCodec = codec;
+            break;
         }
     }
-    if (ihsConf.enableHevc) {
-        for (int i = 0; i < message->n_supported_video_codecs; i++) {
-            EStreamVideoCodec codec = message->supported_video_codecs[i];
-            if (codec == k_EStreamVideoCodecHEVC) {
-                videoCodec = codec;
-                break;
-            }
-        }
-    }
-    if (videoCodec == IHS_StreamVideoCodecNone) {
-        if (ihsConf.enableHevc) {
-            /* Not a fallback verdict: a Windows host omitting HEVC from this
-             * announcement has been seen encoding HEVC anyway — our streaming
-             * request advertises supports_video_hevc, and the video channel's
-             * start message is what actually picks the codec. Warning that we
-             * are "falling back to H264" right before an HEVC decoder opens
-             * sends whoever reads the log down the wrong path. */
-            IHS_SessionLog(session, IHS_LogLevelInfo, "Negotiation",
-                           "HEVC absent from the host's announced codecs; the video start message decides");
-        }
-        for (int i = 0; i < message->n_supported_video_codecs; i++) {
-            EStreamVideoCodec codec = message->supported_video_codecs[i];
-            if (codec == k_EStreamVideoCodecH264) {
-                videoCodec = codec;
-                break;
-            }
-        }
-    }
+    if (message->has_os_type)
+        session->hostOsType = message->os_type;
+    if (message->has_gaming_device_type)
+        session->hostGamingDeviceType = message->gaming_device_type;
 
     /* Retain the negotiated preference for diagnostics. StartVideoData supplies
      * the actual decoder configuration; early media waits for that message. */
@@ -168,63 +191,72 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
     session->captureHeight = 1080;
 
     CNegotiatedConfig config = CNEGOTIATED_CONFIG__INIT;
-    /* Android echoes reliable_data because its media channels implement that
-     * mode. This client currently implements unreliable media only; do not
-     * negotiate a mode that ch_data cannot receive. Control remains reliable. */
-    PROTOBUF_C_SET_VALUE(config, reliable_data, false);
+    /* Original always emits all three scalar presences, even None/false. */
+    PROTOBUF_C_SET_VALUE(config, reliable_data, !!message->reliable_data);
+    PROTOBUF_C_SET_VALUE(config, selected_audio_codec, audioCodec);
+    PROTOBUF_C_SET_VALUE(config, selected_video_codec, videoCodec);
 
-    config.has_selected_audio_codec = audioCodec != k_EStreamAudioCodecNone;
-    config.selected_audio_codec = audioCodec;
+    /* Raw video/AV1/Pyrowave are not supported by this platform pipeline. */
+    if (message->supports_remote_hid)
+        session->negotiationRemoteHid = true;
+    if (message->supports_touch_input)
+        session->negotiationTouchInput = true;
+    if (session->negotiationRemoteHid)
+        PROTOBUF_C_SET_VALUE(config, enable_remote_hid, true);
+    if (session->negotiationTouchInput)
+        PROTOBUF_C_SET_VALUE(config, enable_touch_input, true);
 
-    config.has_selected_video_codec = videoCodec != k_EStreamVideoCodecNone;
-    config.selected_video_codec = videoCodec;
-
-    /* The official NegotiatedConfig carries no video modes (the OBSOLETE
-     * repeated field is never populated by the official client). */
-
-    /* enable_remote_hid/enable_touch_input mirror the host's announcements
-     * (0x7ad9cc/0x7ad9e8). Gamepads reach the host over the HID channel;
-     * advertise these capabilities only when the host offers them. */
-    if (message->has_supports_remote_hid && message->supports_remote_hid) {
-        PROTOBUF_C_SET_VALUE(config, enable_remote_hid, 1);
-    }
-    if (message->has_supports_touch_input && message->supports_touch_input) {
-        PROTOBUF_C_SET_VALUE(config, enable_touch_input, 1);
+    /* Official Default omits field 25 (false). Explicit enabled settings and
+     * presets request true before the video channel starts; never infer this
+     * choice from quality alone or the local ability to receive FEC. */
+    if (ihsConf.enableUnreliableFec != clientConfig.enable_unreliable_fec) {
+        PROTOBUF_C_SET_VALUE(clientConfig, enable_unreliable_fec, ihsConf.enableUnreliableFec);
     }
 
-    CStreamingClientConfig clientConfig = CSTREAMING_CLIENT_CONFIG__INIT;
-
-    PROTOBUF_C_SET_VALUE(clientConfig, desired_resolution_x, (int32_t) ihsConf.maxWidth);
-    PROTOBUF_C_SET_VALUE(clientConfig, desired_resolution_y, (int32_t) ihsConf.maxHeight);
-    PROTOBUF_C_SET_VALUE(clientConfig, enable_input_streaming, true);
-    PROTOBUF_C_SET_VALUE(clientConfig, enable_hardware_decoding, true);
-    PROTOBUF_C_SET_VALUE(clientConfig, enable_performance_overlay, true);
+    if ((!complete && !clientConfig.has_desired_resolution_x) || ihsConf.maxWidth != before.maxWidth)
+        PROTOBUF_C_SET_VALUE(clientConfig, desired_resolution_x, ihsConf.maxWidth);
+    if ((!complete && !clientConfig.has_desired_resolution_y) || ihsConf.maxHeight != before.maxHeight)
+        PROTOBUF_C_SET_VALUE(clientConfig, desired_resolution_y, ihsConf.maxHeight);
+    if (!complete && !clientConfig.has_enable_input_streaming)
+        PROTOBUF_C_SET_VALUE(clientConfig, enable_input_streaming, true);
+    if (!complete && !clientConfig.has_enable_hardware_decoding)
+        PROTOBUF_C_SET_VALUE(clientConfig, enable_hardware_decoding, true);
+    if (!complete && !clientConfig.has_enable_performance_overlay)
+        PROTOBUF_C_SET_VALUE(clientConfig, enable_performance_overlay, true);
     if (ihsConf.enableAudio) {
-        PROTOBUF_C_SET_VALUE(clientConfig, audio_channels, 2);
-        PROTOBUF_C_SET_VALUE(clientConfig, enable_audio_streaming, true);
+        if (!complete && !clientConfig.has_audio_channels)
+            PROTOBUF_C_SET_VALUE(clientConfig, audio_channels, 2);
     }
-    // Mic streaming is opt-in: only advertise when the user has registered mic callbacks.
-    // Steam's server keys off this flag — without it the server never issues Start, so
-    // there's no point in advertising mic support we can't actually fulfil. Matches the
-    // capability semantics around CStreamingClientConfig.enable_microphone_streaming
-    // documented in the mic RE.
-    if (session->callbacks.microphone != NULL) {
-        PROTOBUF_C_SET_VALUE(clientConfig, enable_microphone_streaming, true);
+    if ((!complete && !clientConfig.has_enable_audio_streaming) || ihsConf.enableAudio != before.enableAudio)
+        PROTOBUF_C_SET_VALUE(clientConfig, enable_audio_streaming, ihsConf.enableAudio);
+    /* Callback registration is not a user config edit (protocol RE §114). */
+    if (!complete && !clientConfig.has_enable_video_streaming)
+        PROTOBUF_C_SET_VALUE(clientConfig, enable_video_streaming, true);
+    if ((!complete && !clientConfig.has_desired_framerate_numerator) || ihsConf.maxFps != before.maxFps) {
+        PROTOBUF_C_SET_VALUE(clientConfig, desired_framerate_numerator, ihsConf.maxFps);
+        PROTOBUF_C_SET_VALUE(clientConfig, desired_framerate_denominator, 1);
     }
-    PROTOBUF_C_SET_VALUE(clientConfig, enable_video_streaming, true);
-    PROTOBUF_C_SET_VALUE(clientConfig, desired_framerate_numerator, ihsConf.maxFps);
-    PROTOBUF_C_SET_VALUE(clientConfig, desired_framerate_denominator, 1);
-    PROTOBUF_C_SET_VALUE(clientConfig, quality, quality);
-    PROTOBUF_C_SET_VALUE(clientConfig, desired_bitrate_kbps, ihsConf.maxBitrateKbps);
-    if (ihsConf.enableHevc) {
-        PROTOBUF_C_SET_VALUE(clientConfig, enable_video_hevc, true);
+    if ((!complete && !clientConfig.has_quality) || ihsConf.quality != before.quality)
+        PROTOBUF_C_SET_VALUE(clientConfig, quality, quality);
+    if ((!complete && !clientConfig.has_desired_bitrate_kbps) || ihsConf.maxBitrateKbps != before.maxBitrateKbps)
+        PROTOBUF_C_SET_VALUE(clientConfig, desired_bitrate_kbps, ihsConf.maxBitrateKbps);
+    if (ihsConf.enableHevc != clientConfig.enable_video_hevc) {
+        PROTOBUF_C_SET_VALUE(clientConfig, enable_video_hevc, ihsConf.enableHevc);
     }
 
-    clientConfig.controller_overlay_hotkey = "auto";
+    if (!complete && !clientConfig.controller_overlay_hotkey)
+        clientConfig.controller_overlay_hotkey = "auto";
+
+    IHS_SessionLog(session, IHS_LogLevelInfo, "Negotiation",
+                   "Request config: %ux%u @ %u/%u fps, %d kbps%s%s",
+                   clientConfig.desired_resolution_x, clientConfig.desired_resolution_y,
+                   clientConfig.desired_framerate_numerator, clientConfig.desired_framerate_denominator,
+                   clientConfig.desired_bitrate_kbps,
+                   clientConfig.enable_video_hevc ? ", HEVC" : "",
+                   clientConfig.enable_audio_streaming ? ", audio" : "");
 
     CStreamingClientCaps clientCaps = CSTREAMING_CLIENT_CAPS__INIT;
 
-    const IHS_StreamClientCapabilities *caps = &session->clientCapabilities;
     clientCaps.system_info = (char *)caps->systemInfo;
     if (caps->hasSystemCanSuspend)
         PROTOBUF_C_SET_VALUE(clientCaps, system_can_suspend, caps->systemCanSuspend);
@@ -234,42 +266,107 @@ static void OnNegotiationInit(IHS_SessionChannel *channel, const CNegotiationIni
         PROTOBUF_C_SET_VALUE(clientCaps, maximum_burst_bitrate_kbps, caps->maximumBurstBitrateKbps);
     if (caps->formFactor != IHS_StreamDeviceFormFactorUnknown)
         PROTOBUF_C_SET_VALUE(clientCaps, form_factor, (EStreamDeviceFormFactor)caps->formFactor);
-    /* Current Steam reads the codec list; supports_video_hevc is obsoleted but still
-     * the only thing older hosts look at, so send both. */
-    EStreamVideoCodec supportedCodecs[] = {k_EStreamVideoCodecHEVC, k_EStreamVideoCodecH264};
-    clientCaps.supported_video_codecs = ihsConf.enableHevc ? supportedCodecs : &supportedCodecs[1];
-    clientCaps.n_supported_video_codecs = ihsConf.enableHevc ? 2 : 1;
-    EStreamAudioCodec supportedAudioCodecs[] = {k_EStreamAudioCodecOpus};
-    if (ihsConf.enableAudio) {
-        clientCaps.supported_audio_codecs = supportedAudioCodecs;
-        clientCaps.n_supported_audio_codecs = 1;
-    }
-    if (ihsConf.enableHevc) {
-        PROTOBUF_C_SET_VALUE(clientCaps, supports_video_hevc_obsolete, true);
-    }
+    /* Preserve official capability order; request preference does not reorder
+     * it or make disabled audio decoders unavailable. Raw video is omitted
+     * because this library's video pipeline accepts H264/HEVC only. */
+    EStreamVideoCodec supportedCodecs[] = {k_EStreamVideoCodecH264, k_EStreamVideoCodecHEVC};
+    clientCaps.supported_video_codecs = supportedCodecs;
+    clientCaps.n_supported_video_codecs = hevcAvailable ? 2 : 1;
+    EStreamAudioCodec supportedAudioCodecs[] = {k_EStreamAudioCodecRaw, k_EStreamAudioCodecOpus};
+    clientCaps.supported_audio_codecs = supportedAudioCodecs;
+    clientCaps.n_supported_audio_codecs = clientConfig.enable_audio_uncompressed ? 1 : 2;
+    if (caps->hasLegacyHevcCapability)
+        PROTOBUF_C_SET_VALUE(clientCaps, supports_video_hevc_obsolete, caps->legacyHevcCapability);
 
     CNegotiationSetConfigMsg response = CNEGOTIATION_SET_CONFIG_MSG__INIT;
     response.config = &config;
+    if (!IHS_SessionClientConfigStore(session, &clientConfig) ||
+        !StoreNegotiatedConfig(session, &config)) {
+        cstreaming_client_config__free_unpacked(retained, NULL);
+        IHS_SessionDisconnect(session);
+        return;
+    }
     response.streaming_client_config = &clientConfig;
     response.streaming_client_caps = &clientCaps;
 
     IHS_SessionChannelControlSend(channel, k_EStreamControlNegotiationSetConfig,
                                   (const ProtobufCMessage *) &response, IHS_PACKET_ID_NEXT);
+    cstreaming_client_config__free_unpacked(retained, NULL);
 }
 
 static void OnNegotiationSetConfig(IHS_SessionChannel *channel, const CNegotiationSetConfigMsg *message,
                                    uint16_t packetId) {
-    CNegotiationCompleteMsg response = CNEGOTIATION_COMPLETE_MSG__INIT;
-    IHS_SessionChannelControlSend(channel, k_EStreamControlNegotiationComplete,
-                                  (const ProtobufCMessage *) &response, IHS_PACKET_ID_NEXT);
-    OnConnected(channel);
+    (void)packetId;
+    IHS_Session *session = channel->session;
+    /* The original's codec assertions are diagnostic in non-debug builds;
+     * they do not reject the host's complete config. Protocol §49–50. */
+    if (!StoreNegotiatedConfig(session, message->config)) {
+        IHS_SessionDisconnect(session);
+        return;
+    }
+    session->state.connectionState = IHS_SessionConnectionStateStarting;
 }
 
-static void OnConnected(IHS_SessionChannel *channel) {
+void IHS_SessionChannelControlUpdateStage(IHS_SessionChannel *channel, uint32_t now) {
     IHS_Session *session = channel->session;
-    session->state.connectionState = IHS_SessionConnectionStateConnected;
-    IHS_SessionChannelControlStartHeartbeat(channel);
-    if (session->callbacks.session && session->callbacks.session->connected) {
-        session->callbacks.session->connected(session, session->callbackContexts.session);
+    if (session->networkTest.mode) {
+        IHS_SessionNetworkTestUpdate(session, now);
+        return;
+    }
+    switch (session->state.connectionState) {
+    case IHS_SessionConnectionStateStopping:
+        IHS_SessionClientStopStreaming(session);
+        break;
+    case IHS_SessionConnectionStateStarting: {
+        IHS_SessionChannelControl *control = (void *)channel;
+        /* Publish the live phase and enqueue Complete under the existing
+         * producer lock: another HID sender must not overtake Complete. */
+        IHS_MutexLock(control->sendLock);
+        /* State is live before Complete and the application notification. */
+        session->state.connectionState = IHS_SessionConnectionStateConnected;
+        IHS_OutgoingPriority(session, 1, 2);
+        IHS_OutgoingPriority(session, 2, -1);
+        control->keepAliveTimestamp = now;
+        control->frameEventsTimestamp = now;
+        IHS_SendAdmission result = IHS_SessionChannelControlCompleteLocked(control);
+        IHS_MutexUnlock(control->sendLock);
+        /* Source Complete5 -> CNetworkStats::Start -> player notification.
+         * Release the producer lock before taking Base. */
+        IHS_BaseLock(&session->base);
+        IHS_MediaNetworkStatsStart(&session->mediaNetworkStats);
+        IHS_BaseUnlock(&session->base);
+        /* Closing may stop workers that also send control. Never do so while
+         * holding the producer lock, including the local allocation-failure path. */
+        if (result == IHS_SendAdmissionLocalFailure && !session->transport.shutdown &&
+            !session->transport.detached)
+            IHS_SessionDisconnect(session);
+        if (session->callbacks.session && session->callbacks.session->connected)
+            session->callbacks.session->connected(session, session->callbackContexts.session);
+        break; /* The same update must not also run Streaming. */
+    }
+    case IHS_SessionConnectionStateConnected: {
+        IHS_SessionChannelControl *control = (void *)channel;
+        uint32_t last = control->frameEventsTimestamp;
+        /* Original HandleStreaming 0x7a717c–0x7a71ac, protocol §55.
+         * Match sub/cmn/b.mi, including zero and signed half-domain edges.
+         * This consumer must run outside the control producer lock: a local
+         * StatsSend failure can synchronously close the session. */
+        if (!last || (int32_t)(last - now + 0x10000u) < 0) {
+            if (session->frameStats) {
+                float network[5];
+                IHS_SessionGetNetworkSample(session, network);
+                IHS_FrameStatsSetNetworkSample(session->frameStats, network);
+                IHS_SessionSendFrameEvents(session, &session->frameStats->messageScratch);
+                if (session->frameTracker)
+                    IHS_FrameStatsSettleTracked(session->frameStats, session->frameTracker,
+                                               IHS_TimerNow() * 1000);
+            }
+            control->frameEventsTimestamp = now; /* attempt, even with no frames */
+        }
+        IHS_SessionChannelControlUpdateHeartbeat(channel, now);
+        break;
+    }
+    default:
+        break;
     }
 }

@@ -11,10 +11,19 @@ struct IHS_QueueItem {
     IHS_SessionPacket packet;
     bool reliable;
 };
-static void wire_capabilities(IHS_StreamDeviceFormFactor form, unsigned decode, unsigned burst) {
+static void configure_fec(IHS_Session *session, IHS_SessionConfig *config, void *context) {
+    (void)session;
+    config->enableUnreliableFec = *(bool *)context;
+    config->quality = IHS_StreamQualityFast; /* Fast quality alone is not FastPreset. */
+}
+static void wire_capabilities(IHS_StreamDeviceFormFactor form, unsigned decode, unsigned burst,
+                              bool fec, bool complete) {
     IHS_Session *s = IHS_TestSessionCreate();
+    const IHS_StreamSessionCallbacks callbacks = {.configuring = configure_fec};
+    IHS_SessionSetSessionCallbacks(s, &callbacks, &fec);
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
-    IHS_TimerTaskStopImmediate(((IHS_SessionChannelControl *)s->channels[1])->feedbackTimer);
+    if (complete)
+        assert(IHS_SessionSetStreamingClientConfig(s, NULL, 0, true));
     char system[] = "\"SystemInfo\" { \"CPUID\" \"test platform\" }";
     char decoder[] = "test decoder";
     IHS_StreamClientCapabilities requested = {
@@ -57,6 +66,19 @@ static void wire_capabilities(IHS_StreamDeviceFormFactor form, unsigned decode, 
     CNegotiationSetConfigMsg *config =
         cnegotiation_set_config_msg__unpack(NULL, plain.size, IHS_BufferPointer(&plain));
     assert(config && config->streaming_client_caps);
+    assert(config->streaming_client_config);
+    assert(config->streaming_client_config->has_enable_unreliable_fec == fec);
+    assert(config->streaming_client_config->enable_unreliable_fec == fec);
+    CStreamingClientConfig *client = config->streaming_client_config;
+    assert(client->has_desired_bitrate_kbps == !complete);
+    assert(client->desired_bitrate_kbps == (complete ? -1 : 15000));
+    assert(client->has_enable_performance_overlay == !complete);
+    assert(client->enable_performance_overlay == !complete);
+    assert((client->controller_overlay_hotkey != NULL) == !complete);
+    assert(client->has_desired_resolution_x == !complete);
+    assert(client->has_desired_framerate_numerator == !complete);
+    // Configuring explicitly chooses Fast, including for a supplied empty config.
+    assert(client->has_quality && client->quality == k_EStreamQualityFast);
     CStreamingClientCaps *caps = config->streaming_client_caps;
     assert(caps->system_info && strstr(caps->system_info, "test platform"));
     assert(caps->has_system_can_suspend && !caps->system_can_suspend);
@@ -76,8 +98,10 @@ static void wire_capabilities(IHS_StreamDeviceFormFactor form, unsigned decode, 
 int main(void) {
     assert(!IHS_SessionSetClientCapabilities(NULL, NULL));
     IHS_Init();
-    wire_capabilities(IHS_StreamDeviceFormFactorComputer, 0, 0);
-    wire_capabilities(IHS_StreamDeviceFormFactorUnknown, 30000, 90000);
+    wire_capabilities(IHS_StreamDeviceFormFactorComputer, 0, 0, false, false);
+    wire_capabilities(IHS_StreamDeviceFormFactorComputer, 0, 0, false, true);
+    wire_capabilities(IHS_StreamDeviceFormFactorUnknown, 30000, 90000, true, false);
+    wire_capabilities(IHS_StreamDeviceFormFactorUnknown, 30000, 90000, true, true);
     IHS_Quit();
     return 0;
 }

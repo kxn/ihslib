@@ -103,6 +103,11 @@ typedef struct IHS_StreamingRequest {
     int32_t gamepadCount;
     /** Optional real game ID from host activity. Zero starts the selected interface. */
     uint64_t gameId;
+    /** Request a dedicated network-test endpoint/key (discovery field 12).
+     * The normal success callback supplies its credentials. Create a fresh
+     * Session, configure its network-test mode, then connect; no game/decoder
+     * or settings change is implied. False requests ordinary streaming. */
+    bool networkTest;
 } IHS_StreamingRequest;
 
 typedef struct IHS_ClientDiscoveryCallbacks {
@@ -202,12 +207,19 @@ bool IHS_ClientAuthorizationCancel(IHS_Client *client);
  * - Streaming functions
  * ---------------------------------------------------- */
 
+/** Request ordinary streaming or a network-test ticket. Waiting/Busy retries
+ * every second until a terminal response or explicit StreamingCancel; this
+ * API does not invent a silent-host deadline. Unauthorized is returned to
+ * the caller's separate pairing UI. Credentials are borrowed during success.
+ * A repeated request to the same host while waiting is ignored. A new request
+ * replaces ticket ownership without sending Cancel; explicit Cancel is separate. */
 bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
                                 const IHS_StreamingRequest *request);
 
-/** Cancel the current launch transaction, preserving a bounded late-response record. */
+/** Cancel the current request, including one that already supplied a ticket,
+ * preserving a bounded late-response/host record. */
 bool IHS_ClientStreamingCancel(IHS_Client *client);
 
-/** Worker consumed the successful launch response into a session. Subsequent
- * local stop is a session disconnect, not a launch cancellation. */
+/** Stop waiting after consuming the ticket. Keep the ID available for explicit
+ * Cancel; replacement Request retires it without cancellation (RE §124). */
 void IHS_ClientStreamingEstablished(IHS_Client *client);

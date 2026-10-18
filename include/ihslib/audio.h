@@ -49,28 +49,57 @@ typedef struct IHS_StreamAudioConfig {
     size_t codecDataLen;
 } IHS_StreamAudioConfig;
 
+/* Extended media header, after the receive-time clock conversion. The payload
+ * remains encoded codec data. Values are valid only during submitFrame. */
+typedef struct IHS_StreamAudioFrameInfo {
+    uint16_t id;
+    uint32_t timestamp; /* local 16.16 seconds, captured before the decoder FIFO */
+} IHS_StreamAudioFrameInfo;
+
+/* start runs synchronously on the control-dispatch caller, before pending
+ * media is replayed. A nonzero result disables this audio decoder, preserving
+ * the session and configured media endpoint; stop is not called for failure.
+ * If OS worker creation fails after backend success, retain the backend and
+ * bounded pending queue until stop, matching the original decoder lifecycle.
+ * submit/submitFrame run on the joined audio worker. stop runs on the teardown
+ * caller only after that worker has stopped and its queued frames are purged.
+ * These callbacks must not synchronously destroy the session or reconfigure
+ * the same media endpoint. */
 typedef struct IHS_StreamAudioCallbacks {
     int (*start)(IHS_Session *session, const IHS_StreamAudioConfig *config, void *context);
 
     int (*submit)(IHS_Session *session, IHS_Buffer *data, void *context);
 
     void (*stop)(IHS_Session *session, void *context);
+
+    /* Initialize this callbacks struct to zero and rebuild callers with this
+     * header. Preferred when supplied; otherwise the original submit is used.
+     * IDs allow the application decoder to reproduce official Opus PLC/FEC. */
+    int (*submitFrame)(IHS_Session *session, const IHS_StreamAudioFrameInfo *info,
+                       IHS_Buffer *data, void *context);
+
+    /* Optional player/device stage. Runs synchronously before codec factory dispatch,
+     * including unsupported codecs. Nonzero skips decoder creation; the player
+     * owns any retained device/jitter state until the next prepare or its own
+     * shutdown. When present, start/stop manage the decoder only; stop follows
+     * worker join/purge and must preserve the player's queued audio tail.
+     * Without prepare, the legacy combined start/stop contract is retained.
+     * Zero-initialize this struct and rebuild callers with this header. */
+    int (*prepare)(IHS_Session *session, const IHS_StreamAudioConfig *config, void *context);
 } IHS_StreamAudioCallbacks;
 
 /**
- * Microphone (client → server) streaming. The library does not capture or encode audio;
- * it only handles the protocol framing. The user provides:
- *   - `start`: called when the server requests a microphone stream. The config carries
- *     the negotiated codec / sample rate / channel count chosen by Steam. Return 0 on
- *     success; non-zero aborts the channel (no frames will be sent). Open and configure
- *     the platform capture device here.
- *   - `stop`: called when the server requests teardown (or the session is closing). Close
- *     the capture device here. No frames may be passed to IHS_SessionSendMicrophoneData
- *     after this returns.
- *
- * After `start` succeeds the user's capture thread calls IHS_SessionSendMicrophoneData
- * once per encoded frame. Steam's reference client uses libopus at 480 samples per
- * channel per frame for Opus, or raw 32-bit float PCM passthrough for codec=Raw.
+ * Optional local capture lifecycle notifications. Register before Connect.
+ * Start is called by the local StartMicrophoneStream API with caller-supplied
+ * encoded-format metadata. Return zero when ready; on failure retain no worker.
+ * Stop must stop/join application-owned capture threads. It runs without Base.
+ * The application owner serializes local Start/Stop and must quiesce these API
+ * calls before destroying the session. Encoded data may race with Stop safely.
+ * Begin encoded submissions only after StartMicrophoneStream returns.
+ * Config delegates should post an owner event; do not run blocking capture
+ * lifecycle callbacks from a delegate while it holds the protocol Base lock.
+ * Registration does not enable config field 15 or advertise a hardware device.
+ * The library neither captures nor encodes samples.
  */
 typedef struct IHS_StreamMicrophoneCallbacks {
     int (*start)(IHS_Session *session, const IHS_StreamAudioConfig *config, void *context);

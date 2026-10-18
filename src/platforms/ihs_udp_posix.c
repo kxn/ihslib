@@ -33,6 +33,7 @@
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <fcntl.h>
 #include <errno.h>
 
@@ -91,6 +92,15 @@ void IHS_UDPSocketClose(IHS_UDPSocket *s) {
     free(s);
 }
 
+int IHS_UDPSocketWaitReadable(IHS_UDPSocket *s, uint32_t timeoutMs) {
+    fd_set reads;
+    FD_ZERO(&reads); FD_SET(s->fd, &reads);
+    struct timeval timeout = {.tv_sec = timeoutMs / 1000, .tv_usec = (timeoutMs % 1000) * 1000};
+    int result = select(s->fd + 1, &reads, NULL, NULL, &timeout);
+    if (result < 0 && errno == EINTR) return 0;
+    return result < 0 ? -1 : result > 0;
+}
+
 int IHS_UDPSocketReceive(IHS_UDPSocket *s, IHS_UDPPacket *packet) {
     struct sockaddr_storage sender;
     socklen_t senderlen = sizeof(sender);
@@ -130,14 +140,21 @@ bool IHS_UDPSocketSend(IHS_UDPSocket *s, const IHS_UDPPacket *packet) {
     struct sockaddr_storage addr;
     size_t addr_len = AddressToSys(&packet->address, &addr);
     IHS_MutexLock(s->mutex);
-    bool ret = sendto(s->fd, IHS_BufferPointer(&packet->buffer), packet->buffer.size, 0,
-                      (struct sockaddr *) &addr, addr_len) > 0;
+    /* Official TransportUDP BInit sets O_NONBLOCK. Keep bounded receive waits,
+     * but make each outgoing attempt nonblocking, including the one goodbye. */
+    ssize_t sent = sendto(s->fd, IHS_BufferPointer(&packet->buffer), packet->buffer.size, MSG_DONTWAIT,
+                          (struct sockaddr *) &addr, addr_len);
+    bool ret = sent == (ssize_t)packet->buffer.size;
+    int error = errno;
     IHS_MutexUnlock(s->mutex);
+    if (!ret) errno = error;
     return ret;
 }
 
 bool IHS_UDPSocketSetBlocking(IHS_UDPSocket *s, bool blocking) {
-    return fcntl(s->fd, F_SETFL, blocking ? 0 : O_NONBLOCK) == 0;
+    int flags = fcntl(s->fd, F_GETFL);
+    if (flags < 0) return false;
+    return fcntl(s->fd, F_SETFL, blocking ? flags & ~O_NONBLOCK : flags | O_NONBLOCK) == 0;
 }
 
 bool IHS_UDPSocketSetRecvTimeout(IHS_UDPSocket *s, uint32_t timeoutUs) {

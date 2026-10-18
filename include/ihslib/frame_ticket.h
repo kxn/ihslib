@@ -29,4 +29,16 @@ bool IHS_FrameTicketComplete(IHS_FrameTicket *, const IHS_FrameOutcome *);
 
 /* Decoder-side only; these take the endpoint short lock. */
 bool IHS_FrameTicketDecodeStage(IHS_FrameTicket *, bool end, uint64_t us);
+/* Video input submission scope. Begin before the backend call; end at accepted
+ * input, with a protocol-side fallback for failure/no backend. End is recorded
+ * once per invocation, independently of delayed physical output. */
+bool IHS_FrameTicketVideoDecodeStage(IHS_FrameTicket *, bool end);
+/* Renderer-side stage capture; short endpoint lock, no session/GPU access. */
+bool IHS_FrameTicketUploadStage(IHS_FrameTicket *, bool end, uint64_t us);
 void IHS_FrameTicketSetSize(IHS_FrameTicket *, uint32_t bytes);
+
+/* Finished video AU timestamp in the local 16.16 stream-clock domain.
+ * Separate from first-RX statistics. Decoder sets it before submission; an
+ * output consumer snapshots it while holding its ticket reference. */
+void IHS_FrameTicketSetVideoTimestamp(IHS_FrameTicket *, uint32_t timestamp);
+bool IHS_FrameTicketVideoTimestamp(IHS_FrameTicket *, uint32_t *timestamp);

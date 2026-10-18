@@ -24,6 +24,8 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "ch_data.h"
 #include "endianness.h"
@@ -31,15 +33,76 @@
 
 #include "ihs_buffer_ext.h"
 
-#define DISCARD_DIFF IHS_SESSION_PACKET_TIMESTAMP_FROM_MILLIS(200)
-
 static void DataThreadWorker(IHS_SessionChannelData *channel);
 
-static void DataThreadInterrupt(IHS_SessionChannelData *channel);
+static void DataThreadInterrupt(IHS_SessionChannelData *channel, bool restarting);
 
-static void ReceivedFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame);
+void IHS_SessionChannelDataReceiveFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame);
 
 static const char *DataChannelName(IHS_SessionChannelType type);
+
+typedef struct IHS_FECFrameNode {
+    IHS_SessionFrame frame;
+    struct IHS_FECFrameNode *next;
+} IHS_FECFrameNode;
+
+static bool PollFEC(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
+    IHS_FECFrameNode *node = channel->fecHead;
+    if (!node)
+        return false;
+    channel->fecHead = node->next;
+    if (!channel->fecHead)
+        channel->fecTail = NULL;
+    channel->fecQueuedBytes -= node->frame.body.capacity + sizeof(*node);
+    channel->fecQueuedCount--;
+    IHS_BufferClear(&frame->body, true);
+    *frame = node->frame;
+    /* The worker also reuses this buffer for ordinary assembled messages. */
+    if (frame->body.maxCapacity < IHS_FEC_MAX_PAYLOAD)
+        frame->body.maxCapacity = IHS_FEC_MAX_PAYLOAD;
+    free(node);
+    return true;
+}
+
+static void QueueFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
+    /* Official client OnStreamPacket 7ad00c..7ad01c: transport windows,
+     * reconstruction and feedback still run while paused; gate complete data
+     * frames before handing them to the media consumer. Frames already owned
+     * by that consumer are not retrospectively discarded on Pause. */
+    IHS_Session *session = channel->base.session;
+    if (frame->body.size && *IHS_BufferPointer(&frame->body) == k_EStreamDataPacket &&
+        (session->state.connectionState != IHS_SessionConnectionStateConnected ||
+         session->transport.clientPaused)) {
+        IHS_BufferClear(&frame->body, true);
+        return;
+    }
+    size_t size = frame->body.capacity + sizeof(IHS_FECFrameNode);
+    if (size > channel->fecQueueLimit) {
+        IHS_BufferClear(&frame->body, true);
+        return;
+    }
+    while (channel->fecHead &&
+           (channel->fecQueuedBytes + size > channel->fecQueueLimit ||
+            channel->fecQueuedCount == channel->fecQueueCapacity)) {
+        IHS_SessionFrame old = {0};
+        PollFEC(channel, &old);
+        IHS_BufferClear(&old.body, true);
+    }
+    IHS_FECFrameNode *node = malloc(sizeof(*node));
+    if (!node) {
+        IHS_BufferClear(&frame->body, true);
+        return;
+    }
+    *node = (IHS_FECFrameNode){.frame = *frame};
+    if (channel->fecTail)
+        channel->fecTail->next = node;
+    else
+        channel->fecHead = node;
+    channel->fecTail = node;
+    channel->fecQueuedBytes += size;
+    channel->fecQueuedCount++;
+    memset(frame, 0, sizeof(*frame));
+}
 
 IHS_SessionChannel *IHS_SessionChannelDataCreate(const IHS_SessionChannelDataClass *cls,
                                                  IHS_Session *session, IHS_SessionChannelType type,
@@ -53,61 +116,81 @@ bool IHS_SessionChannelDataInit(IHS_SessionChannel *channel, uint16_t windowCapa
     dataCh->lock = IHS_MutexCreate();
     dataCh->windowLock = IHS_MutexCreate();
     dataCh->windowCond = IHS_CondCreate();
-    dataCh->window = IHS_SessionPacketsWindowCreate(windowCapacity);
+    dataCh->receive = IHS_SessionUnreliableGet(channel->session, channel->id, windowCapacity);
+    if (dataCh->receive)
+        dataCh->receive->maxReceiveDelay = 6553; /* StartAudio/VideoData setter */
+    dataCh->fecQueueCapacity = windowCapacity;
+    dataCh->fecQueueLimit = (size_t)windowCapacity * 2048;
+    /* Keep a single supported payload admissible even for small audio/test
+     * windows. This is the local FIFO memory bound, not a wire limit. */
+    if (dataCh->fecQueueLimit < IHS_FEC_MAX_PAYLOAD + sizeof(IHS_FECFrameNode))
+        dataCh->fecQueueLimit = IHS_FEC_MAX_PAYLOAD + sizeof(IHS_FECFrameNode);
     atomic_init(&dataCh->interrupted, false);
-    if (!dataCh->lock || !dataCh->windowLock || !dataCh->windowCond || !dataCh->window) {
+    if (!dataCh->lock || !dataCh->windowLock || !dataCh->windowCond ||
+        !dataCh->receive) {
         channel->initFailed = true;
         return false;
+    }
+    const IHS_SessionChannelDataClass *cls = (const void *)channel->cls;
+    if (cls->startOnCaller) {
+        dataCh->callerStarted = cls->start(channel);
+        if (!dataCh->callerStarted) {
+            /* Official player-start failure keeps the media channel mapping,
+             * replays pending packets, and drops them without a decoder. */
+            dataCh->discardFrames = true;
+            return true;
+        }
     }
     char threadName[16];
     snprintf(threadName, 16, "IHS%s", DataChannelName(channel->type));
     dataCh->worker = IHS_ThreadCreate((IHS_ThreadFunction *)DataThreadWorker, threadName, dataCh);
-    channel->initFailed = dataCh->worker == NULL;
+    if (!dataCh->worker && cls->startOnCaller) {
+        /* Original OnStreamStarted ignores OS Thread::Start failure. Retain
+         * the initialized backend and queue until Stop; the existing FIFO
+         * memory bound still applies. Teardown purges before backend stop. */
+        return true;
+    }
+    channel->initFailed = !dataCh->worker;
+    if (channel->initFailed)
+        DataThreadInterrupt(dataCh, false);
     return !channel->initFailed;
 }
 
 void IHS_SessionChannelDataDeinit(IHS_SessionChannel *channel) {
     IHS_SessionChannelData *dataCh = (IHS_SessionChannelData *)channel;
+    if (channel->cls && channel->cls->dataInterrupt) channel->cls->dataInterrupt(channel, false);
 
     assert(!dataCh->worker || dataCh->interrupted);
 
-    IHS_ThreadJoin(dataCh->worker);
-    if (dataCh->window)
-        IHS_SessionPacketsWindowDestroy(dataCh->window);
-    IHS_MutexDestroy(dataCh->windowLock);
-    IHS_CondDestroy(dataCh->windowCond);
-    dataCh->window = NULL;
-    IHS_MutexDestroy(dataCh->lock);
+    if (dataCh->worker)
+        IHS_ThreadJoin(dataCh->worker);
+    IHS_SessionFrame remaining = {0};
+    while (PollFEC(dataCh, &remaining))
+        IHS_BufferClear(&remaining.body, true);
+    const IHS_SessionChannelDataClass *cls = (const void *)channel->cls;
+    if (dataCh->callerStarted) {
+        assert(cls && cls->startOnCaller);
+        /* Original OnStreamStopped joins/purges before virtual StopDecoding. */
+        cls->stop(channel);
+        dataCh->callerStarted = false;
+    }
+    if (dataCh->windowLock)
+        IHS_MutexDestroy(dataCh->windowLock);
+    if (dataCh->windowCond)
+        IHS_CondDestroy(dataCh->windowCond);
+    if (dataCh->lock)
+        IHS_MutexDestroy(dataCh->lock);
 }
 
 void IHS_SessionChannelDataReceived(IHS_SessionChannel *channel, IHS_SessionPacket *packet) {
-    IHS_SessionChannelData *dataCh = (IHS_SessionChannelData *)channel;
-    assert(dataCh->window != NULL);
-    IHS_SessionPacketType type = packet->header.type;
-    if (type != IHS_SessionPacketTypeUnreliable && type != IHS_SessionPacketTypeUnreliableFrag)
-        return;
-    IHS_MutexLock(dataCh->windowLock);
-    if (!IHS_SessionPacketsWindowAdd(dataCh->window, packet)) {
-        IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Data",
-                       "%s channel items overflow! Available: %u", DataChannelName(channel->type),
-                       IHS_SessionPacketsWindowAvailable(dataCh->window));
-        /* Drop everything, not just whole frames: Discard() walks forward to the
-         * next frame-head packet, so once the head of the oldest frame is lost the
-         * window is stuck full and every later packet overflows too. */
-        IHS_SessionPacketsWindowReleaseAll(dataCh->window);
-        IHS_SessionChannelDataLost(channel);
-        IHS_SessionPacketsWindowAdd(dataCh->window,
-                                    packet); /* now fits; caller clears on failure */
-    }
-    IHS_CondSignal(dataCh->windowCond);
-    IHS_MutexUnlock(dataCh->windowLock);
-    dataCh->lastPacketTimestamp = packet->header.sendTimestamp;
+    IHS_SessionUnreliableReceived(channel->session, packet);
 }
 
 void IHS_SessionChannelDataLost(IHS_SessionChannel *channel) {
     CStreamDataLostMsg message = CSTREAM_DATA_LOST_MSG__INIT;
     IHS_SessionPacket packet;
-    IHS_SessionChannelInitializePacket(channel, &packet, IHS_SessionPacketTypeUnreliable, true,
+    /* Final Socket emission adds CRC only when negotiated (protocol RE §113). */
+    IHS_SessionChannelInitializePacket(channel, &packet, IHS_SessionPacketTypeUnreliable, false,
                                        IHS_PACKET_ID_NEXT);
     IHS_BufferAppendUInt8(&packet.body, k_EStreamDataLost);
     IHS_BufferAppendMessage(&packet.body, (const ProtobufCMessage *)&message);
@@ -116,19 +199,63 @@ void IHS_SessionChannelDataLost(IHS_SessionChannel *channel) {
 }
 
 void IHS_SessionChannelDataStopped(IHS_SessionChannel *channel) {
-    DataThreadInterrupt((IHS_SessionChannelData *)channel);
+    DataThreadInterrupt((IHS_SessionChannelData *)channel, false);
+}
+
+void IHS_SessionChannelDataJoinAndPurge(IHS_SessionChannelData *data, bool restarting) {
+    DataThreadInterrupt(data, restarting);
+    atomic_store(&data->interrupted, true);
+    if (data->worker) IHS_ThreadJoin(data->worker);
+    data->worker = NULL;
+    IHS_MutexLock(data->windowLock);
+    IHS_SessionFrame frame = {0};
+    while (PollFEC(data, &frame)) IHS_BufferClear(&frame.body, true);
+    IHS_MutexUnlock(data->windowLock);
+}
+
+void IHS_SessionChannelDataRestartWorker(IHS_SessionChannelData *data) {
+    assert(!data->worker);
+    IHS_MutexLock(data->windowLock);
+    atomic_store(&data->interrupted, false);
+    IHS_MutexUnlock(data->windowLock);
+    char name[16];
+    snprintf(name, sizeof(name), "IHS%s", DataChannelName(data->base.type));
+    data->worker = IHS_ThreadCreate((IHS_ThreadFunction *)DataThreadWorker, name, data);
+    /* Original Reset ignores the OS Start result and retains the actor. */
 }
 
 size_t IHS_SessionChannelDataFrameHeaderParse(IHS_SessionDataFrameHeader *header,
                                               const IHS_Buffer *data) {
     if (data->size < IHS_SESSION_DATA_FRAME_HEADER_SIZE)
         return 0;
+    header->timestampsLocal = false;
+    header->receivedRecorded = false;
     size_t offset = 0;
     offset += IHS_ReadUInt16LE(IHS_BufferPointerAt(data, offset), &header->id);
     offset += IHS_ReadUInt32LE(IHS_BufferPointerAt(data, offset), &header->timestamp);
     offset += IHS_ReadUInt16LE(IHS_BufferPointerAt(data, offset), &header->inputMark);
     offset += IHS_ReadUInt32LE(IHS_BufferPointerAt(data, offset), &header->inputRecvTimestamp);
     return offset;
+}
+
+void IHS_SessionChannelDataReceiveReliableFrame(IHS_SessionChannel *channel,
+                                                 IHS_SessionFrame *frame) {
+    IHS_SessionChannelData *data = (void *)channel;
+    IHS_MutexLock(data->windowLock);
+    if (!data->interrupted && !data->discardFrames) {
+        IHS_SessionFrame owned = {.header = frame->header, .mediaOffset = frame->mediaOffset,
+                                   .mediaPrepared = frame->mediaPrepared};
+        IHS_BufferTransferOwnership(&frame->body, &owned.body);
+        QueueFrame(data, &owned);
+        IHS_CondSignal(data->windowCond);
+    }
+    IHS_MutexUnlock(data->windowLock);
+}
+
+bool IHS_SessionChannelDataPollLocked(IHS_SessionChannelData *channel, IHS_SessionFrame *frame,
+                                       uint16_t *missing) {
+    *missing = 0;
+    return PollFEC(channel, frame);
 }
 
 static void DataThreadWorker(IHS_SessionChannelData *channel) {
@@ -138,7 +265,7 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
     const char *channelName = DataChannelName(channel->base.type);
     IHS_SessionLog(channel->base.session, IHS_LogLevelInfo, "Data", "Starting %s channel",
                    channelName);
-    if (!cls->start((IHS_SessionChannel *)channel)) {
+    if (!cls->startOnCaller && !cls->start((IHS_SessionChannel *)channel)) {
         IHS_SessionLog(channel->base.session, IHS_LogLevelError, "Data",
                        "Failed to start %s channel", channelName);
         IHS_SessionDisconnect(channel->base.session);
@@ -150,18 +277,11 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
     while (!channel->interrupted) {
         IHS_MutexLock(channel->windowLock);
         bool hasFrame;
+        uint16_t missing;
         for (;;) {
-            /* Retry the age-based discard on every wakeup, not just once per
-             * delivered frame: a packet lost at the head makes Poll fail forever,
-             * and the discard that would step over it is the only way out. */
-            uint16_t discarded = IHS_SessionPacketsWindowDiscard(channel->window, DISCARD_DIFF);
-            if (discarded > 0) {
-                IHS_SessionLog(channel->base.session, IHS_LogLevelDebug, channelName,
-                               "Discarded %u packets", discarded);
-            }
-            if ((hasFrame = IHS_SessionPacketsWindowPoll(channel->window, &frame))) {
+            hasFrame = IHS_SessionChannelDataPollLocked(channel, &frame, &missing);
+            if (hasFrame)
                 break;
-            }
             /* Stop may have signalled before this worker acquired windowLock. */
             if (channel->interrupted)
                 break;
@@ -172,17 +292,20 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
         }
         IHS_MutexUnlock(channel->windowLock);
         if (hasFrame) {
-            ReceivedFrame(channel, &frame);
+            IHS_SessionChannelDataReceiveFrame(channel, &frame);
             IHS_SessionPacketsWindowReleaseFrame(&frame);
         }
     }
     IHS_SessionLog(channel->base.session, IHS_LogLevelInfo, "Data", "Stopping %s channel",
                    channelName);
     IHS_BufferClear(&frame.body, true);
-    cls->stop((IHS_SessionChannel *)channel);
+    if (!cls->startOnCaller)
+        cls->stop((IHS_SessionChannel *)channel);
 }
 
-static void DataThreadInterrupt(IHS_SessionChannelData *channel) {
+static void DataThreadInterrupt(IHS_SessionChannelData *channel, bool restarting) {
+    if (channel->base.cls && channel->base.cls->dataInterrupt)
+        channel->base.cls->dataInterrupt(&channel->base, restarting);
     if (!channel->worker || channel->interrupted) {
         return;
     }
@@ -195,8 +318,10 @@ static void DataThreadInterrupt(IHS_SessionChannelData *channel) {
     IHS_MutexUnlock(channel->windowLock);
 }
 
-static void ReceivedFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
-    assert(frame->header.type == IHS_SessionPacketTypeUnreliable);
+void IHS_SessionChannelDataReceiveFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
+    assert(frame->header.type == IHS_SessionPacketTypeUnreliable ||
+           frame->header.type == IHS_SessionPacketTypeUnreliableFEC ||
+           frame->header.type == IHS_SessionPacketTypeReliable);
     if (frame->body.size < 1)
         return;
     EStreamDataMessage type = *IHS_BufferPointer(&frame->body);
@@ -204,14 +329,22 @@ static void ReceivedFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *fra
     if (type != k_EStreamDataPacket) {
         return;
     }
-    IHS_SessionDataFrameHeader header;
+    IHS_SessionDataFrameHeader header = {0};
     bool hasHeader = false;
-    if (frame->body.size > IHS_SESSION_DATA_FRAME_HEADER_SIZE) {
+    if (frame->body.size >= IHS_SESSION_DATA_FRAME_HEADER_SIZE) {
         hasHeader = true;
         size_t offset = IHS_SessionChannelDataFrameHeaderParse(&header, &frame->body);
         IHS_BufferOffsetBy(&frame->body, (int)offset);
         header.sendTimestamp = frame->header.sendTimestamp;
         header.receiveTimestamp = frame->header.receiveTimestamp;
+        header.receiveBegin = frame->header.receiveBegin;
+        if (frame->mediaPrepared) {
+            header.timestamp -= frame->mediaOffset;
+            header.sendTimestamp -= frame->mediaOffset;
+            if (header.inputRecvTimestamp) header.inputRecvTimestamp -= frame->mediaOffset;
+            header.timestampsLocal = true;
+            header.receivedRecorded = true;
+        }
     }
     const IHS_SessionChannelDataClass *cls = (const IHS_SessionChannelDataClass *)channel->base.cls;
     if (hasHeader)
@@ -227,4 +360,13 @@ static const char *DataChannelName(IHS_SessionChannelType type) {
     default:
         return "Data";
     }
+}
+
+bool IHS_SessionChannelDataBuildFeedback(IHS_SessionChannelData *channel, uint32_t now,
+                                         IHS_SessionPacket *packet, uint32_t *waitTicks) {
+    return IHS_SessionUnreliableBuildFeedback(channel->receive, now, packet, waitTicks);
+}
+
+void IHS_SessionChannelDataUpdateAt(IHS_SessionChannelData *channel, uint32_t tick) {
+    IHS_SessionUnreliableUpdateAt(channel->base.session, channel->base.id, tick);
 }

@@ -41,6 +41,9 @@ IHS_UDPSocket *IHS_UDPSocketOpen(bool broadcast);
 
 void IHS_UDPSocketClose(IHS_UDPSocket *socket);
 
+/* Readiness only: 1 ready, 0 timeout/retry, -1 fatal local error. */
+int IHS_UDPSocketWaitReadable(IHS_UDPSocket *, uint32_t timeoutMs);
+
 int IHS_UDPSocketReceive(IHS_UDPSocket *s, IHS_UDPPacket *packet);
 
 /**

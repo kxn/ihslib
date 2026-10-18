@@ -43,6 +43,9 @@ void IHS_SessionPacketsWindowDestroy(IHS_SessionPacketsWindow *window);
 
 bool IHS_SessionPacketsWindowAdd(IHS_SessionPacketsWindow *window, IHS_SessionPacket *packet);
 
+/* accepted and newly inserted are distinct for old/duplicate packets (§58). */
+bool IHS_SessionPacketsWindowAddEx(IHS_SessionPacketsWindow *, IHS_SessionPacket *, bool *inserted);
+
 bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionFrame *frame);
 
 /**
@@ -51,11 +54,11 @@ bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionF
  * @param diff
  */
 uint16_t IHS_SessionPacketsWindowDiscard(IHS_SessionPacketsWindow *window, uint32_t diff);
+uint16_t IHS_SessionPacketsWindowDiscardEx(IHS_SessionPacketsWindow *, uint32_t diff, uint16_t *missing);
 
 /**
- * Recycle every pending packet and reset head/tail. Unlike Discard(), this can't
- * fail to free anything: Discard() only advances past frame-head packets, so a
- * window holding nothing but orphaned fragments (frame head lost) is immovable.
+ * Recycle every pending packet and reset head/tail, regardless of its age or
+ * whether it contains a complete frame. Used for bounded-capacity recovery.
  */
 void IHS_SessionPacketsWindowReleaseAll(IHS_SessionPacketsWindow *window);
 
@@ -83,3 +86,22 @@ size_t IHS_SessionPacketsWindowHoleBitmap(const IHS_SessionPacketsWindow *window
 /* Reliable streams start at a known ID and never discard orphan fragments. */
 IHS_SessionPacketsWindow *IHS_SessionPacketsWindowCreateReliable(uint16_t capacity, uint16_t firstId);
 uint16_t IHS_SessionPacketsWindowContiguousId(const IHS_SessionPacketsWindow *window);
+
+/* Both reliable NACK and UnreliableNack use the first PRESENT successor as bitmap base, while the
+ * watermark stops before the first hole. Snapshot while holding windowLock. */
+typedef struct IHS_MediaFeedback {
+    uint16_t base, confirmed;
+    uint8_t bitmap[40];
+    size_t bitmapBytes;
+    uint32_t receiveTimestamp;
+    uint8_t retransmitCount;
+} IHS_MediaFeedback;
+bool IHS_SessionPacketsWindowMediaFeedback(const IHS_SessionPacketsWindow *, IHS_MediaFeedback *);
+
+/* Fresh media channels, like reliable channels, start at packet ID zero. */
+IHS_SessionPacketsWindow *IHS_SessionPacketsWindowCreateMedia(uint16_t capacity);
+
+/* Snapshot a reliable gap and whether any present successor is older than 65
+ * local clock ticks. This age scan is not capped at the bitmap's 320 bits. */
+bool IHS_SessionPacketsWindowReliableFeedback(const IHS_SessionPacketsWindow *, uint32_t now,
+                                               IHS_MediaFeedback *, bool *mature);

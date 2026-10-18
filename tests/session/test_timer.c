@@ -103,8 +103,10 @@ int main(int argc, char *argv[]) {
     IHS_TimerTaskStart(timer2, task_run, NULL, 0, &timer2_ctx2);
 
     sleep(1);
-    IHS_TimerTaskStop(timer1_task1);
+    /* This task has no automatic end. Read its immutable context before Stop;
+     * the timer worker may destroy the task as soon as Stop returns. */
     assert(IHS_TimerTaskGetContext(timer1_task1) == &timer1_ctx1);
+    IHS_TimerTaskStop(timer1_task1);
     sleep(1);
 
     // Regression: IHS_TimerTaskStopImmediate previously passed `timer` instead of `task`

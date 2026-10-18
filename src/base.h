@@ -47,6 +47,14 @@ typedef struct IHS_BaseRunCallbacks {
      * @param context
      */
     void (*finalized)(IHS_Base *base, void *context);
+
+    /* Runs on the receive worker between bounded receive attempts. Never on
+     * the application's rendering/input thread. */
+    void (*update)(IHS_Base *base, void *context);
+
+    /* Optional protocol-owned readiness/drain cycle. False terminates the
+     * receive worker; socket/buffer remain owned by BaseWorker until join. */
+    bool (*receiveCycle)(IHS_Base *, void *context, IHS_UDPPacket *);
 } IHS_BaseRunCallbacks;
 
 struct IHS_Base {
@@ -56,7 +64,9 @@ struct IHS_Base {
     uint8_t deviceToken[32];
 
     struct {
-        IHS_LogFunction *log;
+        /* Logging may run under control/decoder locks. A callback snapshot
+         * must never acquire Base in reverse order (protocol reference §110). */
+        _Atomic(IHS_LogFunction *) log;
         IHS_BaseReceivedFunction *received;
         const IHS_BaseRunCallbacks *run;
     } callbacks;

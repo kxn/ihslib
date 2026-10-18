@@ -1,12 +1,28 @@
 target_sources(ihslib PRIVATE
         session.c
+        lifecycle.c
+        shutdown.c
+        client_shutdown.c
+        media_pending.c
+        media_receive.c
+        connection_id.c
+        client_config.c
         packet.c
+        fec.c
         frame.c
         window.c
         frame_crypto.c
         frame_stats.c
         frame_tracker.c
         clock.c
+        network_stats.c
+        media_network_stats.c
+        network_test.c
         callbacks.c
-        retransmission.c)
+        microphone.c
+        reliable.c
+        unreliable.c
+        retransmission.c
+        outgoing.c
+        outgoing_sort.c)
 add_subdirectory(channels)

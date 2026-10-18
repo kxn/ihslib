@@ -169,14 +169,12 @@ void IHS_HIDDeviceSDLApplyPendingWrites(IHS_HIDDeviceSDL *sdl) {
 }
 
 void HandleRumble(IHS_HIDDeviceSDL *sdl, const RumbleCommand *rumble) {
-    IHS_HIDDeviceLog(&sdl->base, IHS_LogLevelVerbose, "HID.SDL", "Rumble(dur=%u, lo=%u, hi=%u)", rumble->durationMs,
-                     rumble->lowFreq, rumble->highFreq);
+    /* Applied with the device lock held. Per-command logging would acquire
+     * the session lock (device -> session -> timer -> device inversion). */
     SDL_RumbleGamepad(sdl->controller, rumble->lowFreq, rumble->highFreq, rumble->durationMs);
 }
 
 static void HandleRumbleTriggers(IHS_HIDDeviceSDL *sdl, const RumbleCommand *rumble) {
-    IHS_HIDDeviceLog(&sdl->base, IHS_LogLevelInfo, "HID.SDL", "RumbleTriggers(dur=%u, lo=%u, hi=%u)",
-                     rumble->durationMs, rumble->lowFreq, rumble->highFreq);
     SDL_RumbleGamepadTriggers(sdl->controller, rumble->lowFreq, rumble->highFreq, rumble->durationMs);
 }
 

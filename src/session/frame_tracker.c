@@ -1,9 +1,11 @@
 #include "frame_tracker.h"
 #include "ihs_thread.h"
+#include "packet.h"
 #include <assert.h>
 #include <limits.h>
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <time.h>
 
 enum publication { OPEN, CLAIMED, READY, EXPIRED, CLOSED };
 struct IHS_FrameTicket {
@@ -13,12 +15,19 @@ struct IHS_FrameTicket {
     bool occupied, settled;
     IHS_TrackedFrame frame;   /* receive/decode under owner lock; identity immutable */
     IHS_FrameOutcome payload; /* claimant only, readable after READY(acquire) */
+    uint64_t completionSerial;
+    uint32_t completionTimestamp;
+    bool statsConsumed; /* owner lock */
+    bool hasVideoTimestamp; /* owner lock, independent of receive statistics */
+    uint32_t videoTimestamp;
+    bool videoDecodeActive, videoDecodeEnded; /* owner lock */
 };
 struct IHS_FrameTracker {
     IHS_Mutex *lock;
     atomic_uint refs;
+    atomic_uint_fast64_t completions;
     uint64_t sessionId, epoch, serial, highestSequence;
-    bool accepting, haveSequence;
+    bool accepting, haveSequence, statsTracking;
     uint64_t seen[IHS_FRAME_TRACKER_CAPACITY];
     bool seenValid[IHS_FRAME_TRACKER_CAPACITY];
     IHS_FrameTicket records[IHS_FRAME_TRACKER_CAPACITY];
@@ -50,6 +59,7 @@ IHS_FrameTracker *IHS_FrameTrackerCreate(uint64_t sessionId) {
         return NULL;
     }
     atomic_init(&t->refs, 1);
+    atomic_init(&t->completions, 0);
     t->sessionId = sessionId;
     for (size_t i = 0; i < IHS_FRAME_TRACKER_CAPACITY; ++i) {
         t->records[i].owner = t;
@@ -123,6 +133,9 @@ bool IHS_FrameTicketClaim(IHS_FrameTicket *r) {
 void IHS_FrameTicketPublish(IHS_FrameTicket *r, const IHS_FrameOutcome *outcome) {
     assert(atomic_load_explicit(&r->publication, memory_order_relaxed) == CLAIMED);
     r->payload = *outcome;
+    /* This clock is a pure OS call and remains valid after IHS_Quit. */
+    r->completionTimestamp = IHS_SessionPacketTimestamp();
+    r->completionSerial = atomic_fetch_add_explicit(&r->owner->completions, 1, memory_order_relaxed);
     atomic_store_explicit(&r->publication, READY, memory_order_release);
 }
 bool IHS_FrameTicketComplete(IHS_FrameTicket *r, const IHS_FrameOutcome *outcome) {
@@ -222,8 +235,12 @@ IHS_FrameBeginResult IHS_FrameTrackerBegin(IHS_FrameTracker *t, uint64_t epoch, 
     uint64_t version = freeRecord->frame.identity.slotVersion + 1;
     freeRecord->frame = (IHS_TrackedFrame){
         .identity = {t->sessionId, epoch, ++t->serial, version, seq, frameId}, .receive = *receive};
+    freeRecord->hasVideoTimestamp = false;
+    freeRecord->videoTimestamp = 0;
+    freeRecord->videoDecodeActive = freeRecord->videoDecodeEnded = false;
     freeRecord->occupied = true;
     freeRecord->settled = false;
+    freeRecord->statsConsumed = false;
     atomic_store_explicit(&freeRecord->refs, 1, memory_order_relaxed);
     atomic_store_explicit(&freeRecord->publication, OPEN, memory_order_release);
     t->seenValid[seenIndex] = true;
@@ -243,13 +260,53 @@ bool IHS_FrameTrackerDecodeStage(IHS_FrameTracker *t, IHS_FrameTicket *r, bool e
         if (end) {
             r->frame.decodeEndUs = us;
             r->frame.hasDecodeEnd = true;
-        } else {
+        } else if (!r->frame.hasDecodeBegin) {
             r->frame.decodeBeginUs = us;
             r->frame.hasDecodeBegin = true;
         }
     }
     IHS_MutexUnlock(t->lock);
     return ok;
+}
+bool IHS_FrameTicketUploadStage(IHS_FrameTicket *r, bool end, uint64_t us) {
+    IHS_FrameTracker *t = r->owner;
+    IHS_MutexLock(t->lock);
+    bool ok = t->accepting && r->frame.identity.epoch == t->epoch && !r->settled;
+    if (ok) {
+        if (end) {
+            r->frame.uploadEndUs = us;
+            r->frame.hasUploadEnd = true;
+        } else {
+            r->frame.uploadBeginUs = us;
+            r->frame.hasUploadBegin = true;
+        }
+    }
+    IHS_MutexUnlock(t->lock);
+    return ok;
+}
+
+size_t IHS_FrameTrackerCopyStats(IHS_FrameTracker *t, IHS_TrackedFrame *out, size_t capacity) {
+    size_t count = 0;
+    IHS_MutexLock(t->lock);
+    t->statsTracking = true;
+    if (t->accepting) {
+        for (size_t i = 0; i < IHS_FRAME_TRACKER_CAPACITY && count < capacity; ++i) {
+            IHS_FrameTicket *r = &t->records[i];
+            if (!r->occupied || r->settled || r->frame.identity.epoch != t->epoch)
+                continue;
+            out[count] = r->frame;
+            if (atomic_load_explicit(&r->publication, memory_order_acquire) == READY && !r->statsConsumed) {
+                out[count].statsComplete = true;
+                out[count].outcome = r->payload;
+                out[count].completionSerial = r->completionSerial;
+                out[count].completionTimestamp = r->completionTimestamp;
+                r->statsConsumed = true;
+            }
+            ++count;
+        }
+    }
+    IHS_MutexUnlock(t->lock);
+    return count;
 }
 size_t IHS_FrameTrackerSettle(IHS_FrameTracker *t, uint64_t nowUs, uint64_t timeoutUs,
                               IHS_TrackedFrame *out, size_t capacity) {
@@ -268,6 +325,10 @@ size_t IHS_FrameTrackerSettle(IHS_FrameTracker *t, uint64_t nowUs, uint64_t time
         }
         if (state != READY && state != EXPIRED)
             continue;
+        /* A publication racing between protocol collection and this cleanup
+         * must remain available for the next collection. */
+        if (state == READY && t->statsTracking && !r->statsConsumed)
+            continue;
         out[count] = r->frame;
         out[count++].outcome = state == READY
                                    ? r->payload
@@ -282,10 +343,52 @@ size_t IHS_FrameTrackerSettle(IHS_FrameTracker *t, uint64_t nowUs, uint64_t time
 bool IHS_FrameTicketDecodeStage(IHS_FrameTicket *r, bool end, uint64_t us) {
     return IHS_FrameTrackerDecodeStage(r->owner, r, end, us);
 }
+bool IHS_FrameTicketVideoDecodeStage(IHS_FrameTicket *r, bool end) {
+    IHS_FrameTracker *t = r->owner;
+    IHS_MutexLock(t->lock);
+    bool ok = t->accepting && r->frame.identity.epoch == t->epoch && !r->settled;
+    if (end) ok = ok && r->videoDecodeActive && !r->videoDecodeEnded;
+    if (ok) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        uint64_t us = (uint64_t)now.tv_sec * 1000000 + now.tv_nsec / 1000;
+        if (end) {
+            r->frame.decodeEndUs = us;
+            r->frame.hasDecodeEnd = r->videoDecodeEnded = true;
+        } else {
+            r->videoDecodeActive = true;
+            r->videoDecodeEnded = false;
+            if (!r->frame.hasDecodeBegin) {
+                r->frame.decodeBeginUs = us;
+                r->frame.hasDecodeBegin = true;
+            }
+        }
+    }
+    IHS_MutexUnlock(t->lock);
+    return ok;
+}
 void IHS_FrameTicketSetSize(IHS_FrameTicket *r, uint32_t bytes) {
     IHS_FrameTracker *t = r->owner;
     IHS_MutexLock(t->lock);
     if (!r->settled)
         r->frame.receive.frameSize = bytes;
     IHS_MutexUnlock(t->lock);
+}
+
+void IHS_FrameTicketSetVideoTimestamp(IHS_FrameTicket *r, uint32_t timestamp) {
+    IHS_FrameTracker *t = r->owner;
+    IHS_MutexLock(t->lock);
+    if (t->accepting && r->frame.identity.epoch == t->epoch && !r->settled) {
+        r->videoTimestamp = timestamp;
+        r->hasVideoTimestamp = true;
+    }
+    IHS_MutexUnlock(t->lock);
+}
+bool IHS_FrameTicketVideoTimestamp(IHS_FrameTicket *r, uint32_t *timestamp) {
+    IHS_FrameTracker *t = r->owner;
+    IHS_MutexLock(t->lock);
+    bool have = r->hasVideoTimestamp;
+    if (have && timestamp) *timestamp = r->videoTimestamp;
+    IHS_MutexUnlock(t->lock);
+    return have;
 }

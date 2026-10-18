@@ -36,6 +36,9 @@ typedef struct IHS_Session IHS_Session;
 typedef struct IHS_SessionFrame {
     IHS_SessionPacketHeader header;
     IHS_Buffer body;
+    int32_t mediaOffset; /* RX-time peer -> local conversion; never serialized */
+    bool mediaPrepared;  /* offset captured; video receive sampling recorded before FIFO */
+    uint32_t receivedRetries; /* Pop retry-byte sum; reliable loss sample (§58). */
 #if IHSLIB_PERFTRACE
     uint32_t packetTime;
 #endif

@@ -7,12 +7,20 @@
 #include <stdatomic.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 static unsigned progress, authorized;
 static atomic_int failures;
+static atomic_int clock_forward;
+int __real_clock_gettime(clockid_t, struct timespec *);
+int __wrap_clock_gettime(clockid_t clock, struct timespec *time) {
+    int ret=__real_clock_gettime(clock,time);
+    if(!ret && clock==CLOCK_MONOTONIC)time->tv_sec+=atomic_load(&clock_forward);
+    return ret;
+}
 static void on_failure(IHS_Client *c, const IHS_HostInfo *h, IHS_StreamingResult result, void *ctx) {
     (void)c; (void)h; (void)ctx;
-    assert(result == IHS_StreamingTimeout);
+    (void)result;
     atomic_fetch_add(&failures, 1);
 }
 static void on_progress(IHS_Client *c, const IHS_HostInfo *h, void *ctx) {
@@ -76,15 +84,18 @@ int main(void) {
     CMsgRemoteDeviceProofResponse *pr=cmsg_remote_device_proof_response__unpack(NULL,ps,bytes+16+hs);
     assert(pr && !pr->has_request_id && pr->has_updated_secret && !pr->updated_secret);
     assert(pr->response.len>0);cmsg_remote_device_proof_response__free_unpacked(pr,NULL);
-    /* Old Progress messages must not postpone the new transaction's timeout. */
+    /* Original waiting state retries, including beyond the former invented
+     * 15s deadline; stale Progress never belongs to the current transaction. */
     head.msg_type=k_ERemoteDeviceStreamingProgress;
     CMsgRemoteDeviceStreamingProgress stale=CMSG_REMOTE_DEVICE_STREAMING_PROGRESS__INIT;
     stale.request_id=old;
-    for (int i=0;i<10 && !atomic_load(&failures);++i) {
-        usleep(2000000);
+    atomic_store(&clock_forward,16);
+    for (int i=0;i<10;++i) {
+        usleep(1000);
         IHS_ClientStreamingCallback(c,&host.address,&head,(void*)&stale);
     }
-    assert(atomic_load(&failures)==1);
+    assert(receive_id(fd,5)==current);
+    assert(!atomic_load(&failures));
     assert(IHS_ClientStreamingCancel(c));
     /* Timed request retries may precede cancellation on the host socket. */
     uint8_t discard[4096];

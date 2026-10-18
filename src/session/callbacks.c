@@ -100,7 +100,10 @@ void IHS_SessionSetVideoCallbacks(IHS_Session *session, const IHS_StreamVideoCal
     unsigned tracked = callbacks ? !!callbacks->startTracked + !!callbacks->submitTracked +
                                        !!callbacks->stopTracked
                                  : 0;
-    session->invalidVideoCallbacks = tracked != 0 && tracked != 3;
+    session->invalidVideoCallbacks = (tracked != 0 && tracked != 3) ||
+                                    (callbacks && callbacks->flushTracked && tracked != 3) ||
+                                    (callbacks && (callbacks->interruptTracked || callbacks->thinkTracked) &&
+                                     (tracked != 3 || !callbacks->interruptTracked || !callbacks->thinkTracked));
     session->callbacks.video = callbacks;
     session->callbackContexts.video = context;
     IHS_BaseUnlock(&session->base);
@@ -123,17 +126,6 @@ void IHS_SessionSetMicrophoneCallbacks(IHS_Session *session,
     IHS_BaseUnlock(&session->base);
 }
 
-bool IHS_SessionSendMicrophoneData(IHS_Session *session, const uint8_t *data, size_t len) {
-    // No channel = server hasn't started mic (or already stopped). Caller should drop.
-    // Looking it up each call keeps the function safe to invoke from any thread without
-    // the caller having to track channel lifetime.
-    IHS_SessionChannel *mic =
-        IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataMicrophone);
-    if (mic == NULL)
-        return false;
-    return IHS_SessionChannelDataMicrophoneSend(mic, data, len);
-}
-
 void IHS_SessionSetLogFunction(IHS_Session *session, IHS_LogFunction *logFunction) {
     IHS_BaseSetLogFunction(&session->base, logFunction);
 }
@@ -143,9 +135,6 @@ void IHS_SessionReportVideoFrameStage(IHS_Session *session, uint16_t frameId,
     if (session->frameStats == NULL) {
         return;
     }
-    if (timestamp == 0) {
-        timestamp = IHS_SessionPacketTimestamp();
-    }
     IHS_FrameStatsRecordStage(session->frameStats, frameId, stage, timestamp);
 }
 
@@ -154,11 +143,6 @@ void IHS_SessionReportVideoFrameComplete(IHS_Session *session, uint16_t frameId,
     if (session->frameStats == NULL) {
         return;
     }
-    /* Stamp event 18 (Complete) ourselves before delegating, so the aggregator's
-     * fold step can compute Client end-to-end and inter-frame interval. */
-    IHS_FrameStatsRecordStage(session->frameStats, frameId,
-                              (IHS_VideoFrameStage)18 /* k_EStreamFrameEventComplete */,
-                              IHS_SessionPacketTimestamp());
     IHS_FrameStatsRecordComplete(session->frameStats, frameId, result);
 }
 

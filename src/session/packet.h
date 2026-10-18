@@ -25,6 +25,15 @@
 
 #pragma once
 
+/* Producer admission only. Actual socket results are asynchronous and have a
+ * separate 0..4 transport contract; accepted packets may still need retry. */
+typedef enum IHS_SendAdmission {
+    IHS_SendAdmissionAccepted = 0,
+    IHS_SendAdmissionTooLarge = 2,
+    IHS_SendAdmissionNotConnected = 3,
+    IHS_SendAdmissionLocalFailure = 4,
+} IHS_SendAdmission;
+
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -49,6 +58,7 @@ typedef enum IHS_SessionPacketType {
     IHS_SessionPacketTypeNACK = 8,
     IHS_SessionPacketTypeDisconnect = 9,
     IHS_SessionPacketTypeUnreliableNack = 10,
+    IHS_SessionPacketTypeUnreliableFEC = 11,
     IHS_SessionPacketTypeMax,
 } IHS_SessionPacketType;
 
@@ -73,8 +83,10 @@ typedef struct IHS_SessionPacketHeader {
     int16_t fragmentId;
     uint16_t packetId;
     uint32_t sendTimestamp;
+    bool autoPacketId; /* Reserve IDs atomically when queued; never serialized. */
     bool hidReport; /* local classification, inherited by fragments; never serialized */
-    uint32_t receiveTimestamp; /* local metadata, never serialized */
+    uint32_t receiveTimestamp; /* local last receive, never serialized */
+    uint32_t receiveBegin; /* local first receive, carried through frame/FEC queues (§59) */
 } IHS_SessionPacketHeader;
 
 typedef struct IHS_SessionPacket {

@@ -14,15 +14,8 @@
  * version 3 of the License, or (at your option) any later version.
  */
 
-/**
- * A decoder that rejects a frame must put the channel into keyframe wait, exactly as a sequence gap
- * does — otherwise the inter-frames that depend on the rejected one keep being handed to it.
- *
- * Frames go straight to the channel class's dataFrame hook, so this covers ch_data_video.c's
- * recovery logic without a socket. Two observables: submitted frames arrive through the video
- * callbacks, and every keyframe request (IHS_SessionChannelDataLost) queues one packet on the
- * session's send queue.
- */
+/* Android ARM64 1.3.32: backend loss requests recovery without an
+ * unconditional reset; a sequence gap still starts strict keyframe wait. */
 
 #include <assert.h>
 #include <string.h>
@@ -46,7 +39,7 @@ typedef struct IHS_QueueItem {
 } QueuedPacket;
 
 #define VIDEO_HEADER_SIZE 7
-#define MAX_SUBMITTED 8
+#define MAX_SUBMITTED     16
 
 static struct {
     uint8_t data[512];
@@ -77,6 +70,25 @@ static IHS_StreamVideoSubmitResult OnSubmit(IHS_Session *session, uint16_t frame
 static pthread_mutex_t readyLock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t readyCond = PTHREAD_COND_INITIALIZER;
 static bool initialized;
+static unsigned overflowReports;
+static uint32_t firstOverflow, lastOverflow;
+static _Atomic uint64_t fakeNow;
+static _Atomic bool oracleTicks;
+static _Atomic uint32_t oracleNow;
+uint32_t __real_IHS_SessionPacketTimestamp(void);
+uint32_t __wrap_IHS_SessionPacketTimestamp(void) {
+    if (oracleTicks)
+        return oracleNow;
+    uint64_t millis = fakeNow;
+    if (millis)
+        return IHS_SESSION_PACKET_TIMESTAMP_FROM_MILLIS(millis);
+    return __real_IHS_SessionPacketTimestamp();
+}
+uint64_t __real_IHS_TimerNow(void);
+uint64_t __wrap_IHS_TimerNow(void) {
+    uint64_t millis = fakeNow;
+    return millis ? millis : __real_IHS_TimerNow();
+}
 static int OnStart(IHS_Session *s, const IHS_StreamVideoConfig *config, void *context) {
     (void)s; (void)config; (void)context;
     return 0;
@@ -84,6 +96,14 @@ static int OnStart(IHS_Session *s, const IHS_StreamVideoConfig *config, void *co
 bool __real_IHS_SessionSendControlMessage(IHS_Session *, EStreamControlMessage, const ProtobufCMessage *);
 bool __wrap_IHS_SessionSendControlMessage(IHS_Session *s, EStreamControlMessage type,
                                           const ProtobufCMessage *message) {
+    if (type == k_EStreamControlVideoOverflow) {
+        const CStreamVideoOverflowMsg *m = (const CStreamVideoOverflowMsg *)message;
+        assert(m->has_first_frame_id && m->has_last_frame_id);
+        firstOverflow = m->first_frame_id;
+        lastOverflow = m->last_frame_id;
+        overflowReports++;
+        return true;
+    }
     if (type != k_EStreamControlVideoDecoderInfo)
         return __real_IHS_SessionSendControlMessage(s, type, message);
     const CVideoDecoderInfoMsg *decoder = (const CVideoDecoderInfoMsg *)message;
@@ -144,6 +164,7 @@ static size_t TakeKeyframeRequests(void) {
 static void Reset(void) {
     submittedCount = 0;
     nextSubmitResult = IHS_StreamVideoSubmitOK;
+    overflowReports = 0;
     TakeKeyframeRequests();
 }
 
@@ -155,6 +176,8 @@ static void SetUp(void) {
     assert(IHS_SessionSetClientCapabilities(session, &capabilities));
     memset(decoder, 'x', sizeof(decoder) - 1); /* session owns its copy */
     IHS_SessionSetVideoCallbacks(session, &videoCallbacks, NULL);
+    /* This fixture starts media after the transport handshake. */
+    session->state.connectionState = IHS_SessionConnectionStateHandshaking;
     CStartVideoDataMsg message = CSTART_VIDEO_DATA_MSG__INIT;
     message.channel = 3;
     PROTOBUF_C_SET_VALUE(message, codec, k_EStreamVideoCodecH264);
@@ -181,11 +204,6 @@ static void TearDown(void) {
 
 /* ------------------------------------------------------------------ cases */
 
-/**
- * The reference reaches this through a deferred reset: CMarvellAccel::BDecodeFrame @ 0x408adc asks
- * for ResetVideoDecoder @ 0x1fbe78, and HandlePendingResets @ 0x1fbed4 lands it on
- * CStreamDecoderVideo::StopDecoding @ 0x205574, which flushes pending data and sets the wait.
- */
 static void test_decoder_reported_loss_requests_keyframe(void) {
     Reset();
     const uint8_t payload[] = {0x55, 0x66};
@@ -200,25 +218,154 @@ static void test_decoder_reported_loss_requests_keyframe(void) {
     nextSubmitResult = IHS_StreamVideoSubmitReportLost;
     Feed(2, 2000, 1, VideoFrameFlagSubFrameAdvance | VideoFrameFlagFrameFinish, 0, 3, after, sizeof(after));
     assert(submittedCount == 2 && "the failing frame itself still reaches the decoder");
-    // Two requests: the immediate one from SubmitFrame, mirroring FinalDecode @ 0x203844, and the
-    // one HandlePendingResets sends once the reset has been applied.
-    assert(TakeKeyframeRequests() == 2);
-
-    // The wait is now armed, so the next in-sequence frame must be dropped rather than decoded.
+    assert(TakeKeyframeRequests() == 1);
     Feed(3, 3000, 2, VideoFrameFlagSubFrameAdvance | VideoFrameFlagFrameFinish, 0, 3, after, sizeof(after));
-    assert(submittedCount == 2 && "frame after a decoder-reported loss must be dropped");
+    assert(submittedCount == 3); // decoder state has not been destroyed
 
     // A keyframe clears the wait and streaming resumes.
     const uint8_t recovered[] = {0x99};
     Feed(4, 4000, 3, VideoFrameFlagKeyFrame | VideoFrameFlagSubFrameAdvance | VideoFrameFlagFrameFinish,
          0, 3, recovered, sizeof(recovered));
-    assert(submittedCount == 3);
-    assert(submitted[2].data[0] == 0x99);
+    assert(submittedCount == 4);
+    assert(submitted[3].data[0] == 0x99);
 }
 
-int main(void) {
+static void test_soft_backlog_and_strict_gap(void) {
+    Reset();
+    const uint8_t payload[] = {0x42};
+    const uint8_t finish = VideoFrameFlagSubFrameAdvance | VideoFrameFlagFrameFinish;
+    fakeNow = 1000;
+    Feed(10, 0, 20, VideoFrameFlagKeyFrame | finish, 0, 0, payload, 1);
+    Feed(11, 1000, 21, VideoFrameFlagSubFrameAdvance, 2, 3, payload, 1);
+    Feed(11, 11000, 22, finish, 4, 5, payload, 1);
+    assert(submittedCount == 1 && TakeKeyframeRequests() == 1);
+    assert(overflowReports && firstOverflow == 11 && lastOverflow == 11);
+    fakeNow = 1100;
+    Feed(11, 11500, 23, VideoFrameFlagSubFrameAdvance, 0, 1, payload, 1);
+    assert(submittedCount == 2);         // soft sync accepts the completed frame
+    assert(TakeKeyframeRequests() == 0); // exact 100ms is not expired
+    fakeNow = 1101;
+    Feed(12, 12000, 24, finish, 0, 0, payload, 1);
+    assert(submittedCount == 3 && TakeKeyframeRequests() == 1);
+    Feed(13, 13000, 26, finish, 0, 0, payload, 1);
+    assert(submittedCount == 3 && TakeKeyframeRequests() == 0);
+    Feed(14, 14000, 27, finish, 0, 0, payload, 1);
+    assert(submittedCount == 3 && TakeKeyframeRequests() == 0);
+    Feed(15, 15000, 28, VideoFrameFlagKeyFrame | finish, 0, 0, payload, 1);
+    assert(submittedCount == 4); // no retry delay after keyframe
+    fakeNow = 0;
+}
+
+static void test_overflow_frame_ranges(void) {
+    Reset();
+    const uint8_t payload = 0x42;
+    const uint8_t finish = VideoFrameFlagSubFrameAdvance | VideoFrameFlagFrameFinish;
+    Feed(40, 0, 400, VideoFrameFlagKeyFrame | finish, 0, 0, &payload, 1);
+    Feed(41, 1000, 401, 0, 2, 3, &payload, 1);
+    assert(overflowReports == 0);
+    Feed(42, 1001, 402, 0, 2, 3, &payload, 1);
+    assert(overflowReports == 1 && firstOverflow == 41 && lastOverflow == 42);
+    Feed(42, 1002, 403, 0, 2, 3, &payload, 1); // equal inclusive range = 2
+    assert(overflowReports == 2);
+    Feed(43, 1003, 404, 0, 2, 3, &payload, 1); // larger range = 3
+    assert(overflowReports == 3);
+    Feed(41, 1004, 405, 0, 2, 3, &payload, 1); // range 1 < 3: suppress but store
+    assert(overflowReports == 3);
+    Feed(41, 1005, 406, 0, 2, 3, &payload, 1); // equal to the stored 1: report
+    assert(overflowReports == 4 && firstOverflow == 41 && lastOverflow == 41);
+    assert(submittedCount == 1 && TakeKeyframeRequests() == 0);
+}
+
+static void test_overflow_wrap_and_reversed_timestamps(void) {
+    Reset();
+    const uint8_t payload = 0x42;
+    const uint8_t finish = VideoFrameFlagSubFrameAdvance | VideoFrameFlagFrameFinish;
+    Feed(65534, 0, 700, VideoFrameFlagKeyFrame | finish, 0, 0, &payload, 1);
+    Feed(65535, 2000, 701, 0, 2, 3, &payload, 1);
+    Feed(0, 1999, 702, 0, 2, 3, &payload, 1);
+    assert(overflowReports == 0); // signed inclusive frame-ID range is negative
+    Feed(1, 1998, 703, 0, 2, 3, &payload, 1);
+    assert(overflowReports == 1 && firstOverflow == 65535 && lastOverflow == 1);
+    Feed(2, 0, 704, VideoFrameFlagKeyFrame | finish, 0, 0, &payload, 1);
+    Feed(3, 2000, 705, 0, 2, 3, &payload, 1);
+    Feed(4, 1999, 706, 0, 2, 3, &payload, 1);
+    assert(overflowReports == 2 && firstOverflow == 3 && lastOverflow == 4);
+    assert(TakeKeyframeRequests() == 0);
+}
+
+static void test_ready_pending_frames_do_not_wait_for_another_packet(void) {
+    Reset();
+    const uint8_t key = 0x40, a = 0x41, b = 0x42, c = 0x43;
+    const uint8_t finish = VideoFrameFlagSubFrameAdvance | VideoFrameFlagFrameFinish;
+    Feed(60, 0, 600, VideoFrameFlagKeyFrame | finish, 0, 0, &key, 1);
+    Feed(61, 1000, 601, finish, 2, 3, &b, 1);
+    Feed(62, 1001, 602, finish, 0, 0, &c, 1);
+    assert(submittedCount == 1);
+    Feed(61, 1002, 603, VideoFrameFlagSubFrameAdvance, 0, 1, &a, 1);
+    assert(submittedCount == 3); // no later packet is needed to submit frame 62
+    assert(submitted[1].len == 2 && submitted[1].data[0] == a && submitted[1].data[1] == b);
+    assert(submitted[2].len == 1 && submitted[2].data[0] == c);
+}
+
+static void test_pending_storage_bound(void) {
+    Reset();
+    const uint8_t payload = 0x42;
+    const uint8_t finish = VideoFrameFlagSubFrameAdvance | VideoFrameFlagFrameFinish;
+    Feed(20, 0, 100, VideoFrameFlagKeyFrame | finish, 0, 0, &payload, 1);
+    for (unsigned i = 0; i < 256; i++)
+        Feed(21, 1000, 101 + i, 0, 2, 3, &payload, 1);
+    assert(submittedCount == 1 && TakeKeyframeRequests() == 0);
+    Feed(21, 1000, 357, 0, 2, 3, &payload, 1);
+    assert(submittedCount == 1 && TakeKeyframeRequests() == 1);
+    Feed(22, 1000, 358, finish, 0, 0, &payload, 1);
+    assert(submittedCount == 1);
+    Feed(23, 1000, 359, VideoFrameFlagKeyFrame | finish, 0, 0, &payload, 1);
+    assert(submittedCount == 2);
+}
+
+int main(int argc, char **argv) {
     SetUp();
+    if (argc == 2 && !strcmp(argv[1], "--oracle")) {
+        oracleTicks = true;
+        char line[256];
+        unsigned tick, id, seq, flags;
+        const uint8_t payload = 0x42;
+        while (fgets(line, sizeof(line), stdin)) {
+            char mode;
+            if (sscanf(line, "M %c %u", &mode, &tick) == 2) {
+                oracleNow = tick;
+                Feed(10, 0, 0, VideoFrameFlagKeyFrame | VideoFrameFlagFrameFinish, 0, 0, &payload,
+                     1);
+                if (mode == 'H')
+                    Feed(11, 1000, 2, VideoFrameFlagFrameFinish, 0, 0, &payload, 1);
+                if (mode == 'B') {
+                    Feed(11, 1000, 1, VideoFrameFlagSubFrameAdvance, 2, 3, &payload, 1);
+                    Feed(11, 11000, 2, VideoFrameFlagSubFrameAdvance | VideoFrameFlagFrameFinish, 4,
+                         5, &payload, 1);
+                    Feed(11, 11500, 3, VideoFrameFlagSubFrameAdvance, 0, 1, &payload, 1);
+                }
+                Reset();
+            } else if (sscanf(line, "F %u %u %u %u", &tick, &id, &seq, &flags) == 4) {
+                oracleNow = tick;
+                size_t before = submittedCount;
+                Feed(id, 20000, seq, flags, 0, 0, &payload, 1);
+                printf("{\"submitted\":%s,\"lost\":%zu}\n",
+                       submittedCount > before ? "true" : "false", TakeKeyframeRequests());
+            } else if (sscanf(line, "R %u", &flags) == 1) {
+                nextSubmitResult = flags;
+            } else
+                assert(!"bad oracle command");
+        }
+        oracleTicks = false;
+        TearDown();
+        return 0;
+    }
     test_decoder_reported_loss_requests_keyframe();
+    test_soft_backlog_and_strict_gap();
+    test_overflow_frame_ranges();
+    test_overflow_wrap_and_reversed_timestamps();
+    test_ready_pending_frames_do_not_wait_for_another_packet();
+    test_pending_storage_bound();
     TearDown();
     printf("decoder loss tests OK\n");
     return 0;

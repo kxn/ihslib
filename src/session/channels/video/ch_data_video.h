@@ -47,6 +47,12 @@ enum {
     VideoFrameFlagFrameFinish = 0x08,
     VideoFrameFlagKeyFrame = 0x10,
     VideoFrameFlagEncrypted = 0x20,
+    /** Opaque content mode; only the FrameFinish fragment determines it. */
+    VideoFrameFlagContentMode = 0x40,
 };
 
 IHS_SessionChannel *IHS_SessionChannelDataVideoCreate(IHS_Session *session, const CStartVideoDataMsg *message);
+/* Client-cycle owner only; before network/ordinary control consumption. */
+void IHS_SessionVideoHandlePendingReset(IHS_Session *);
+/* Same actor, after ordinary control FIFO, before the client stage. */
+void IHS_SessionVideoHandleFormatRequests(IHS_Session *);

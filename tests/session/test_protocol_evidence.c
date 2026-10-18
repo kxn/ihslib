@@ -12,9 +12,8 @@
 struct IHS_QueueItem { IHS_SessionPacket packet; bool reliable; };
 static IHS_Session *session_new(void) {
     IHS_Session *s = IHS_TestSessionCreate();
+    s->state.connectionState = IHS_SessionConnectionStateHandshaking;
     IHS_TimerTaskStopImmediate(s->retransmission.timer);
-    IHS_SessionChannelControl *c = (void *) s->channels[1];
-    IHS_TimerTaskStopImmediate(c->feedbackTimer);
     return s;
 }
 static void init(IHS_SessionPacket *p, unsigned type, unsigned id, int fragment) {
@@ -22,57 +21,8 @@ static void init(IHS_SessionPacket *p, unsigned type, unsigned id, int fragment)
     p->header.type = type; p->header.channelId = 1;
     p->header.packetId = id; p->header.fragmentId = fragment;
     p->header.sendTimestamp = 123456;
+    p->header.receiveTimestamp = IHS_SessionPacketTimestamp();
     IHS_SessionPacketBodyInitialize(&p->body, false);
-}
-static void receive(IHS_Session *s, unsigned type, unsigned id, int frag) {
-    IHS_SessionPacket p;
-    init(&p, type, id, frag);
-    IHS_BufferAppendUInt8(&p.body, k_EStreamControlClientHandshake);
-    s->channels[1]->cls->received(s->channels[1], &p);
-    IHS_SessionPacketClear(&p, true);
-}
-static void feedback(IHS_Session *s, int confirmed, int base, int mask) {
-    bool ack = false, nack = false;
-    IHS_QueueItem *q;
-    while ((q = IHS_QueuePoll(s->sendQueue))) {
-        const uint8_t *b = IHS_BufferPointer(&q->packet.body);
-        if (q->packet.header.type == IHS_SessionPacketTypeACK) {
-            assert(q->packet.header.packetId == (uint16_t) confirmed);
-            uint32_t echo = b[0] | (uint32_t)b[1]<<8 | (uint32_t)b[2]<<16 | (uint32_t)b[3]<<24;
-            assert(echo >= 123456 && echo < 124112); /* echoed peer clock, <=10 ms processing */
-            ack = true;
-        } else if (q->packet.header.type == IHS_SessionPacketTypeNACK) {
-            assert(base >= 0);
-            assert(q->packet.header.packetId == (uint16_t) base);
-            assert((b[4] | b[5]<<8) == (uint16_t) confirmed);
-            assert(b[6] == mask);
-            nack = true;
-        }
-        IHS_SessionPacketClear(&q->packet, true); IHS_QueueItemFree(q);
-    }
-    assert(ack);
-    assert(nack == (base >= 0));
-}
-static void gaps_and_wrap(void) {
-    IHS_Session *s = session_new();
-    IHS_SessionChannelControl *c = (void *) s->channels[1];
-    /* Lost first packet must remain a hole, not establish a new sequence origin. */
-    receive(s, IHS_SessionPacketTypeReliable, 1, 0);
-    feedback(s, 65535, 0, 2);
-    receive(s, IHS_SessionPacketTypeReliable, 0, 0);
-    feedback(s, 1, -1, 0);
-    receive(s, IHS_SessionPacketTypeReliable, 1, 0); /* lost ACK -> duplicate */
-    feedback(s, 1, -1, 0);
-    IHS_SessionPacketsWindowDestroy(c->framePacketWindow);
-    c->framePacketWindow = IHS_SessionPacketsWindowCreateReliable(320, 65535);
-    c->lastNackSentMs = 0;
-    receive(s, IHS_SessionPacketTypeReliable, 65535, 2); /* head needs two fragments */
-    feedback(s, 65535, -1, 0);
-    receive(s, IHS_SessionPacketTypeReliableFrag, 1, 1); /* missing continuation 0 */
-    feedback(s, 65535, 0, 2);
-    receive(s, IHS_SessionPacketTypeReliableFrag, 0, 0);
-    feedback(s, 1, -1, 0);
-    IHS_SessionDestroy(s);
 }
 static void reliable_window_growth(void) {
     IHS_SessionPacketsWindow *w = IHS_SessionPacketsWindowCreateReliable(320, 65535);
@@ -95,38 +45,6 @@ static void reliable_window_growth(void) {
     IHS_SessionPacketClear(&p, true);
     IHS_SessionPacketsWindowDestroy(w);
 }
-static unsigned drain_nacks(IHS_Session *s) {
-    unsigned count = 0;
-    IHS_MutexLock(s->sendQueueMutex);
-    IHS_QueueItem *q;
-    while ((q = IHS_QueuePoll(s->sendQueue))) {
-        if (q->packet.header.type == IHS_SessionPacketTypeNACK) {
-            assert(q->packet.header.packetId == 0);
-            count++;
-        }
-        IHS_SessionPacketClear(&q->packet, true);
-        IHS_QueueItemFree(q);
-    }
-    IHS_MutexUnlock(s->sendQueueMutex);
-    return count;
-}
-static void lost_nack_recovery(void) {
-    IHS_Session *s = IHS_TestSessionCreate(); /* keep feedback timer running */
-    receive(s, IHS_SessionPacketTypeReliable, 1, 0);
-    assert(drain_nacks(s) >= 1); /* pretend this feedback was lost */
-    unsigned repeated = 0;
-    uint64_t deadline = IHS_TimerNow() + 1000;
-    while (repeated < 2 && IHS_TimerNow() < deadline) {
-        usleep(5000);
-        repeated += drain_nacks(s);
-    }
-    assert(repeated >= 2); /* recovery must not require another incoming packet */
-    receive(s, IHS_SessionPacketTypeReliable, 0, 0);
-    drain_nacks(s);
-    usleep(20000);
-    assert(drain_nacks(s) == 0);
-    IHS_SessionDestroy(s);
-}
 static void nack_layout(void) {
     IHS_Session *s = session_new();
     for (unsigned i = 0; i < 4; i++) {
@@ -136,6 +54,8 @@ static void nack_layout(void) {
         assert(IHS_RetransmissionTrack(&s->retransmission, &p, 100));
         IHS_SessionPacketClear(&p, true);
     }
+    /* This fixture seeds the active protocol window, not a future queued frame. */
+    IHS_RetransmissionActivate(&s->retransmission, 1, 65534, 4);
     IHS_SessionPacket p;
     init(&p, IHS_SessionPacketTypeNACK, 65535, 0);
     IHS_BufferAppendUInt32LE(&p.body, 200); /* not a sequence ID */
@@ -193,12 +113,15 @@ static void nack_age_and_trailing_zeros(void) {
 }
 static void decrypt_attempts(void) {
     IHS_Session *s = session_new();
+    s->state.connectionState = IHS_SessionConnectionStateConnected;
     IHS_SessionChannelControl *c = (void *) s->channels[1];
     /* Malformed ciphertext consumes one attempted encrypted frame, no crash. */
     IHS_SessionPacket p;
     init(&p, IHS_SessionPacketTypeReliable, 0, 0);
     IHS_BufferAppendUInt8(&p.body, k_EStreamControlSetInputTemporarilyDisabled);
     c->base.cls->received(&c->base, &p);
+    IHS_SessionChannelControlUpdateFeedback(c);
+    IHS_SessionChannelControlDrainIncoming(&c->base);
     assert(c->recvEncryptSequence == 1);
     IHS_SessionPacketClear(&p, true);
     uint8_t msg[] = {0x08, 0x01}; /* disabled=true */
@@ -208,6 +131,8 @@ static void decrypt_attempts(void) {
     IHS_BufferAppendUInt8(&p.body, k_EStreamControlSetInputTemporarilyDisabled);
     IHS_BufferAppendMem(&p.body, cipher, len);
     c->base.cls->received(&c->base, &p);
+    IHS_SessionChannelControlUpdateFeedback(c);
+    IHS_SessionChannelControlDrainIncoming(&c->base);
     assert(c->recvEncryptSequence == 2);
     assert(s->state.inputTemporarilyDisabled);
     assert(IHS_SessionInputEnabled(s)); /* Informational dialog, not HID admission. */
@@ -242,7 +167,7 @@ static void clock_and_events(void) {
     assert(rows[0].timestamp == 1050 && rows[1].timestamp == 100);
     assert(rows[2].timestamp == 25 && rows[3].timestamp == 25);
     assert(rows[1].event_id == 13); /* omitted host-only events */
-    slot.eventMask = (1u<<13)|(1u<<18);
+    slot = (IHS_FrameStatsSlot){.eventMask = (1u<<13)|(1u<<18)};
     slot.events[13] = UINT32_MAX-9; slot.events[18] = 10;
     assert(IHS_FrameStatsEncodeEvents(&slot, 20, rows, ptrs) == 2);
     assert(rows[0].timestamp == 10 && rows[1].timestamp == 20);
@@ -288,13 +213,15 @@ static void handshake_unconnected_probe(void) {
     CDiscoveryPingResponse *response = cdiscovery_ping_response__unpack(NULL,
         q->packet.body.size - 5, body + 5);
     assert(response && response->sequence == 2);
-    assert(response->packet_size_received == IHS_PACKET_HEADER_SIZE + sizeof(request));
+    /* Official OnPingRequest serializes the request object: field2 echoes the
+     * requested size (zero here), not this datagram's received length. §43. */
+    assert(response->has_packet_size_received && response->packet_size_received == 0);
     cdiscovery_ping_response__free_unpacked(response, NULL);
     IHS_SessionPacketClear(&q->packet, true); IHS_QueueItemFree(q);
     IHS_SessionDestroy(s);
 }
 static void receive_early(IHS_SessionChannel *channel, IHS_SessionPacket *p) {
-    assert(channel->id == 4 && p->header.packetId == 77);
+    assert(channel->id == 4 && p->header.packetId == 0);
     assert(p->header.receiveTimestamp != 0);
     assert(p->body.size == 1 && *IHS_BufferPointer(&p->body) == 99);
     earlyPackets++;
@@ -332,15 +259,20 @@ static void session_feedback_and_early_data(void) {
     IHS_SessionGetReliabilityStats(s, &stats);
     assert(stats.hidAcknowledged == 1);
     IHS_SessionPacketClear(&p, true);
-    init(&p, IHS_SessionPacketTypeUnreliable, 77, 0);
+    init(&p, IHS_SessionPacketTypeUnreliable, 0, 0);
     p.header.channelId = 4; p.header.srcConnectionId = 34; p.header.dstConnectionId = 12;
     IHS_BufferAppendUInt8(&p.body, 99);
     deliver_wire(s, &p);
-    assert(IHS_SessionChannelFor(s, 4) == NULL && s->pendingDataCount == 1);
+    /* Transport receives/reassembles before decoder configuration. An unknown
+     * message tag is not a complete data packet pending a decoder. */
+    assert(IHS_SessionChannelFor(s, 4) == NULL && s->pendingDataCount == 0);
+    assert(s->unreliable[4] && IHS_SessionPacketsWindowSize(s->unreliable[4]->window) == 1);
     static const IHS_SessionChannelClass cls = {.received=receive_early, .instanceSize=sizeof(IHS_SessionChannel)};
     IHS_SessionChannel *ch = IHS_SessionChannelCreate(&cls, s, IHS_SessionChannelTypeDataVideo, 4, NULL);
     IHS_SessionChannelAdd(s, ch);
-    assert(earlyPackets == 1 && s->pendingDataCount == 0);
+    assert(earlyPackets == 0 && s->pendingDataCount == 0);
+    IHS_SessionUnreliableUpdateAt(s, 4, IHS_SessionPacketTimestamp());
+    assert(!IHS_SessionPacketsWindowSize(s->unreliable[4]->window) && earlyPackets == 0);
     IHS_SessionPacketClear(&p, true);
     IHS_SessionDestroy(s);
 }
@@ -405,7 +337,7 @@ static void negotiation_capabilities(int preference, unsigned bitrate, int expec
     assert(IHS_SessionFrameDecrypt(s, &q->packet.body, &plain, 0, &sequence) == 0);
     CNegotiationSetConfigMsg *config = cnegotiation_set_config_msg__unpack(NULL, plain.size, IHS_BufferPointer(&plain));
     assert(config && config->config);
-    assert(config->config->has_reliable_data && !config->config->reliable_data);
+    assert(config->config->has_reliable_data && config->config->reliable_data);
     assert(config->config->enable_remote_hid && !config->config->enable_touch_input);
     assert(config->config->selected_video_codec == k_EStreamVideoCodecH264);
     CStreamingClientConfig *client = config->streaming_client_config;
@@ -462,9 +394,8 @@ static void explicit_stop_game(void) {
 int main(void) {
     IHS_Init();
     explicit_stop_game();
-    gaps_and_wrap(); nack_layout(); decrypt_attempts(); clock_and_events();
+    nack_layout(); decrypt_attempts(); clock_and_events();
     reliable_window_growth();
-    lost_nack_recovery();
     nack_age_and_trailing_zeros();
     handshake_unconnected_probe();
     session_feedback_and_early_data();

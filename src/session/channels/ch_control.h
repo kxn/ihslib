@@ -39,32 +39,30 @@
  * 8ms tick); reliable delivery is handled entirely by the transport
  * (retransmission until ACK/NACK). See docs/STEAMLINK_PROTOCOL_RE.md §9. */
 
+typedef struct IHS_IncomingControl {
+    struct IHS_IncomingControl *next;
+    EStreamControlMessage type;
+    IHS_Buffer body;
+    IHS_SessionPacketHeader header;
+} IHS_IncomingControl;
+
 typedef struct IHS_SessionChannelControl {
     IHS_SessionChannel base;
-    /** Serializes IHS_SessionChannelControlSend: it allocates a packet id and an
-     * encryption sequence, and the two must stay in step. Three threads send control
-     * messages — the receive thread answering HID requests, the timer thread's
-     * keepalive, and the application's per-frame HID report. */
+    /* Serializes encryption sequence and packet-ID assignment across RX
+     * responses/heartbeat, HID and application producers. */
     IHS_Mutex *sendLock;
-    IHS_Mutex *receiveLock;
-    IHS_TimerTask *feedbackTimer;
-    uint32_t peerTimestamp, peerReceiveTime;
-    bool receivedReliable;
     uint64_t sendEncryptSequence;
     uint64_t recvEncryptSequence;
+    /* Network delivery decrypts before handoff. Main/client-stage consumption
+     * holds neither this queue lock nor the network/Base lock. */
+    IHS_Mutex *incomingLock;
+    IHS_IncomingControl *incomingHead, *incomingTail;
+    unsigned incomingCount;
     uint64_t hidSubmitted;
     uint64_t hidCoalesced;
     uint64_t hidSent;
-    IHS_SessionPacketsWindow *framePacketWindow;
-    /** Set once the frame window overflowed, so we disconnect only once. */
-    bool overflowed;
-    IHS_TimerTask *keepAliveTimer;
-    /** Gap-NACK cadence: official hole-age threshold ~1ms with 5ms update
-     * ticks ([f47000+2444], 0x7fe284); see docs/STEAMLINK_PROTOCOL_RE.md §9.1.
-     * See protocol RE §14 for receive-watermark and echo evidence. */
-    uint64_t lastNackSentMs;
-    uint32_t lastNackTimestamp;
-    bool haveNackTimestamp;
+    uint32_t keepAliveTimestamp; /* RX update ticks, not a millisecond timer. */
+    uint32_t frameEventsTimestamp;
 } IHS_SessionChannelControl;
 
 IHS_SessionChannel *IHS_SessionChannelControlCreate(IHS_Session *session);
@@ -106,15 +104,14 @@ void IHS_SessionChannelControlOnVideo(IHS_SessionChannel *channel, EStreamContro
 void IHS_SessionChannelControlOnAudio(IHS_SessionChannel *channel, EStreamControlMessage type,
                                       IHS_Buffer *payload, const IHS_SessionPacketHeader *header);
 
-void IHS_SessionChannelControlOnMicrophone(IHS_SessionChannel *channel, EStreamControlMessage type,
-                                           IHS_Buffer *payload, const IHS_SessionPacketHeader *header);
-
 void IHS_SessionChannelControlOnCursor(IHS_SessionChannel *channel, EStreamControlMessage type,
                                        IHS_Buffer *payload, const IHS_SessionPacketHeader *header);
 
-void IHS_SessionChannelControlStartHeartbeat(IHS_SessionChannel *channel);
-
-void IHS_SessionChannelControlStopHeartbeat(IHS_SessionChannel *channel);
+/* RX worker: exactly one Starting or Streaming phase per update. */
+void IHS_SessionChannelControlUpdateStage(IHS_SessionChannel *, uint32_t now);
+void IHS_SessionChannelControlUpdateHeartbeat(IHS_SessionChannel *, uint32_t now);
+/* Caller holds sendLock; returns local failures without closing under the lock. */
+IHS_SendAdmission IHS_SessionChannelControlCompleteLocked(IHS_SessionChannelControl *);
 
 void IHS_SessionChannelControlOnHIDMsg(IHS_SessionChannel *channel, const CHIDMessageToRemote *message);
 
@@ -137,3 +134,9 @@ void IHS_ControlDiagnosticsInit(void);
 void IHS_ControlDiagnosticsQuit(void);
 
 void IHS_SessionChannelControlUpdateFeedback(IHS_SessionChannelControl *control);
+
+void IHS_SessionChannelControlReceiveFrame(IHS_SessionChannel *, IHS_SessionFrame *);
+void IHS_SessionChannelControlHandoff(IHS_SessionChannel *, EStreamControlMessage,
+                                      IHS_Buffer *, const IHS_SessionPacketHeader *);
+void IHS_SessionChannelControlDrainIncoming(IHS_SessionChannel *);
+void IHS_SessionChannelControlClearIncoming(IHS_SessionChannel *);

@@ -30,6 +30,7 @@
 #include "video.h"
 #include "input.h"
 #include "hid.h"
+#include "network_test.h"
 
 typedef struct IHS_Session IHS_Session;
 
@@ -57,6 +58,10 @@ typedef struct IHS_SessionConfig {
     uint32_t maxFps;
     uint32_t maxBitrateKbps;
     IHS_StreamQuality quality;
+    /** Saved user/preset choice, default false like official Default. This
+     * requests field 25 at initial negotiation; it is not a loss-rate policy,
+     * redundancy percentage, or a gate on receiving type-11 packets. */
+    bool enableUnreliableFec;
 } IHS_SessionConfig;
 
 /** Optional platform/decoder facts. Unknown fields are omitted from the wire.
@@ -79,6 +84,14 @@ typedef struct IHS_StreamClientCapabilities {
     IHS_StreamDeviceFormFactor formFactor;
     bool hasSystemCanSuspend;
     bool systemCanSuspend;
+    /* Decoder availability is distinct from the requested HEVC preference.
+     * H264 is required by this library. Unset keeps legacy caller behavior. */
+    bool hasVideoDecoderCapabilities;
+    bool supportsVideoHevc;
+    /* Independent legacy protobuf capability, not inferred from decoder
+     * availability. Unset omits the obsolete field (protocol reference §109). */
+    bool hasLegacyHevcCapability;
+    bool legacyHevcCapability;
 } IHS_StreamClientCapabilities;
 
 /** Set before Connect or creation of data channels. Strings are copied; the
@@ -124,6 +137,10 @@ typedef struct IHS_StreamSessionCallbacks {
 
     void (*connected)(IHS_Session *session, void *context);
 
+    /** App completion notice. For peer/timeout stream shutdown, queued controls
+     * and audio/video stop run first; local cancellation discards queued controls.
+     * Transport IDs may already be retired. This is
+     * not the connection delegate; do not use it to observe pre-retirement IDs. */
     void (*disconnected)(IHS_Session *session, void *context);
 
     /**
@@ -132,6 +149,15 @@ typedef struct IHS_StreamSessionCallbacks {
      * @param context Callback context
      */
     void (*finalized)(IHS_Session *session, void *context);
+
+    /** Complete CStreamingClientConfig protobuf, borrowed during this call.
+     * localOnly suppresses message 99; incoming notifications use true.
+     * May reenter the config API. Do not block the receive worker. */
+    void (*clientConfigChanged)(IHS_Session *session, const uint8_t *wire, size_t size,
+                                 bool localOnly, void *context);
+    /** Runs after the delegate, before an optional outgoing message 99.
+     * Queue persistence here; bytes are borrowed during the call. */
+    void (*saveClientConfig)(IHS_Session *session, const uint8_t *wire, size_t size, void *context);
 } IHS_StreamSessionCallbacks;
 
 /*
@@ -152,6 +178,22 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig, const IHS_S
  * @return
  */
 bool IHS_SessionConnect(IHS_Session *session);
+
+/** Publish SDL WILLENTERBACKGROUND / DIDENTERFOREGROUND edges without waiting
+ * for network/decoder locks. Repeated values are idempotent. The session
+ * worker applies Pause/Resume and the connection clock in event order. */
+void IHS_SessionSetForeground(IHS_Session *session, bool foreground);
+
+/** Replace the complete serialized CStreamingClientConfig. Empty means defaults;
+ * absent fields reset, and unknown/nested/repeated fields are retained. Invalid
+ * protobuf leaves state unchanged. This is not a loss-rate/FEC policy.
+ * localOnly suppresses transmission; otherwise 99 is sent only while streaming.
+ * A send failure does not roll back the local replacement. */
+bool IHS_SessionSetStreamingClientConfig(IHS_Session *session, const uint8_t *wire, size_t size,
+                                         bool localOnly);
+/** Return required serialized size. Write only when capacity is sufficient;
+ * zero is a valid empty/default config. Caller owns the destination. */
+size_t IHS_SessionGetStreamingClientConfig(IHS_Session *session, uint8_t *wire, size_t capacity);
 
 /** Wake and stop the session worker thread. Safe to call before
  * IHS_SessionThreadedJoin to guarantee the join completes. */
@@ -197,25 +239,34 @@ void IHS_SessionSetVideoCallbacks(IHS_Session *session, const IHS_StreamVideoCal
 
 void IHS_SessionSetInputCallbacks(IHS_Session *session, const IHS_StreamInputCallbacks *callbacks, void *context);
 
-/**
- * Register microphone (client → server) callbacks. Setting non-NULL callbacks here
- * advertises the `enable_microphone_streaming` capability to the server during
- * negotiation; the server may then issue Start/Stop microphone control messages.
- *
- * Must be called before IHS_SessionConnect — capability negotiation happens once and
- * cannot be re-advertised mid-session.
- */
+/** Register optional local capture callbacks before Connect; see audio.h. */
 void IHS_SessionSetMicrophoneCallbacks(IHS_Session *session, const IHS_StreamMicrophoneCallbacks *callbacks,
                                        void *context);
 
 /**
- * Submit one encoded microphone frame for transmission. Call from the capture / encode
- * thread, once per Opus packet (or once per PCM chunk when codec=Raw). The payload is
- * wrapped in a data-frame header and queued for unreliable send on the mic data channel.
- *
- * Returns false if no microphone channel is currently active (the server hasn't issued
- * Start, or has issued Stop, or the session isn't connected); the caller can use this
- * as the cue to drop the frame.
+ * Start a local upstream microphone stream with already selected encoded format.
+ * Requires Streaming and the negotiated audio codec. Sends control 107, without
+ * waiting for a host Start command. Repeated Start allocates the next channel,
+ * resets frame ID and replaces local capture ownership without an implicit 108.
+ * codecData is borrowed only during this call; non-NULL represents presence.
+ * Payload/codecData limits are local 1 MiB resource guards, not measured limits.
+ * Start/Stop must be serialized by the application owner; data may race Stop.
+ * Returns control-queue admission, not host acknowledgement or device proof.
+ */
+bool IHS_SessionStartMicrophoneStream(IHS_Session *session, const IHS_StreamAudioConfig *config);
+
+/**
+ * Clear local sending, stop/join capture outside Base, then emit 108 if active.
+ * Returns whether a local stream was active, not a host acknowledgement.
+ */
+bool IHS_SessionStopMicrophoneStream(IHS_Session *session);
+
+/**
+ * Copy one encoded frame to the outgoing queue. Delivery follows negotiated
+ * reliable_data; ordinary unreliable delivery retains its bounded NACK window.
+ * Returns false without an active local stream, for oversized/invalid input or
+ * failed queue admission. Stop prevents subsequent admission; no RX table entry
+ * is borrowed. The caller retains its input buffer after this function returns.
  */
 bool IHS_SessionSendMicrophoneData(IHS_Session *session, const uint8_t *data, size_t len);
 
@@ -281,5 +332,25 @@ void IHS_SessionSetLogFunction(IHS_Session *session, IHS_LogFunction *logFunctio
 
 const IHS_SessionInfo *IHS_SessionGetInfo(const IHS_Session *session);
 
+/** Whether the first transport Connected has not yet been accepted. Includes
+ * a newly created session before its worker starts. False in handshake/auth,
+ * negotiation/streaming and stop/disconnect. Caller must own the session. */
+bool IHS_SessionIsConnectionPending(const IHS_Session *session);
+
 void IHS_SessionGetReliabilityStats(IHS_Session *session,
                                     IHS_SessionReliabilityStats *stats);
+
+/** Video-frame network statistics, separate from transport packet loss.
+ * Final means/result are populated by stream stopping. Empty windows and
+ * equal window weighting follow the official client (protocol reference §117).
+ * Reading does not change FEC, transport or reporting. Thread-safe. */
+typedef struct IHS_SessionMediaNetworkStats {
+    uint16_t nextFrameId;
+    uint32_t frameSpan, windowFrameSpan, windowReceived, windows;
+    float windowLossPercent, windowMeanNetworkMs, windowDeviationMs;
+    float lossPercent, meanNetworkMs, deviationMs;
+    unsigned result; /* Official 0/1/2 classification; not an adaptive policy. */
+    bool valid; /* False after local allocation failure; Start resets it. */
+    bool finalized;
+} IHS_SessionMediaNetworkStats;
+void IHS_SessionGetMediaNetworkStats(IHS_Session *, IHS_SessionMediaNetworkStats *);

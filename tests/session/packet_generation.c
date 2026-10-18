@@ -39,6 +39,7 @@ static void test_frame_initialize() {
                     .hostConnectionId = 234,
             }
     };
+    session.base.lock = IHS_MutexCreate();
     IHS_SessionChannel *channel = IHS_SessionChannelDiscoveryCreate(&session);
 
 
@@ -64,6 +65,7 @@ static void test_frame_initialize() {
     IHS_BufferClear(&parsed.body, true);
 
     IHS_SessionChannelDestroy(channel);
+    IHS_MutexDestroy(session.base.lock);
 }
 
 static void test_short_packet_rejected() {

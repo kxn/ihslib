@@ -40,11 +40,11 @@ struct IHS_Client {
     struct {
         IHS_HostInfo host;
         uint32_t requestId;
-        uint64_t until, lastCancel;
     } canceled[8];
     unsigned canceledNext;
     IHS_HostInfo lastLaunchHost;
     uint32_t lastLaunchId;
+    bool lastLaunchHasTicket; /* Successful reply retains explicit-cancel ownership. */
     IHS_Timer *timers;
     IHS_TimerTask *discoveryTimer;
     uint32_t discoveryInterval;

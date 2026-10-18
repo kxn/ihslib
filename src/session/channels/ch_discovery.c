@@ -36,32 +36,18 @@
 #include "ihs_buffer_ext.h"
 #include "hid/manager.h"
 
-typedef struct {
-    IHS_SessionChannel base;
-    IHS_TimerTask *disconnectTimerTask;
-} DiscoveryChannel;
-
-static void OnDiscoveryDeinit(IHS_SessionChannel *channel);
-
 static void OnDiscoveryReceived(IHS_SessionChannel *channel, IHS_SessionPacket *packet);
 
 static void OnConnectACK(IHS_SessionChannel *channel, const IHS_SessionPacket *packet);
 
 static void OnUnconnected(IHS_SessionChannel *channel, const IHS_SessionPacket *packet);
 
-static void OnDisconnect(IHS_SessionChannel *channel);
-
 static void OnPingRequest(IHS_SessionChannel *channel, const IHS_SessionPacket *packet,
                           const CDiscoveryPingRequest *request);
 
-static uint64_t DisconnectTimerRun(int runCount, void *context);
-
-static void DisconnectTimerEnd(void *context);
-
 static const IHS_SessionChannelClass ChannelClass = {
         .received = OnDiscoveryReceived,
-        .deinit = OnDiscoveryDeinit,
-        .instanceSize = sizeof(DiscoveryChannel)
+        .instanceSize = sizeof(IHS_SessionChannel)
 };
 
 IHS_SessionChannel *IHS_SessionChannelDiscoveryCreate(IHS_Session *session) {
@@ -70,17 +56,8 @@ IHS_SessionChannel *IHS_SessionChannelDiscoveryCreate(IHS_Session *session) {
 }
 
 void IHS_SessionChannelDiscoveryDisconnect(IHS_SessionChannel *channel) {
-    DiscoveryChannel *discoveryCh = (DiscoveryChannel *) channel;
-    IHS_TimerTaskStartOwned(channel->session->timers, &discoveryCh->disconnectTimerTask,
-                            DisconnectTimerRun, DisconnectTimerEnd, 0, channel);
-}
-
-static void OnDiscoveryDeinit(IHS_SessionChannel *channel) {
-    DiscoveryChannel *discoveryCh = (DiscoveryChannel *) channel;
-    /* Clear the sole owner and finish its callback while the channel is alive. */
-    if (channel->session->timers) {
-        IHS_TimerTaskStopOwned(channel->session->timers, &discoveryCh->disconnectTimerTask);
-    }
+    /* Compatibility entry: application Close, no timer or repeated goodbye. */
+    IHS_SessionDisconnect(channel->session);
 }
 
 static void OnDiscoveryReceived(IHS_SessionChannel *channel, IHS_SessionPacket *packet) {
@@ -92,8 +69,7 @@ static void OnDiscoveryReceived(IHS_SessionChannel *channel, IHS_SessionPacket *
             OnUnconnected(channel, packet);
             break;
         case IHS_SessionPacketTypeDisconnect:
-            /* It's not possible to get packet after interruption, so we can safely call OnDisconnect. */
-            OnDisconnect(channel);
+            IHS_SessionTransportDisconnect(channel->session);
             break;
         default:
             break;
@@ -104,14 +80,20 @@ static void OnConnectACK(IHS_SessionChannel *channel, const IHS_SessionPacket *p
     IHS_Session *session = channel->session;
     if (session->state.connectionId != packet->header.dstConnectionId) return;
     // Drop stale / replayed ACKs that arrive after the handshake has progressed.
-    if (session->state.connectionState != IHS_SessionConnectionStateConnecting) return;
+    if (session->state.connectionState != IHS_SessionConnectionStateConnecting ||
+        session->transport.timedOut || session->transport.detached ||
+        IHS_SessionTransportState(session) != IHS_TransportConnecting) return;
+    /* HandleConnected 0x7fbf18: exactly 13B header + 4B echoed time after CRC removal. */
+    if (packet->body.size != 4) return;
     session->state.hostConnectionId = packet->header.srcConnectionId;
-    IHS_RetransmissionAcknowledge(&session->retransmission,
-                                 IHS_SessionChannelIdDiscovery, 0, 0,
-                                 IHS_TimerNow());
-
+    session->state.crcRequired = packet->header.hasCrc;
+    uint32_t echo;
+    IHS_ReadUInt32LE(IHS_BufferPointer(&packet->body), &echo);
+    IHS_StreamClockFeedback(&session->clock, echo, packet->header.sendTimestamp,
+                            packet->header.receiveTimestamp);
     IHS_SessionChannel *control = IHS_SessionChannelFor(session, IHS_SessionChannelIdControl);
-    IHS_SessionChannelControlHandshake(control, false);
+    IHS_SessionChannelControlHandshake(control, session->networkTest.mode != 0);
+    IHS_SessionNetworkTestConnected(session, IHS_SessionPacketTimestamp());
 }
 
 static void OnUnconnected(IHS_SessionChannel *channel, const IHS_SessionPacket *packet) {
@@ -134,57 +116,22 @@ static void OnUnconnected(IHS_SessionChannel *channel, const IHS_SessionPacket *
     }
 }
 
-static void OnDisconnect(IHS_SessionChannel *channel) {
-    IHS_Session *session = channel->session;
-    assert(session != NULL);
-    IHS_BaseLock((IHS_Base *) session);
-    if (session->base.interrupted) {
-        IHS_BaseUnlock((IHS_Base *) session);
-        return;
-    }
-    if (session->callbacks.session && session->callbacks.session->disconnected) {
-        session->callbacks.session->disconnected(session, session->callbackContexts.session);
-    }
-    IHS_SessionLog(session, IHS_LogLevelInfo, "Session", "Session disconnected");
-    IHS_SessionChannel *control = IHS_SessionChannelFor(session, IHS_SessionChannelIdControl);
-    IHS_SessionChannelControlStopHeartbeat(control);
-    IHS_HIDManagerCloseAll(session->hidManager);
-    IHS_SessionInterrupt(session);
-    IHS_BaseUnlock((IHS_Base *) session);
-}
-
 static void OnPingRequest(IHS_SessionChannel *channel, const IHS_SessionPacket *packet,
                           const CDiscoveryPingRequest *request) {
-    CDiscoveryPingResponse response = CDISCOVERY_PING_RESPONSE__INIT;
-    PROTOBUF_C_SET_VALUE(response, sequence, request->sequence);
-    PROTOBUF_C_SET_VALUE(response, packet_size_received, IHS_PACKET_HEADER_SIZE + packet->body.size);
-    size_t msgSize = cdiscovery_ping_response__get_packed_size(&response);
+    IHS_UNUSED(packet);
+    /* The official client builds a response object, but OnPingRequest 0x7accf8
+     * passes the parsed REQUEST to Frame::Put. Preserve that observed wire
+     * behavior (including field presence), not the field2 schema label.
+     * docs/STEAMLINK_PROTOCOL_RE.md §43 records both object addresses. */
+    size_t msgSize = cdiscovery_ping_request__get_packed_size(request);
 
     IHS_SessionPacket outPacket;
-    IHS_SessionChannelInitializePacket(channel, &outPacket, IHS_SessionPacketTypeUnconnected, true, 0);
+    IHS_SessionChannelInitializePacket(channel, &outPacket, IHS_SessionPacketTypeUnconnected, false, 0);
     IHS_BufferAppendUInt8(&outPacket.body, k_EStreamDiscoveryPingResponse);
     IHS_BufferAppendUInt32LE(&outPacket.body, msgSize);
-    IHS_BufferAppendMessage(&outPacket.body, (const ProtobufCMessage *) &response);
+    IHS_BufferAppendMessage(&outPacket.body, &request->base);
 
     IHS_SessionPacketPadTo(&outPacket, request->packet_size_requested);
     IHS_SessionQueuePacket(channel->session, &outPacket, false);
     IHS_SessionPacketClear(&outPacket, true);
-}
-
-static uint64_t DisconnectTimerRun(int runCount, void *context) {
-    IHS_SessionChannel *channel = context;
-    if (channel->session == NULL || channel->session->base.interrupted || runCount > 10) {
-        return 0;
-    }
-    IHS_SessionPacket packet;
-    IHS_SessionChannelInitializePacket(channel, &packet, IHS_SessionPacketTypeDisconnect, true, 0);
-    packet.header.retransmitCount = runCount;
-    IHS_SessionChannelQueuePacket(channel, &packet, false);
-    IHS_SessionPacketClear(&packet, true);
-    return 100;
-}
-
-static void DisconnectTimerEnd(void *context) {
-    DiscoveryChannel *discoveryChannel = context;
-    OnDisconnect(&discoveryChannel->base);
 }

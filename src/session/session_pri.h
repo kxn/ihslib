@@ -29,7 +29,11 @@
 #include "clock.h"
 #include "ihslib/session.h"
 #include "packet.h"
+#include "outgoing.h"
+#include "reliable.h"
 #include "retransmission.h"
+#include "media_network_stats.h"
+#include "network_test.h"
 #include <stdatomic.h>
 
 #include "channels/channel.h"
@@ -38,8 +42,9 @@
 #include "protobuf/remoteplay.pb-c.h"
 
 /**
- * Connection phase. Advances monotonically from Unconnected to Connected; never goes
- * backwards within a single session lifetime (a re-connect requires a fresh session).
+ * Connection phase. Normal startup advances from Unconnected to Connected;
+ * transport/authentication failure returns to Unconnected during shutdown
+ * (a re-connect requires a fresh session).
  * Guards on the message-handling entry points use this to drop stale or replayed
  * packets that would otherwise re-trigger an earlier phase.
  *
@@ -48,7 +53,10 @@
  *   Handshaking   - ConnectACK received, ClientHandshake sent, waiting for ServerHandshake.
  *   Authenticating- ServerHandshake received, AuthenticationRequest sent, waiting for response.
  *   Negotiating   - AuthenticationResponse = Succeeded, waiting for NegotiationInit / sending
- * SetConfig. Connected     - NegotiationComplete sent, the stream is live.
+ * SetConfig.
+ *   Starting      - Host SetConfig copied; next RX update starts the stream.
+ *   Connected     - NegotiationComplete queued, the stream is live.
+ *   Stopping      - Transport delegate retired; drain then stop consumers.
  */
 typedef enum IHS_SessionConnectionState {
     IHS_SessionConnectionStateUnconnected,
@@ -56,24 +64,32 @@ typedef enum IHS_SessionConnectionState {
     IHS_SessionConnectionStateHandshaking,
     IHS_SessionConnectionStateAuthenticating,
     IHS_SessionConnectionStateNegotiating,
+    IHS_SessionConnectionStateStarting,
     IHS_SessionConnectionStateConnected,
+    IHS_SessionConnectionStateStopping,
 } IHS_SessionConnectionState;
 
+typedef enum IHS_TransportState {
+    IHS_TransportConnecting = 0,
+    IHS_TransportConnected = 1,
+    IHS_TransportClosing = 2,
+    IHS_TransportClosed = 3,
+} IHS_TransportState;
+
 typedef struct IHS_SessionState {
-    IHS_SessionConnectionState connectionState;
-    int mtu;
-    uint8_t connectionId;
-    uint8_t hostConnectionId;
+    atomic_int connectionState;
+    atomic_int mtu;
+    atomic_uchar connectionId;
+    atomic_uchar hostConnectionId;
+    atomic_bool crcRequired;
     /**
-     * Negotiated stream-enable flags from CSetStreamingClientConfig. Default true at
-     * session creation since the streaming request asked for all three; the server
-     * confirms (or vetoes) via OnSetClientConfig. Mirrors Steam's BStreamingInput /
-     * BStreamingAudio / BStreamingVideo accessors reading from
-     * clientConfig.enable_*_streaming.
+     * Effective stream-enable values from the complete client config, including
+     * its true defaults. Updated for initial config and incoming/local replacement;
+     * receiving 99 is not an obligatory acknowledgement of a prior request.
      */
     atomic_bool streamingInput;
-    bool streamingAudio;
-    bool streamingVideo;
+    atomic_bool streamingAudio;
+    atomic_bool streamingVideo;
     /* Host notification for UI/diagnostics; not an outbound HID gate. */
     atomic_bool inputTemporarilyDisabled;
 } IHS_SessionState;
@@ -84,30 +100,69 @@ struct IHS_Session {
     IHS_Base base;
     IHS_SessionInfo info;
     IHS_SessionState state;
+    CStreamingClientConfig *clientConfig; /* Base lock; owned complete value. */
+    CNegotiatedConfig *negotiatedConfig; /* RX-owned complete value, including unknown fields. */
+    /* RX-worker-owned connection clock and lifecycle state. The application
+     * publishes foreground transitions through lifecycleGeneration only. */
+    struct {
+        uint32_t updateTime, lastReceive, lastConnect, appliedGeneration;
+        atomic_uint lifecycleGeneration;
+        atomic_uint shutdown; /* 0: live phase, 1: closing, 2: closed */
+        atomic_bool detached, notified, addressCleared;
+        atomic_bool closeRequested; /* Public cancellation; RX owner closes after consumer stop. */
+        bool active, clientPaused, connectionPaused, timedOut;
+    } transport;
     /* Negotiated codec preference and capture size; StartVideoData supplies
      * the actual decoder configuration. */
     int negotiatedVideoCodec;
+    /* OnNegotiationInit's true-only cached request flags (protocol §48). */
+    bool negotiationRemoteHid, negotiationTouchInput;
+    int32_t hostOsType, hostGamingDeviceType;
     uint32_t captureWidth, captureHeight;
     atomic_bool destroying;
     atomic_bool hostVideoStopped;
     atomic_bool hostRequestedStop; /* Explicit inbound StopRequest / Disconnect only. */
+    /* Base-locked upstream producer state, independent of RX consumers. */
+    struct {
+        uint8_t channel, nextChannel;
+        uint16_t nextFrame;
+        bool reliable;
+        const IHS_StreamMicrophoneCallbacks *owner;
+        void *context;
+    } microphone;
     uint8_t numChannels;
     IHS_SessionChannel *channels[16];
     IHS_Thread *sendThread;
     IHS_Cond *sendQueueCond;
     IHS_Mutex *sendQueueMutex;
     IHS_Queue *sendQueue;
+    IHS_Queue *sendBatch;   /* producer-only staging, guarded by sendQueueMutex */
     IHS_Queue *pendingData; /* RX-thread-owned packets awaiting Start*Data metadata */
     unsigned pendingDataCount;
     IHS_Timer *timers;
     IHS_SessionRetransmission retransmission;
+    IHS_Outgoing outgoing;
+    IHS_ReliableChannel reliable[32];
+    struct IHS_UnreliableChannel *unreliable[32];
+    IHS_Mutex *reliableLock;
     IHS_StreamClock clock;
+    /* Connection collectors, serialized by base.lock; no independent timer. */
+    IHS_NetworkBitrateStats networkRates[2]; /* outgoing, incoming */
+    IHS_NetworkPacketStats networkPackets;
+    IHS_NetworkVideoStats networkVideo;
+    IHS_MediaNetworkStats mediaNetworkStats;
+    IHS_SessionNetworkTest networkTest;
     IHS_HIDManager *hidManager;
     struct IHS_FrameStatsAggregator *frameStats;
     struct IHS_FrameTracker *frameTracker;
     uint64_t videoTrackingId, nextVideoEpoch;
     bool invalidVideoCallbacks;
     IHS_StreamClientCapabilities clientCapabilities; /* session-owned strings */
+    char *videoDecoderInfo; /* Current backend; session-owned, Base-locked. */
+    /* Actor's startTracked call can synchronously report get_format before
+     * ChannelAdd publishes the new decoder. No channel/context pointer escapes. */
+    IHS_VideoEpochInfo videoStartingEpoch;
+    bool videoStarting;
     struct {
         const IHS_StreamSessionCallbacks *session;
         const IHS_StreamAudioCallbacks *audio;
@@ -128,6 +183,29 @@ struct IHS_Session {
     IHS_BaseLog((IHS_Base *)(session), (level), (tag), __VA_ARGS__)
 
 void IHS_SessionInterrupt(IHS_Session *session);
+void IHS_SessionMicrophoneClose(IHS_Session *session, bool sendControl);
+
+/* Worker steps, also used by the protocol oracle with a controlled clock. */
+void IHS_SessionTransportBegin(IHS_Session *session, uint32_t now);
+bool IHS_SessionTransportSendConnect(IHS_Session *session);
+IHS_TransportState IHS_SessionTransportState(const IHS_Session *session);
+uint8_t IHS_SessionNextConnectionId(void);
+void IHS_SessionTransportDisconnect(IHS_Session *session);
+void IHS_SessionTransportClose(IHS_Session *session);
+bool IHS_SessionTransportFinish(IHS_Session *session);
+void IHS_SessionNotifyDisconnected(IHS_Session *session);
+/* Connection delegate and client stage are distinct from the app callback. */
+void IHS_SessionClientTransportClosed(IHS_Session *session);
+void IHS_SessionClientStopStreaming(IHS_Session *session);
+CStreamingClientConfig *IHS_SessionClientConfigCopy(IHS_Session *session);
+bool IHS_SessionClientConfigDisableHardware(IHS_Session *session);
+bool IHS_SessionClientConfigStore(IHS_Session *session, const CStreamingClientConfig *config);
+bool IHS_SessionClientConfigApply(IHS_Session *session, const CStreamingClientConfig *config,
+                                  bool localOnly);
+void IHS_SessionTransportPrepareUpdate(IHS_Session *session, uint32_t now);
+void IHS_SessionTransportCheckTimeout(IHS_Session *session, uint32_t now);
+/* Component prefix + deadline, without intervening channel work. */
+void IHS_SessionTransportUpdate(IHS_Session *session, uint32_t now);
 
 bool IHS_SessionSendPacket(IHS_Session *session, IHS_SessionPacket *packet);
 
@@ -135,10 +213,19 @@ bool IHS_SessionSendPacket(IHS_Session *session, IHS_SessionPacket *packet);
  * Add packet to send queue
  * @param session Session instance
  * @param packet Packet
- * @param retransmit If true, retain and retry the packet until its exact ACK arrives
- * @return
+ * @param retransmit Retain until cumulative/selective peer feedback confirms receipt.
+ * @return Producer admission only; actual socket I/O happens on the sender worker.
  */
 bool IHS_SessionQueuePacket(IHS_Session *session, IHS_SessionPacket *packet, bool retransmit);
+IHS_SendAdmission IHS_SessionQueuePacketResult(IHS_Session *session, IHS_SessionPacket *packet,
+                                               bool retransmit);
+/* Caller holds sendQueueMutex across begin, every fragment and end. */
+bool IHS_SessionSendBatchBegin(IHS_Session *session);
+void IHS_SessionSendBatchEnd(IHS_Session *session, bool commit);
+/* Dispatch one complete transaction; wait=true is the bounded worker wait. */
+bool IHS_SessionDispatchQueued(IHS_Session *session, bool wait);
+/* Batch-end per-channel RX/feedback/TX, then rotating retries; before client stage. */
+void IHS_SessionNetworkUpdateAt(IHS_Session *, uint32_t tick);
 
 bool IHS_SessionSendControlMessage(IHS_Session *session, EStreamControlMessage type,
                                    const ProtobufCMessage *message);
@@ -150,7 +237,7 @@ bool IHS_SessionSendControlMessage(IHS_Session *session, EStreamControlMessage t
 bool IHS_SessionInputEnabled(IHS_Session *session);
 
 /**
- * Mirrors Steam's IsStreaming(): true once NegotiationComplete has been sent.
+ * Mirrors Steam's IsStreaming(): live during Starting before Complete is queued.
  * Outbound control traffic that the host only expects from a live session must
  * check this — it accepts an early packet, then abandons the session.
  */
