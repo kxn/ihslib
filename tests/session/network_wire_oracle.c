@@ -423,6 +423,24 @@ int main(int argc, char **argv) {
     char line[8192];
     while (fgets(line, sizeof(line), stdin)) {
         unsigned type, ch, crc, source, dest, size, bad;
+        if (qualityMode && line[0] == 'J') {
+            char hex[4096];
+            assert(sscanf(line, "J %u %4095s", &now, hex) == 2);
+            size_t length = strlen(hex); assert(length && !(length & 1));
+            IHS_Buffer wire = IHS_BUFFER_INIT(2048, 2048);
+            for (size_t i = 0; i < length; i += 2) {
+                unsigned byte; assert(sscanf(hex + i, "%2x", &byte) == 1);
+                uint8_t value = (uint8_t)byte;
+                IHS_BufferAppendMem(&wire, &value, 1);
+            }
+            receiving = true;
+            session->base.callbacks.received(&session->base, &session->info.address, &wire);
+            receiving = false;
+            IHS_SessionChannelDataUpdateAt(media, now + 1);
+            drain_media();
+            IHS_BufferClear(&wire, true);
+            report(); continue;
+        }
         if (qualityMode && (line[0] == 'Z' || line[0] == 'E')) {
             if (line[0] == 'Z') IHS_MediaNetworkStatsStart(&session->mediaNetworkStats);
             else assert(IHS_MediaNetworkStatsStop(&session->mediaNetworkStats));
