@@ -38,6 +38,12 @@ typedef struct IHS_AuthorizationState {
     char pin[16];
     uint32_t requestId;
     IHS_AuthorizationKeyExchange keyExchange;
+    uint8_t *lastAuthKey;
+    size_t lastAuthKeyLen;
+    ERemoteDeviceAuthorizationResult lastAuthResult;
+    unsigned keyExchangeAttempts;
+    bool terminal;
+    bool timerFailed;
 } IHS_AuthorizationState;
 
 static uint64_t AuthorizationRequestTimer(int runCount, void *data);
@@ -48,7 +54,30 @@ static void AuthorizationConfigureTicket(IHS_Client *client, IHS_AuthorizationSt
                                          CMsgRemoteDeviceAuthorizationRequest__CKeyEscrowTicket *ticket);
 
 static void AuthorizationKeyExchange(IHS_Client *client, IHS_AuthorizationState *state,
+                                     IHS_TimerTask *task,
                                      const CMsgRemoteDeviceAuthorizationResponse *resp);
+
+static void AuthorizationSendCancel(IHS_Client *client, const IHS_HostInfo *host) {
+    CMsgRemoteDeviceAuthorizationCancelRequest request = CMSG_REMOTE_DEVICE_AUTHORIZATION_CANCEL_REQUEST__INIT;
+    IHS_ClientSend(client, host->address, k_ERemoteDeviceAuthorizationCancelRequest, (ProtobufCMessage *)&request);
+}
+
+static void AuthorizationFail(IHS_Client *client, IHS_AuthorizationState *state,
+                              IHS_TimerTask *task, IHS_AuthorizationResult result) {
+    state->terminal = true;
+    IHS_TimerTaskStop(task);
+    AuthorizationSendCancel(client, &state->host);
+    if (client->callbacks.authorization && client->callbacks.authorization->failed)
+        client->callbacks.authorization->failed(client, &state->host, result,
+                                                client->callbackContexts.authorization);
+}
+
+static void AuthorizationConfirm(IHS_Client *client, IHS_SocketAddress address,
+                                 ERemoteDeviceAuthorizationResult result) {
+    CMsgRemoteDeviceAuthorizationConfirmed confirmed = CMSG_REMOTE_DEVICE_AUTHORIZATION_CONFIRMED__INIT;
+    confirmed.result = result;
+    IHS_ClientSend(client, address, k_ERemoteDeviceAuthorizationConfirmed, (ProtobufCMessage *)&confirmed);
+}
 
 bool IHS_ClientAuthorizationRequest(IHS_Client *client, const IHS_HostInfo *host, const char *pin) {
     IHS_AuthorizationState *state = calloc(1, sizeof(IHS_AuthorizationState));
@@ -124,11 +153,15 @@ static void AuthorizationResponseVisit(IHS_TimerTask *task, void *context) {
                   (int) resp->result, (unsigned long long) resp->steamid,
                   resp->has_auth_key ? resp->auth_key.len : 0,
                   resp->has_device_token ? resp->device_token.len : 0);
-    if (resp->has_auth_key) {
-        // Like the official client, a response carrying the host's half of the key exchange is
-        // handled as such, whatever its result says.
-        AuthorizationKeyExchange(client, state, resp);
-        IHS_TimerTaskStop(task);
+    if (state->terminal) {
+        if (resp->has_auth_key)
+            AuthorizationConfirm(client, *response->address, k_ERemoteDeviceAuthorizationCanceled);
+        return;
+    }
+    /* Official Android checks result before auth_key (protocol RE §128).
+     * Failed key calculations are confirmed but keep the transaction alive. */
+    if (resp->result == k_ERemoteDeviceAuthorizationSuccess && resp->has_auth_key) {
+        AuthorizationKeyExchange(client, state, task, resp);
         return;
     }
     switch (resp->result) {
@@ -138,19 +171,17 @@ static void AuthorizationResponseVisit(IHS_TimerTask *task, void *context) {
             }
             return;
         case k_ERemoteDeviceAuthorizationSuccess:
+            state->terminal = true;
+            IHS_TimerTaskStop(task);
             if (client->callbacks.authorization && client->callbacks.authorization->success) {
                 client->callbacks.authorization->success(client, &state->host, resp->steamid,
                                                          client->callbackContexts.authorization);
             }
-            break;
+            return;
         default:
-            if (client->callbacks.authorization && client->callbacks.authorization->failed) {
-                client->callbacks.authorization->failed(client, &state->host, (IHS_AuthorizationResult) resp->result,
-                                                        client->callbackContexts.authorization);
-            }
-            break;
+            AuthorizationFail(client, state, task, (IHS_AuthorizationResult)resp->result);
+            return;
     }
-    IHS_TimerTaskStop(task);
 }
 
 
@@ -182,8 +213,13 @@ bool IHS_ClientAuthorizationPubKey(IHS_Client *client, IHS_SteamUniverse univers
 void IHS_ClientAuthorizationCallback(IHS_Client *client, const IHS_SocketAddress *address,
                                      CMsgRemoteClientBroadcastHeader *header, ProtobufCMessage *message) {
     AuthorizationResponseContext context = {client, header, message, address};
-    IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.authorization,
-                            AuthorizationResponseVisit, &context);
+    bool present = IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.authorization,
+                                           AuthorizationResponseVisit, &context);
+    /* Outside an authorization transaction the original handler cancels a
+     * response carrying auth_key, without deriving or notifying success. */
+    if (!present && header->msg_type == k_ERemoteDeviceAuthorizationResponse && message &&
+        ((CMsgRemoteDeviceAuthorizationResponse *)message)->has_auth_key)
+        AuthorizationConfirm(client, *address, k_ERemoteDeviceAuthorizationCanceled);
 }
 
 static uint64_t AuthorizationRequestTimer(int runCount, void *data) {
@@ -192,7 +228,12 @@ static uint64_t AuthorizationRequestTimer(int runCount, void *data) {
     IHS_Client *client = state->client;
     uint8_t pubKey[384];
     size_t pubKeyLen = sizeof(pubKey);
-    IHS_ClientAuthorizationPubKey(client, state->host.universe, pubKey, &pubKeyLen);
+    if (!IHS_ClientAuthorizationPubKey(client, state->host.universe, pubKey, &pubKeyLen)) {
+        state->terminal = true;
+        state->timerFailed = true;
+        AuthorizationSendCancel(client, &state->host);
+        return 0;
+    }
     ProtobufCBinaryData deviceToken = {.data = client->base.deviceToken, .len = sizeof(client->base.deviceToken)};
 
     /* Initialize and serialize ticket */
@@ -205,8 +246,13 @@ static uint64_t AuthorizationRequestTimer(int runCount, void *data) {
     /* RSA encrypt ticket data */
     uint8_t encryptedTicket[2048];
     ProtobufCBinaryData encryptedRequest = {.data = encryptedTicket, .len = sizeof(encryptedTicket)};
-    IHS_CryptoRSAEncrypt(serTicket, serTicketLen, pubKey, pubKeyLen, encryptedRequest.data,
-                         &encryptedRequest.len);
+    if (IHS_CryptoRSAEncrypt(serTicket, serTicketLen, pubKey, pubKeyLen, encryptedRequest.data,
+                              &encryptedRequest.len) != 0) {
+        state->terminal = true;
+        state->timerFailed = true;
+        AuthorizationSendCancel(client, &state->host);
+        return 0;
+    }
 
     uint8_t authKey[IHS_CRYPTO_X25519_KEY_SIZE];
     IHS_AuthorizationKeyExchangeMaskedKey(&state->keyExchange, authKey);
@@ -223,7 +269,7 @@ static uint64_t AuthorizationRequestTimer(int runCount, void *data) {
 
     IHS_SocketAddress address = state->host.address;
     IHS_ClientSend(client, address, k_ERemoteDeviceAuthorizationRequest, (ProtobufCMessage *) &request);
-    return 1000;
+    return 3000;
 }
 
 static void AuthorizationConfigureTicket(IHS_Client *client, IHS_AuthorizationState *state,
@@ -246,43 +292,63 @@ static void AuthorizationConfigureTicket(IHS_Client *client, IHS_AuthorizationSt
 }
 
 static void AuthorizationKeyExchange(IHS_Client *client, IHS_AuthorizationState *state,
+                                     IHS_TimerTask *task,
                                      const CMsgRemoteDeviceAuthorizationResponse *resp) {
-    uint8_t secretKey[IHS_CRYPTO_SHA256_SIZE];
-    bool ok = resp->has_device_token &&
-              IHS_AuthorizationKeyExchangeComplete(&state->keyExchange, resp->auth_key.data,
-                                                   resp->auth_key.len, resp->device_token.data,
-                                                   resp->device_token.len, client->base.deviceId,
-                                                   secretKey);
-
-    CMsgRemoteDeviceAuthorizationConfirmed confirmed =
-            CMSG_REMOTE_DEVICE_AUTHORIZATION_CONFIRMED__INIT;
-    confirmed.result = ok ? k_ERemoteDeviceAuthorizationSuccess : k_ERemoteDeviceAuthorizationDenied;
-    IHS_ClientSend(client, state->host.address, k_ERemoteDeviceAuthorizationConfirmed,
-                   (ProtobufCMessage *) &confirmed);
-
-    if (!ok) {
-        IHS_ClientLog(client, IHS_LogLevelWarn, "Authorization",
-                      "Key exchange with host %s failed (wrong PIN?)", state->host.hostname);
-        if (client->callbacks.authorization && client->callbacks.authorization->failed) {
-            client->callbacks.authorization->failed(client, &state->host, IHS_AuthorizationDenied,
-                                                    client->callbackContexts.authorization);
-        }
+    size_t count = resp->auth_key.len;
+    bool cached = count == state->lastAuthKeyLen &&
+                  (!count || !memcmp(resp->auth_key.data, state->lastAuthKey, count));
+    if (cached) {
+        AuthorizationConfirm(client, state->host.address, state->lastAuthResult);
+        return; /* Cached success confirms again but never advances twice. */
+    }
+    uint8_t *key = count ? malloc(count) : NULL;
+    if (count && !key) {
+        /* Local allocation failure guard, not an inferred protocol result. */
+        AuthorizationFail(client, state, task, IHS_AuthorizationFailed);
         return;
     }
-
-    IHS_ClientLog(client, IHS_LogLevelInfo, "Authorization",
-                  "Key exchange with host %s succeeded, switching to its secret key",
-                  state->host.hostname);
-    IHS_BaseSetSecretKey(&client->base, secretKey);
+    if (count) memcpy(key, resp->auth_key.data, count);
+    uint8_t secretKey[IHS_CRYPTO_SHA256_SIZE] = {0};
+    bool exhausted = state->keyExchangeAttempts++ >= 3;
+    bool ok = !exhausted && resp->has_device_token &&
+              IHS_AuthorizationKeyExchangeComplete(&state->keyExchange, resp->auth_key.data,
+                                                   count, resp->device_token.data,
+                                                   resp->device_token.len, client->base.deviceId,
+                                                   secretKey);
+    free(state->lastAuthKey);
+    state->lastAuthKey = key;
+    state->lastAuthKeyLen = count;
+    state->lastAuthResult = ok ? k_ERemoteDeviceAuthorizationSuccess : k_ERemoteDeviceAuthorizationDenied;
+    if (exhausted) {
+        state->terminal = true;
+        IHS_TimerTaskStop(task);
+        AuthorizationSendCancel(client, &state->host);
+        AuthorizationConfirm(client, state->host.address, state->lastAuthResult);
+        if (client->callbacks.authorization && client->callbacks.authorization->failed)
+            client->callbacks.authorization->failed(client, &state->host, IHS_AuthorizationDenied,
+                                                    client->callbackContexts.authorization);
+        return;
+    }
+    if (ok)
+        IHS_BaseSetSecretKey(&client->base, secretKey);
     memset(secretKey, 0, sizeof(secretKey));
-    if (client->callbacks.authorization && client->callbacks.authorization->success) {
+    AuthorizationConfirm(client, state->host.address, state->lastAuthResult);
+    if (!ok)
+        return;
+    state->terminal = true;
+    IHS_TimerTaskStop(task);
+    if (client->callbacks.authorization && client->callbacks.authorization->success)
         client->callbacks.authorization->success(client, &state->host, resp->steamid,
                                                  client->callbackContexts.authorization);
-    }
 }
 
 static void AuthorizationRequestCleanup(void *data) {
     IHS_AuthorizationState *state = data;
     IHS_AuthorizationKeyExchangeClear(&state->keyExchange);
+    free(state->lastAuthKey);
+    if (state->timerFailed && state->client->callbacks.authorization &&
+        state->client->callbacks.authorization->failed)
+        state->client->callbacks.authorization->failed(state->client, &state->host,
+            IHS_AuthorizationFailed, state->client->callbackContexts.authorization);
     free(data);
 }
