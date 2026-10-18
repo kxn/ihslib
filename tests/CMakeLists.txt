@@ -24,6 +24,8 @@ ihs_add_test(udp_broadcast test_udp_broadcast.c)
 # Calls into ihs-platforms directly, which needs ihslib again after it.
 target_link_libraries(${IHSTEST_TARGET} PRIVATE ihs-platforms ihslib)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    ihs_add_test(base_log_lock test_base_log_lock.c)
+    set_tests_properties(base_log_lock PROPERTIES TIMEOUT 10)
     ihs_add_test(udp_send test_udp_send.c)
     target_link_libraries(${IHSTEST_TARGET} PRIVATE ihs-platforms ihslib)
     target_link_options(${IHSTEST_TARGET} PRIVATE -Wl,--wrap=sendto)

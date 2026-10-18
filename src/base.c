@@ -63,6 +63,7 @@ void IHS_BaseInit(IHS_Base *base, const IHS_ClientConfig *config, IHS_BaseReceiv
     assert(initialized);
     memset(base, 0, sizeof(IHS_Base));
     atomic_init(&base->interrupted, false);
+    atomic_init(&base->callbacks.log, NULL);
     base->broadcast = broadcast;
     base->lock = IHS_MutexCreate();
     base->callbacks.received = recvCb;
@@ -102,9 +103,7 @@ static void BaseUpdateSecretKey(IHS_Base *base, const uint8_t *secretKey) {
 
 void IHS_BaseSetLogFunction(IHS_Base *base, IHS_LogFunction *logFunction) {
     assert(base != NULL);
-    IHS_BaseLock(base);
-    base->callbacks.log = logFunction;
-    IHS_BaseUnlock(base);
+    atomic_store_explicit(&base->callbacks.log, logFunction, memory_order_release);
 }
 
 void IHS_BaseSetRunCallbacks(IHS_Base *base, const IHS_BaseRunCallbacks *callbacks, void *context) {
@@ -117,9 +116,7 @@ void IHS_BaseSetRunCallbacks(IHS_Base *base, const IHS_BaseRunCallbacks *callbac
 
 void IHS_BaseLog(IHS_Base *base, IHS_LogLevel level, const char *tag, const char *fmt, ...) {
     assert(base != NULL);
-    IHS_BaseLock(base);
-    IHS_LogFunction *log = base->callbacks.log;
-    IHS_BaseUnlock(base);
+    IHS_LogFunction *log = atomic_load_explicit(&base->callbacks.log, memory_order_acquire);
     if (!log)
         return;
     char buf[4096];

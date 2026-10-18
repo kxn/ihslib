@@ -64,7 +64,9 @@ struct IHS_Base {
     uint8_t deviceToken[32];
 
     struct {
-        IHS_LogFunction *log;
+        /* Logging may run under control/decoder locks. A callback snapshot
+         * must never acquire Base in reverse order (protocol reference §110). */
+        _Atomic(IHS_LogFunction *) log;
         IHS_BaseReceivedFunction *received;
         const IHS_BaseRunCallbacks *run;
     } callbacks;
