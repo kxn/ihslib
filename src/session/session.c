@@ -400,7 +400,8 @@ const IHS_SessionInfo *IHS_SessionGetInfo(const IHS_Session *session) {
 
 bool IHS_SessionIsConnectionPending(const IHS_Session *session) {
     if (!session || atomic_load(&session->transport.closeRequested) ||
-        atomic_load(&session->transport.shutdown))
+        atomic_load(&session->transport.shutdown) || atomic_load(&session->transport.detached) ||
+        atomic_load(&session->base.interrupted))
         return false;
     IHS_SessionConnectionState phase = atomic_load(&session->state.connectionState);
     return phase == IHS_SessionConnectionStateUnconnected ||
