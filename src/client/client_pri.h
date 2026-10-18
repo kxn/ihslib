@@ -91,6 +91,10 @@ struct IHS_Client {
 bool IHS_ClientSend(IHS_Client *client, IHS_SocketAddress address, ERemoteClientBroadcastMsg type,
                     ProtobufCMessage *message);
 
+/* Original BGetDeviceToken uses the producer's current secret and a fresh IV.
+ * The caller supplies one snapshot shared with its authorization ticket. */
+bool IHS_ClientCreateDeviceToken(IHS_Client *client, const uint8_t secret[32], uint8_t token[32]);
+
 bool IHS_ClientBroadcast(IHS_Client *client, ERemoteClientBroadcastMsg type,
                          ProtobufCMessage *message);
 

@@ -34,6 +34,7 @@ typedef struct IHS_StreamingState {
     IHS_StreamingRequest request;
     uint32_t requestId;
     bool terminal;
+    bool timerFailed;
     uint8_t encryptedPin[3 * IHS_CRYPTO_AES_BLOCK_SIZE];
     size_t encryptedPinLen;
 } IHS_StreamingState;
@@ -97,7 +98,7 @@ bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
     IHS_StreamingState *state = malloc(sizeof(IHS_StreamingState));
     if (!state)
         return false;
-    state->terminal = false;
+    state->terminal = state->timerFailed = false;
     state->client = client;
     state->host = *host;
     state->request = *request;
@@ -387,9 +388,24 @@ static uint64_t StreamingRequestTimer(int runCount, void *context) {
      * codec field at all. The host offers what its encoder can produce. */
     message.device_version = "1.1.0";
 
+    uint8_t secret[32], token[32];
+    IHS_BaseGetSecretKey(&client->base, secret);
+    bool tokenReady = IHS_ClientCreateDeviceToken(client, secret, token);
+    memset(secret, 0, sizeof(secret));
+    if (!tokenReady) {
+        state->terminal = state->timerFailed = true;
+        SendCancel(client, &state->host, state->requestId);
+        IHS_BaseLock(&client->base);
+        if (client->lastLaunchId == state->requestId) {
+            client->lastLaunchId = 0;
+            client->lastLaunchHasTicket = false;
+        }
+        IHS_BaseUnlock(&client->base);
+        return 0;
+    }
     message.has_device_token = true;
-    message.device_token.data = client->base.deviceToken;
-    message.device_token.len = sizeof(client->base.deviceToken);
+    message.device_token.data = token;
+    message.device_token.len = sizeof(token);
 
     message.n_supported_transport = 1;
     EStreamTransport transports[] = {k_EStreamTransportUDP};
@@ -423,6 +439,11 @@ static uint64_t StreamingRequestTimer(int runCount, void *context) {
 }
 
 static void StreamingRequestCleanup(void *context) {
+    IHS_StreamingState *state = context;
+    if (state->timerFailed && state->client->callbacks.streaming &&
+        state->client->callbacks.streaming->failed)
+        state->client->callbacks.streaming->failed(state->client, &state->host,
+            IHS_StreamingFailed, state->client->callbackContexts.streaming);
     free(context);
 }
 

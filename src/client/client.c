@@ -179,6 +179,18 @@ const char *IHS_ClientError(IHS_Client *client) {
     return "";
 }
 
+bool IHS_ClientCreateDeviceToken(IHS_Client *client, const uint8_t secret[32], uint8_t token[32]) {
+    uint8_t id[8];
+    IHS_WriteUInt64LE(id, client->base.deviceId);
+    size_t count = 32;
+    int result = IHS_CryptoSymmetricEncrypt(id, sizeof(id), secret, 32, token, &count);
+    if (result != 0 || count != 32) {
+        memset(token, 0, 32);
+        return false;
+    }
+    return true;
+}
+
 bool IHS_ClientSend(IHS_Client *client, IHS_SocketAddress address, ERemoteClientBroadcastMsg type,
                     ProtobufCMessage *message) {
     CMsgRemoteClientBroadcastHeader header;

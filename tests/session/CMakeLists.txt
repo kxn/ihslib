@@ -11,6 +11,13 @@ ihs_add_test(video_control test_video_control.c)
 target_link_libraries(ihstest_video_control PRIVATE ihs-test-session)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ihs-device-token-oracle device_token_oracle.c)
+    target_include_directories(ihs-device-token-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-device-token-oracle PRIVATE ihslib)
+    target_compile_options(ihs-device-token-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-device-token-oracle PRIVATE -Wl,--wrap=IHS_ClientCreateDeviceToken
+        -Wl,--wrap=IHS_CryptoSymmetricEncrypt -Wl,--wrap=IHS_CryptoRSAEncrypt
+        -Wl,--wrap=IHS_CryptoRandomUInt32 -Wl,--wrap=clock_gettime -Wl,--wrap=time)
     add_executable(ihs-streaming-pin-oracle streaming_pin_oracle.c)
     target_include_directories(ihs-streaming-pin-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-streaming-pin-oracle PRIVATE ihslib)

@@ -50,6 +50,7 @@ static uint64_t AuthorizationRequestTimer(int runCount, void *data);
 static void AuthorizationRequestCleanup(void *data);
 
 static void AuthorizationConfigureTicket(IHS_Client *client, IHS_AuthorizationState *state,
+                                         const uint8_t secret[32],
                                          CMsgRemoteDeviceAuthorizationRequest__CKeyEscrowTicket *ticket);
 
 static void AuthorizationKeyExchange(IHS_Client *client, IHS_AuthorizationState *state,
@@ -236,12 +237,14 @@ static uint64_t AuthorizationRequestTimer(int runCount, void *data) {
         AuthorizationSendCancel(client, &state->host);
         return 0;
     }
-    ProtobufCBinaryData deviceToken = {.data = client->base.deviceToken, .len = sizeof(client->base.deviceToken)};
+    uint8_t secret[32], token[32];
+    IHS_BaseGetSecretKey(&client->base, secret);
+    ProtobufCBinaryData deviceToken = {.data = token, .len = sizeof(token)};
 
     /* Initialize and serialize ticket */
     CMsgRemoteDeviceAuthorizationRequest__CKeyEscrowTicket ticket =
             CMSG_REMOTE_DEVICE_AUTHORIZATION_REQUEST__CKEY_ESCROW__TICKET__INIT;
-    AuthorizationConfigureTicket(client, state, &ticket);
+    AuthorizationConfigureTicket(client, state, secret, &ticket);
     uint8_t serTicket[2048];
     size_t serTicketLen = protobuf_c_message_pack(&ticket.base, serTicket);
 
@@ -250,6 +253,16 @@ static uint64_t AuthorizationRequestTimer(int runCount, void *data) {
     ProtobufCBinaryData encryptedRequest = {.data = encryptedTicket, .len = sizeof(encryptedTicket)};
     if (IHS_CryptoRSAEncrypt(serTicket, serTicketLen, pubKey, pubKeyLen, encryptedRequest.data,
                               &encryptedRequest.len) != 0) {
+        memset(secret, 0, sizeof(secret));
+        state->terminal = true;
+        state->timerFailed = true;
+        AuthorizationSendCancel(client, &state->host);
+        return 0;
+    }
+
+    bool tokenReady = IHS_ClientCreateDeviceToken(client, secret, token);
+    memset(secret, 0, sizeof(secret));
+    if (!tokenReady) {
         state->terminal = true;
         state->timerFailed = true;
         AuthorizationSendCancel(client, &state->host);
@@ -277,6 +290,7 @@ static uint64_t AuthorizationRequestTimer(int runCount, void *data) {
 }
 
 static void AuthorizationConfigureTicket(IHS_Client *client, IHS_AuthorizationState *state,
+                                         const uint8_t secret[32],
                                          CMsgRemoteDeviceAuthorizationRequest__CKeyEscrowTicket *ticket) {
     ticket->has_password = true;
     ticket->password.len = strlen(state->pin);
@@ -287,7 +301,7 @@ static void AuthorizationConfigureTicket(IHS_Client *client, IHS_AuthorizationSt
 
     ticket->has_payload = true;
     ticket->payload.len = sizeof(client->base.secretKey);
-    ticket->payload.data = client->base.secretKey;
+    ticket->payload.data = (uint8_t *)secret;
 
     ticket->has_usage = true;
     ticket->usage = k_EKeyEscrowUsageStreamingDevice;

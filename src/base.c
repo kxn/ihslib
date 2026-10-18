@@ -30,14 +30,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "crypto.h"
-#include "endianness.h"
 #include "ihs_buffer.h"
 #include "session/channels/ch_control.h"
 
 static void BaseWorker(IHS_Base *base);
-
-static void BaseUpdateSecretKey(IHS_Base *base, const uint8_t *secretKey);
 
 static bool initialized;
 
@@ -72,13 +68,13 @@ void IHS_BaseInit(IHS_Base *base, const IHS_ClientConfig *config, IHS_BaseReceiv
     strncpy(base->deviceName, config->deviceName ? config->deviceName : "IHSLib",
             sizeof(base->deviceName) - 1);
     base->deviceName[sizeof(base->deviceName) - 1] = '\0';
-    BaseUpdateSecretKey(base, config->secretKey);
+    memcpy(base->secretKey, config->secretKey, sizeof(base->secretKey));
 }
 
 void IHS_BaseSetSecretKey(IHS_Base *base, const uint8_t *secretKey) {
     assert(base != NULL);
     IHS_BaseLock(base);
-    BaseUpdateSecretKey(base, secretKey);
+    memcpy(base->secretKey, secretKey, sizeof(base->secretKey));
     IHS_BaseUnlock(base);
 }
 
@@ -87,18 +83,6 @@ void IHS_BaseGetSecretKey(IHS_Base *base, uint8_t *secretKey) {
     IHS_BaseLock(base);
     memcpy(secretKey, base->secretKey, sizeof(base->secretKey));
     IHS_BaseUnlock(base);
-}
-
-/**
- * The device token, SymmetricEncrypt(u64le device ID), is derived from the secret key.
- */
-static void BaseUpdateSecretKey(IHS_Base *base, const uint8_t *secretKey) {
-    memcpy(base->secretKey, secretKey, sizeof(base->secretKey));
-    uint8_t in[8];
-    size_t deviceTokenLen = sizeof(base->deviceToken);
-    IHS_WriteUInt64LE(in, base->deviceId);
-    IHS_CryptoSymmetricEncrypt(in, 8, base->secretKey, sizeof(base->secretKey), base->deviceToken,
-                               &deviceTokenLen);
 }
 
 void IHS_BaseSetLogFunction(IHS_Base *base, IHS_LogFunction *logFunction) {
