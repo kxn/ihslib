@@ -205,6 +205,7 @@ void IHS_SessionDestroy(IHS_Session *session) {
     IHS_SessionLog(session, IHS_LogLevelInfo, "Session", "Destroying session, bye!");
     free((void *)session->clientCapabilities.systemInfo);
     free((void *)session->clientCapabilities.decoderInfo);
+    free(session->videoDecoderInfo);
     IHS_BaseDestroy(&session->base);
     free(session);
 }

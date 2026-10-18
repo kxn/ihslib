@@ -113,6 +113,13 @@ bool IHS_SessionVideoHardwareDecodingPreference(IHS_Session *, bool *present);
  * use the epoch-scoped DecodeFeedback API instead. False means no video object.
  * Do not call from an unrelated thread or retain a borrowed session. */
 bool IHS_SessionVideoRequestReset(IHS_Session *);
+/* Synchronous borrowed call inside this epoch's startTracked/submitTracked.
+ * Reports the actual backend's format decision. Never retain session/epoch;
+ * the actor joins the worker before replacement. Threads is explicitly present,
+ * including zero. The description is copied into the session's current cache
+ * before send; send failure preserves it. Do not turn that failure into reset. */
+bool IHS_SessionVideoDecoderInfo(IHS_Session *, const IHS_VideoEpochInfo *,
+                                  const char *info, uint32_t threads);
 
 /* Set before starting session workers. Identity cannot be reassigned. */
 bool IHS_SessionSetVideoTrackingIdentity(IHS_Session *, uint64_t session_id);
@@ -191,4 +198,8 @@ typedef struct IHS_StreamVideoCallbacks {
      * Requires all three tracked callbacks. This is a rebuilt source ABI. */
     void (*flushTracked)(IHS_Session *, const IHS_VideoEpochInfo *,
                           IHS_StreamVideoFlushPhase, void *);
+    /* Tracked backend publishes through the scoped DecoderInfo API at its
+     * original trigger (AVCodec get_format). Suppresses generic Start info.
+     * Rebuild/zero-initialize callback tables for this source ABI addition. */
+    bool reportsDecoderInfo;
 } IHS_StreamVideoCallbacks;

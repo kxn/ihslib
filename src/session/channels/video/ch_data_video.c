@@ -243,6 +243,7 @@ static bool DataStart(IHS_SessionChannel *channel) {
     videoCh->appStarted = true;
     videoCh->backendReady = !unavailable;
     if (unavailable) return true;
+    if (videoCh->tracked && callbacks->reportsDecoderInfo) return true;
     CVideoDecoderInfoMsg message = CVIDEO_DECODER_INFO_MSG__INIT;
     message.info = (char *)session->clientCapabilities.decoderInfo;
     if (session->clientCapabilities.decoderThreads)
@@ -756,4 +757,38 @@ bool IHS_SessionVideoRequestReset(IHS_Session *session) {
     if (!ch || ch->cls != &ChannelClass.base) return false;
     atomic_store(&((IHS_SessionChannelVideo *)ch)->resetRequested, true);
     return true;
+}
+
+bool IHS_SessionVideoDecoderInfo(IHS_Session *session, const IHS_VideoEpochInfo *epoch,
+                                  const char *info, uint32_t threads) {
+    if (!session || !epoch) return false;
+    IHS_SessionChannel *ch = IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataVideo);
+    if (!ch || ch->cls != &ChannelClass.base) return false;
+    IHS_SessionChannelVideo *video = (void *)ch;
+    if (!video->tracked || video->epoch.session_id != epoch->session_id ||
+        video->epoch.video_epoch != epoch->video_epoch) return false;
+    IHS_BaseLock(&session->base);
+    char *copy = NULL;
+    if (info && info[0]) {
+        size_t size = strlen(info) + 1;
+        copy = malloc(size);
+        if (!copy) {
+            IHS_BaseUnlock(&session->base);
+            return false; /* Local allocation guard, not a decoder reset. */
+        }
+        memcpy(copy, info, size);
+    }
+    /* Original 31dd77 -> 2b5c80 copies client+648 before constructing/sending.
+     * Send failure preserves this cache; decoder restart does not clear it. */
+    free(session->videoDecoderInfo);
+    session->videoDecoderInfo = copy;
+    /* Same borrowed ownership as DecodeFeedback; no recursive stateMutex.
+     * Original 31dd40 always writes the threads field, even zero. */
+    CVideoDecoderInfoMsg message = CVIDEO_DECODER_INFO_MSG__INIT;
+    message.info = (char *)info;
+    PROTOBUF_C_SET_VALUE(message, threads, threads);
+    bool sent = IHS_SessionSendControlMessage(session, k_EStreamControlVideoDecoderInfo,
+                                               (const ProtobufCMessage *)&message);
+    IHS_BaseUnlock(&session->base);
+    return sent;
 }

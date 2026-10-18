@@ -145,6 +145,7 @@ struct IHS_Session {
     uint64_t videoTrackingId, nextVideoEpoch;
     bool invalidVideoCallbacks;
     IHS_StreamClientCapabilities clientCapabilities; /* session-owned strings */
+    char *videoDecoderInfo; /* Current backend; session-owned, Base-locked. */
     struct {
         const IHS_StreamSessionCallbacks *session;
         const IHS_StreamAudioCallbacks *audio;
