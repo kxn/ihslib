@@ -127,7 +127,8 @@ bool IHS_SessionConnect(IHS_Session *session) {
         (session->base.worker || session->base.interrupted ||
          session->state.connectionState != IHS_SessionConnectionStateUnconnected))
         return false;
-    IHS_SessionNetworkTestBegin(session);
+    if (!IHS_SessionNetworkTestBegin(session))
+        return false;
     bool started = IHS_BaseStartWorker(&session->base, "IHSSession");
     if (!started)
         IHS_SessionNetworkTestFinalize(session);

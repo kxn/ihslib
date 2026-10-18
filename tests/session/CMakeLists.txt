@@ -11,6 +11,12 @@ ihs_add_test(video_control test_video_control.c)
 target_link_libraries(ihstest_video_control PRIVATE ihs-test-session)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ihs-network-test-connect-oracle network_test_connect_oracle.c)
+    target_include_directories(ihs-network-test-connect-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-network-test-connect-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-network-test-connect-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-network-test-connect-oracle PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
+        -Wl,--wrap=IHS_BaseSend -Wl,--wrap=IHS_SessionUnreliableGet)
     add_executable(ihs-network-test-discovery-oracle network_test_discovery_oracle.c)
     target_include_directories(ihs-network-test-discovery-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-network-test-discovery-oracle PRIVATE ihslib)

@@ -12,7 +12,7 @@ typedef struct IHS_SessionNetworkTest {
     float loss;
     unsigned result;
 } IHS_SessionNetworkTest;
-void IHS_SessionNetworkTestBegin(IHS_Session *);
+bool IHS_SessionNetworkTestBegin(IHS_Session *);
 void IHS_SessionNetworkTestConnected(IHS_Session *, uint32_t now);
 void IHS_SessionNetworkTestAuthenticated(IHS_Session *);
 void IHS_SessionNetworkTestRecord(IHS_Session *, struct IHS_SessionFrame *);

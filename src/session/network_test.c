@@ -6,6 +6,7 @@
 #include "channels/ch_stats.h"
 #include "frame_stats.h"
 #include "session_pri.h"
+#include "unreliable.h"
 #include <limits.h>
 #include <string.h>
 
@@ -24,15 +25,29 @@ bool IHS_SessionConfigureNetworkTest(IHS_Session *s, IHS_NetworkTestMode mode,
     IHS_BaseUnlock(&s->base);
     return ok;
 }
-void IHS_SessionNetworkTestBegin(IHS_Session *s) {
+bool IHS_SessionNetworkTestBegin(IHS_Session *s) {
     IHS_BaseLock(&s->base);
     if (s->networkTest.mode) {
         s->networkTest.status = IHS_NetworkTestRunning;
         s->networkTest.phase = 1;
         s->mediaNetworkStats.recordFull = true;
         IHS_MediaNetworkStatsStart(&s->mediaNetworkStats);
+        /* Official CNetworkTest::BConnect @caa014..24 activates channel3
+         * with 6553 ticks, overriding the generic constructor's 65. This
+         * happens before Connect and does not depend on StartVideoData. */
+        IHS_UnreliableChannel *rx = IHS_SessionUnreliableGet(s, 3, 2048);
+        if (!rx) {
+            s->networkTest.status = IHS_NetworkTestFailed;
+            s->networkTest.phase = 0;
+            s->mediaNetworkStats.valid = false;
+            IHS_BaseUnlock(&s->base);
+            return false;
+        }
+        IHS_OutgoingRegister(s, 3);
+        rx->maxReceiveDelay = 6553;
     }
     IHS_BaseUnlock(&s->base);
+    return true;
 }
 void IHS_SessionNetworkTestConnected(IHS_Session *s, uint32_t now) {
     if (!s->networkTest.mode)

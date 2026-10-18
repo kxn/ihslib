@@ -5,6 +5,7 @@
 #include "ihslib.h"
 #include "session/channels/ch_control.h"
 #include "session/session_pri.h"
+#include "session/unreliable.h"
 #include "test_session.h"
 #include <assert.h>
 #include <stdio.h>
@@ -142,7 +143,11 @@ int main(int argc, char **argv) {
     assert(IHS_SessionConfigureNetworkTest(session, atoi(argv[1]), strtoul(argv[2], NULL, 0)));
     /* HMAC16 is a primitive-only boundary; public API requires 32-byte tickets. */
     session->info.sessionKeyLen = strtoul(argv[4], NULL, 0);
-    IHS_SessionNetworkTestBegin(session);
+    assert(IHS_SessionNetworkTestBegin(session));
+    /* The §119 source driver explicitly restores constructor delay65 after
+     * an established-connection boundary. Preserve that controlled input;
+     * the separate §123 Connect gate checks the actual production 6553. */
+    assert(IHS_SessionUnreliableSetDelay(session, 3, 65));
     session->state.connectionState = IHS_SessionConnectionStateConnecting;
     session->state.connectionId = 12;
     session->state.hostConnectionId = 34;
