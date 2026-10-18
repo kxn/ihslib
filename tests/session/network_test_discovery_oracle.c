@@ -60,6 +60,19 @@ static void hex(const uint8_t *p, size_t count) {
     for (size_t i = 0; i < count; ++i)
         printf("%02x", p[i]);
 }
+static void completed_send(IHS_TimerTask *task, void *context) {
+    unsigned *runs = context;
+    *runs = (unsigned)IHS_TimerTaskGetRunCount(task);
+}
+static void wait_send_return(IHS_Client *client, unsigned sends) {
+    unsigned runs = 0;
+    /* Receiving the datagram precedes TaskExecute publishing nextExecution.
+     * Hold the owner lock before advancing the artificial clock, so a slow
+     * sanitizer/OS schedule cannot move that pending callback's deadline. */
+    assert(IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.streaming,
+                                  completed_send, &runs));
+    assert(runs == sends);
+}
 int main(int argc, char **argv) {
     assert(argc >= 4 && argc <= 6);
     virtual_clock = !strcmp(argv[3], "-");
@@ -121,13 +134,18 @@ int main(int argc, char **argv) {
     if (virtual_clock) {
         const uint64_t offsets[] = {0, 1000, 1000, 2000, 15000, 300000, 85400000};
         unsigned sends = 1;
+        wait_send_return(c, sends);
         printf("{\"sends\":[");
         for (unsigned i = 0; i < 7; ++i) {
             atomic_store(&virtual_now, 1000025 + offsets[i]);
             struct pollfd waiter = {.fd = fd, .events = POLLIN};
-            if (poll(&waiter, 1, 30) > 0) {
+            bool due = i != 0 && i != 2;
+            int ready = poll(&waiter, 1, due ? 2000 : 30);
+            assert(ready == (due ? 1 : 0));
+            if (ready) {
                 assert(recv(fd, request, sizeof(request), 0) > 16);
                 ++sends;
+                wait_send_return(c, sends);
             }
             printf("%s%u", i ? "," : "", sends);
         }

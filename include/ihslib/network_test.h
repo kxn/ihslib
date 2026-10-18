@@ -31,7 +31,7 @@ typedef struct IHS_NetworkTestResult {
  * ordinary Session for subsequent streaming.
  * The caller supplies an authorized network-test endpoint/key; this API does
  * not acquire the discovery ticket.
- * A 32-byte session key is required. No decoder, game start/stop, preset/FEC
+ * A 16- or 32-byte session key is required. No decoder, game start/stop, preset/FEC
  * change or UI is implied. Cancel with IHS_SessionDisconnect, then join/destroy.
  * Session lifecycle callbacks still run; the stream connected callback does not. */
 bool IHS_SessionConfigureNetworkTest(IHS_Session *, IHS_NetworkTestMode, uint32_t targetKbps);

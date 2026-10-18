@@ -71,6 +71,8 @@ int main(void) {
     assert(!IHS_SessionConfigureNetworkTest(s, IHS_NetworkTestFixed, 0));
     assert(!IHS_SessionConfigureNetworkTest(s, IHS_NetworkTestFixed, 0x80000000u));
     s->info.sessionKeyLen = 16;
+    assert(IHS_SessionConfigureNetworkTest(s, IHS_NetworkTestFixed, 15000));
+    s->info.sessionKeyLen = 31;
     assert(!IHS_SessionConfigureNetworkTest(s, IHS_NetworkTestFixed, 15000));
     s->info.sessionKeyLen = 32;
     assert(IHS_SessionConfigureNetworkTest(s, IHS_NetworkTestBandwidth, 15000));

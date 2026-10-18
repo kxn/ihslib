@@ -35,6 +35,7 @@ static uint64_t millis(void) {
 }
 typedef struct Credentials {
     IHS_SessionInfo info;
+    size_t expected_length;
     atomic_bool ready;
 } Credentials;
 static void ticket_success(IHS_Client *client, const IHS_HostInfo *host,
@@ -43,17 +44,18 @@ static void ticket_success(IHS_Client *client, const IHS_HostInfo *host,
     (void)client;
     (void)host;
     Credentials *reply = context;
-    assert(length == 32);
+    assert(length == reply->expected_length);
     reply->info.address = *address;
     reply->info.sessionKeyLen = length;
     reply->info.steamId = 123456;
     memcpy(reply->info.sessionKey, key, length);
     atomic_store(&reply->ready, true);
 }
-static IHS_SessionInfo request_ticket(int fd, uint16_t port, const IHS_ClientConfig *config) {
+static IHS_SessionInfo request_ticket(int fd, uint16_t port, const IHS_ClientConfig *config,
+                                     size_t key_length) {
     IHS_Client *client = IHS_ClientCreate(config);
     assert(client);
-    Credentials reply = {0};
+    Credentials reply = {.expected_length = key_length};
     const IHS_ClientStreamingCallbacks callbacks = {.success = ticket_success};
     IHS_ClientSetStreamingCallbacks(client, &callbacks, &reply);
     IHS_HostInfo host = {.clientId = 123, .address.port = port};
@@ -86,7 +88,7 @@ static IHS_SessionInfo request_ticket(int fd, uint16_t port, const IHS_ClientCon
     for (unsigned i = 0; i < 32; ++i)
         key[i] = i;
     size_t capacity = sizeof(cipher);
-    assert(!IHS_CryptoSymmetricEncrypt(key, 32, config->secretKey, 32, cipher, &capacity));
+    assert(!IHS_CryptoSymmetricEncrypt(key, key_length, config->secretKey, 32, cipher, &capacity));
     response.encrypted_session_key.data = cipher;
     response.encrypted_session_key.len = capacity;
     size_t size = cmsg_remote_device_streaming_response__pack(&response, body);
@@ -95,7 +97,7 @@ static IHS_SessionInfo request_ticket(int fd, uint16_t port, const IHS_ClientCon
     while (!atomic_load(&reply.ready) && millis() < deadline)
         poll(NULL, 0, 1);
     assert(atomic_load(&reply.ready));
-    for (unsigned i = 0; i < 32; ++i)
+    for (unsigned i = 0; i < key_length; ++i)
         assert(reply.info.sessionKey[i] == i);
     assert(reply.info.address.port == port);
     cmsg_remote_device_streaming_request__free_unpacked(req, NULL);
@@ -137,7 +139,7 @@ static void encrypted(IHS_Session *s, int fd, const struct sockaddr_in *to, uint
     assert(!IHS_SessionFrameEncrypt(s, plain, n, body + 1, &size, seq));
     send_peer(fd, to, local, 5, 1, id, body, size + 1, crc);
 }
-static void one(bool crc, IHS_NetworkTestMode mode, bool fec) {
+static void one(bool crc, IHS_NetworkTestMode mode, bool fec, size_t key_length) {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     assert(fd >= 0);
     struct sockaddr_in addr = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
@@ -149,7 +151,7 @@ static void one(bool crc, IHS_NetworkTestMode mode, bool fec) {
         secret[i] = 32 + i;
     IHS_ClientConfig client = {
         .deviceId = 1, .secretKey = secret, .deviceName = "network-test peer"};
-    IHS_SessionInfo info = request_ticket(fd, ntohs(addr.sin_port), &client);
+    IHS_SessionInfo info = request_ticket(fd, ntohs(addr.sin_port), &client, key_length);
     IHS_Session *s = IHS_SessionCreate(&client, &info);
     assert(s);
     assert(IHS_SessionConfigureNetworkTest(s, mode, 20000));
@@ -215,12 +217,18 @@ static void one(bool crc, IHS_NetworkTestMode mode, bool fec) {
         }
         if (tag == 1) {
             if (!auth) {
-                static const uint8_t expected[] = {
+                static const uint8_t expected32[] = {
                     1,    10,   32,   0x8f, 0xf3, 0xa6, 0xe9, 0xdf, 0x0b, 0xb5, 0xaa, 0x37, 0x68,
                     0x46, 0xc0, 0x1b, 0xfd, 0x2c, 0x0c, 0x8a, 0xf6, 0x99, 0x4e, 0x22, 0x5c, 0x0a,
                     0xac, 0x69, 0x45, 0x94, 0x9b, 0xb4, 0x2b, 0xb6, 0x71, 16,   1};
-                assert((size_t)(size - 13) == sizeof(expected) &&
-                       !memcmp(wire + 13, expected, sizeof(expected)));
+                static const uint8_t expected16[] = {
+                    1, 10, 32, 0x17, 0x8f, 0x4b, 0xa6, 0x1b, 0x1d, 0xeb, 0x8e, 0x3a, 0x25,
+                    0x8d, 0xcc, 0xe0, 0xbc, 0xfb, 0xd7, 0x9f, 0x33, 0xe5, 0xc6, 0x51, 0x34,
+                    0x2b, 0x84, 0x71, 0x55, 0x22, 0xbd, 0xd6, 0x9b, 0x8e, 0xd6, 16, 1};
+                const uint8_t *expected = key_length == 16 ? expected16 : expected32;
+                assert(sizeof(expected16) == sizeof(expected32));
+                assert((size_t)(size - 13) == sizeof(expected32) &&
+                       !memcmp(wire + 13, expected, sizeof(expected32)));
                 const uint8_t body[] = {2, 16, 1};
                 send_peer(fd, &from, local, 5, 1, 1, body, sizeof(body), crc);
                 auth = true;
@@ -300,13 +308,15 @@ static void one(bool crc, IHS_NetworkTestMode mode, bool fec) {
 }
 int main(void) {
     IHS_Init();
-    for (unsigned crc = 0; crc < 2; ++crc) {
-        one(crc, IHS_NetworkTestFixed, false);
-        one(crc, IHS_NetworkTestFixed, true);
-        one(crc, IHS_NetworkTestBandwidth, false);
+    for (unsigned length = 16; length <= 32; length += 16) {
+        for (unsigned crc = 0; crc < 2; ++crc) {
+            one(crc, IHS_NetworkTestFixed, false, length);
+            one(crc, IHS_NetworkTestFixed, true, length);
+            one(crc, IHS_NetworkTestBandwidth, false, length);
+        }
     }
     IHS_Quit();
-    puts("Network-test real UDP: CRC x ordinary/FEC fixed-complete/bandwidth-cancel, test "
+    puts("Network-test real UDP: 16/32-byte keys x CRC x ordinary/FEC fixed-complete/bandwidth-cancel, test "
          "handshake/auth/crypto/request8, target94/full samples, no decoder, joined teardown "
          "passed");
     return 0;

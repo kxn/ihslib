@@ -140,9 +140,8 @@ int main(int argc, char **argv) {
     for (unsigned i = 0; i < 32; ++i)
         session->info.sessionKey[i] = i;
     now = strtoul(argv[3], NULL, 0);
-    assert(IHS_SessionConfigureNetworkTest(session, atoi(argv[1]), strtoul(argv[2], NULL, 0)));
-    /* HMAC16 is a primitive-only boundary; public API requires 32-byte tickets. */
     session->info.sessionKeyLen = strtoul(argv[4], NULL, 0);
+    assert(IHS_SessionConfigureNetworkTest(session, atoi(argv[1]), strtoul(argv[2], NULL, 0)));
     assert(IHS_SessionNetworkTestBegin(session));
     /* The §119 source driver explicitly restores constructor delay65 after
      * an established-connection boundary. Preserve that controlled input;

@@ -13,7 +13,8 @@
 bool IHS_SessionConfigureNetworkTest(IHS_Session *s, IHS_NetworkTestMode mode,
                                      uint32_t targetKbps) {
     if (!s || (mode != IHS_NetworkTestFixed && mode != IHS_NetworkTestBandwidth) || !targetKbps ||
-        targetKbps > INT32_MAX || s->info.sessionKeyLen != 32)
+        targetKbps > INT32_MAX ||
+        (s->info.sessionKeyLen != 16 && s->info.sessionKeyLen != 32))
         return false;
     IHS_BaseLock(&s->base);
     bool ok = !s->base.worker && !s->base.interrupted &&
