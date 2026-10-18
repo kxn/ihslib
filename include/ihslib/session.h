@@ -30,6 +30,7 @@
 #include "video.h"
 #include "input.h"
 #include "hid.h"
+#include "network_test.h"
 
 typedef struct IHS_Session IHS_Session;
 

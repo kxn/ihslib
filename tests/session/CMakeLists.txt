@@ -11,6 +11,21 @@ ihs_add_test(video_control test_video_control.c)
 target_link_libraries(ihstest_video_control PRIVATE ihs-test-session)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    ihs_add_test(network_test_lifetime test_network_test_lifetime.c)
+    target_link_libraries(ihstest_network_test_lifetime PRIVATE ihs-test-session)
+    target_link_options(ihstest_network_test_lifetime PRIVATE -Wl,--wrap=realloc
+        -Wl,--wrap=IHS_SessionChannelQueueFrameResult)
+    set_tests_properties(network_test_lifetime PROPERTIES TIMEOUT 20)
+    ihs_add_test(network_test_udp test_network_test_udp.c)
+    target_link_libraries(ihstest_network_test_udp PRIVATE ihs-test-session)
+    set_tests_properties(network_test_udp PROPERTIES TIMEOUT 25)
+    add_executable(ihs-network-test-oracle network_test_oracle.c)
+    target_include_directories(ihs-network-test-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-network-test-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-network-test-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-network-test-oracle PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
+        -Wl,--wrap=IHS_BaseSend -Wl,--wrap=IHS_SessionFrameEncrypt -Wl,--wrap=IHS_SessionFrameDecrypt
+        -Wl,--wrap=IHS_SessionChannelQueueFrameResult)
     ihs_add_test(media_network_stats_lifetime test_media_network_stats_lifetime.c)
     target_link_libraries(ihstest_media_network_stats_lifetime PRIVATE ihs-test-session)
     target_link_options(ihstest_media_network_stats_lifetime PRIVATE -Wl,--wrap=realloc

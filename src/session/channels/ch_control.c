@@ -196,7 +196,10 @@ bool IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamControlMe
     if (ret == IHS_SendAdmissionLocalFailure &&
         !atomic_load(&channel->session->transport.shutdown) &&
         !channel->session->transport.detached) {
-        IHS_SessionDisconnect(channel->session);
+        if (channel->session->networkTest.mode)
+            IHS_SessionNetworkTestFail(channel->session);
+        else
+            IHS_SessionDisconnect(channel->session);
     }
     return ret == IHS_SendAdmissionAccepted;
 }

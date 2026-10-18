@@ -7,6 +7,24 @@
 
 void IHS_SessionChannelControlHandoff(IHS_SessionChannel *channel, EStreamControlMessage type,
                                       IHS_Buffer *body, const IHS_SessionPacketHeader *header) {
+    IHS_Session *session = channel->session;
+    if (session->networkTest.mode) {
+        IHS_BaseLock(&session->base);
+        unsigned phase = session->networkTest.phase;
+        if ((phase == 2 && type == k_EStreamControlServerHandshake) ||
+            (phase == 3 && type == k_EStreamControlAuthenticationResponse)) {
+            IHS_SessionChannelControlOnMessageReceived(channel, type, body, header);
+        } else if (phase != 2 && phase != 3 && type == k_EStreamControlSetTargetBitrate) {
+            CSetTargetBitrateMsg *message =
+                cset_target_bitrate_msg__unpack(NULL, body->size, IHS_BufferPointer(body));
+            if (message) {
+                IHS_SessionNetworkTestTarget(session, (uint32_t)message->bitrate);
+                cset_target_bitrate_msg__free_unpacked(message, NULL);
+            }
+        }
+        IHS_BaseUnlock(&session->base);
+        return;
+    }
     if (type == k_EStreamControlKeepAlive)
         return;
     if (type == k_EStreamControlRemoteHID) {

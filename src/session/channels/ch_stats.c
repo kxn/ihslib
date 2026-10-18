@@ -54,7 +54,11 @@ bool IHS_SessionChannelStatsSend(IHS_SessionChannel *channel, EStreamStatsMessag
      * control-side protection: never continue that connection with an ID hole.
      * Socket errors occur later on the sender and do not enter this branch. */
     if (ret == IHS_SendAdmissionLocalFailure && !channel->session->transport.shutdown &&
-        !channel->session->transport.detached)
-        IHS_SessionDisconnect(channel->session);
+        !channel->session->transport.detached) {
+        if (channel->session->networkTest.mode)
+            IHS_SessionNetworkTestFail(channel->session);
+        else
+            IHS_SessionDisconnect(channel->session);
+    }
     return ret == IHS_SendAdmissionAccepted;
 }

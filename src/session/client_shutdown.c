@@ -4,6 +4,11 @@
 #include "session_pri.h"
 
 void IHS_SessionClientTransportClosed(IHS_Session *s) {
+    if (s->networkTest.mode) {
+        IHS_SessionNetworkTestClosed(s);
+        s->state.connectionState = IHS_SessionConnectionStateUnconnected;
+        return;
+    }
     /* Original CStreamClient::OnStreamDisconnected 7b00d0: only Streaming
      * enters Stopping; all other controlled phases return to Unconnected. */
     if (s->state.connectionState == IHS_SessionConnectionStateConnected) {

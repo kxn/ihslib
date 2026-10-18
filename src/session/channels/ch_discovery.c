@@ -92,7 +92,8 @@ static void OnConnectACK(IHS_SessionChannel *channel, const IHS_SessionPacket *p
     IHS_StreamClockFeedback(&session->clock, echo, packet->header.sendTimestamp,
                             packet->header.receiveTimestamp);
     IHS_SessionChannel *control = IHS_SessionChannelFor(session, IHS_SessionChannelIdControl);
-    IHS_SessionChannelControlHandshake(control, false);
+    IHS_SessionChannelControlHandshake(control, session->networkTest.mode != 0);
+    IHS_SessionNetworkTestConnected(session, IHS_SessionPacketTimestamp());
 }
 
 static void OnUnconnected(IHS_SessionChannel *channel, const IHS_SessionPacket *packet) {

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: LGPL-3.0-or-later */
 #pragma once
+#include "ihslib/network_test.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -17,6 +18,10 @@ typedef struct IHS_MediaNetworkStats {
     IHS_MediaNetworkWindow *windows;
     IHS_MediaNetworkWindow average;
     bool valid, finalized;
+    bool recordFull;
+    uint32_t targetKbps;
+    IHS_NetworkTestSample *full;
+    size_t fullCount, fullCapacity;
 } IHS_MediaNetworkStats;
 void IHS_MediaNetworkStatsInit(IHS_MediaNetworkStats *);
 void IHS_MediaNetworkStatsDestroy(IHS_MediaNetworkStats *);

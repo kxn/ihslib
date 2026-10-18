@@ -113,6 +113,10 @@ void IHS_SessionChannelControlRequestAuthentication(IHS_SessionChannel *channel)
     CAuthenticationRequestMsg request = CAUTHENTICATION_REQUEST_MSG__INIT;
     PROTOBUF_C_SET_VALUE(request, version, k_EStreamVersionCurrent);
     PROTOBUF_C_SET_VALUE(request, steamid, session->info.steamId);
+    if (session->networkTest.mode) {
+        request.has_steamid = false;
+        session->networkTest.phase = 3;
+    }
     request.has_token = true;
     static const unsigned char plain[] = {'S', 't', 'e', 'a', 'm', ' ', 'I', 'n',
                                           '-', 'H', 'o', 'm', 'e', ' ', 'S', 't',
@@ -121,7 +125,10 @@ void IHS_SessionChannelControlRequestAuthentication(IHS_SessionChannel *channel)
     request.token.data = token;
     request.token.len = sizeof(token);
     if (IHS_SessionFrameHMACSHA256(session, plain, sizeof(plain), token, &request.token.len) != 0) {
-        IHS_SessionDisconnect(session);
+        if (session->networkTest.mode)
+            IHS_SessionNetworkTestFail(session);
+        else
+            IHS_SessionDisconnect(session);
         return;
     }
     IHS_SessionChannelControlSend(channel, k_EStreamControlAuthenticationRequest, (const ProtobufCMessage *) &request,
@@ -151,8 +158,16 @@ static void OnAuthenticationResponse(IHS_SessionChannel *channel, const CAuthent
         IHS_SessionLog(session, IHS_LogLevelError, "Session", "Authentication or stream version rejected");
         /* Stop on the RX owner without joining it from inside its handler.
          * Existing finalization joins producers and releases the socket. */
-        IHS_SessionDisconnect(session);
-        IHS_SessionClientTransportClosed(session);
+        if (session->networkTest.mode)
+            IHS_SessionNetworkTestFail(session);
+        else {
+            IHS_SessionDisconnect(session);
+            IHS_SessionClientTransportClosed(session);
+        }
+        return;
+    }
+    if (session->networkTest.mode) {
+        IHS_SessionNetworkTestAuthenticated(session);
         return;
     }
     // Auth succeeded — the server will follow with NegotiationInit. Advance state so

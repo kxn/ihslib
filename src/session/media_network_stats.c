@@ -14,10 +14,13 @@ void IHS_MediaNetworkStatsInit(IHS_MediaNetworkStats *s) {
 }
 void IHS_MediaNetworkStatsDestroy(IHS_MediaNetworkStats *s) {
     free(s->windows);
+    free(s->full);
     memset(s, 0, sizeof(*s));
 }
 void IHS_MediaNetworkStatsStart(IHS_MediaNetworkStats *s) {
     s->next = 0;
+    s->targetKbps = 0;
+    s->fullCount = 0;
     s->total = s->batch = 0;
     s->count = s->windowCount = 0;
     s->average = (IHS_MediaNetworkWindow){0};
@@ -101,6 +104,22 @@ bool IHS_MediaNetworkStatsRecord(IHS_MediaNetworkStats *s, uint16_t frame, uint3
      * batch is folded below, so at most 600 latency samples are stored. */
     assert(s->count < 600);
     s->latencies[s->count++] = elapsed;
+    if (s->recordFull) {
+        if (s->fullCount == s->fullCapacity) {
+            size_t capacity = s->fullCapacity ? s->fullCapacity * 2 : 64;
+            IHS_NetworkTestSample *full = NULL;
+            if (capacity >= s->fullCapacity && capacity <= SIZE_MAX / sizeof(*full))
+                full = realloc(s->full, capacity * sizeof(*full));
+            if (!full) {
+                s->valid = false;
+                s->count = s->batch = 0;
+                return false;
+            }
+            s->full = full;
+            s->fullCapacity = capacity;
+        }
+        s->full[s->fullCount++] = (IHS_NetworkTestSample){s->targetKbps, elapsed};
+    }
     if (s->batch >= 600)
         return IHS_MediaNetworkStatsFold(s);
     return true;

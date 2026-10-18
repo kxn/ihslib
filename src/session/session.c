@@ -123,7 +123,15 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig,
 bool IHS_SessionConnect(IHS_Session *session) {
     IHS_SessionLog(session, IHS_LogLevelInfo, "Session", "Starting session thread");
     // After worker ready, send connect packet
-    return IHS_BaseStartWorker(&session->base, "IHSSession");
+    if (session->networkTest.mode &&
+        (session->base.worker || session->base.interrupted ||
+         session->state.connectionState != IHS_SessionConnectionStateUnconnected))
+        return false;
+    IHS_SessionNetworkTestBegin(session);
+    bool started = IHS_BaseStartWorker(&session->base, "IHSSession");
+    if (!started)
+        IHS_SessionNetworkTestFinalize(session);
+    return started;
 }
 
 /* Transport disconnect preserves the host game. StopRequest(129) is the
@@ -132,6 +140,7 @@ void IHS_SessionDisconnect(IHS_Session *session) {
     /* Client::Disconnect attempts one goodbye first, then Stopping and
      * ResetConnection/Close. The RX owner performs joins/Close; a producer
      * requesting cancellation must never join its own consumer thread. */
+    IHS_SessionNetworkTestCancel(session);
     atomic_store(&session->transport.closeRequested, true);
     if (session->base.worker)
         IHS_SessionTransportDisconnect(session);
@@ -595,6 +604,10 @@ IHS_ReliableDisposition IHS_SessionDeliverReliableFrame(IHS_Session *session,
     if (!frame->body.size) return IHS_ReliableDiscarded;
     if (id < IHS_SessionChannelIdDataStart || *IHS_BufferPointer(&frame->body) != k_EStreamDataPacket)
         return IHS_ReliableIgnored;
+    if (session->networkTest.mode) {
+        IHS_SessionNetworkTestRecord(session, frame);
+        return IHS_ReliableData;
+    }
     /* OnStreamPacket 7ad00c..7ad01c gates OnDataPacket, including complete
      * frames awaiting Start*Data. Reliable window/ACK progress is independent. */
     if (session->state.connectionState != IHS_SessionConnectionStateConnected ||
@@ -672,6 +685,7 @@ static void SessionFinalized(IHS_Base *base, void *context) {
     if (session->sendThread)
         IHS_ThreadJoin(session->sendThread);
     session->sendThread = NULL;
+    IHS_SessionNetworkTestFinalize(session);
     /* This RX-owner path also handles explicit local cancellation. */
     if (session->state.connectionState == IHS_SessionConnectionStateConnected ||
         session->state.connectionState == IHS_SessionConnectionStateStopping)

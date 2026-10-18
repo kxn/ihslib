@@ -33,6 +33,7 @@
 #include "reliable.h"
 #include "retransmission.h"
 #include "media_network_stats.h"
+#include "network_test.h"
 #include <stdatomic.h>
 
 #include "channels/channel.h"
@@ -150,6 +151,7 @@ struct IHS_Session {
     IHS_NetworkPacketStats networkPackets;
     IHS_NetworkVideoStats networkVideo;
     IHS_MediaNetworkStats mediaNetworkStats;
+    IHS_SessionNetworkTest networkTest;
     IHS_HIDManager *hidManager;
     struct IHS_FrameStatsAggregator *frameStats;
     struct IHS_FrameTracker *frameTracker;

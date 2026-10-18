@@ -17,6 +17,7 @@ target_sources(ihslib PRIVATE
         clock.c
         network_stats.c
         media_network_stats.c
+        network_test.c
         callbacks.c
         microphone.c
         reliable.c
