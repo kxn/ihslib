@@ -318,7 +318,7 @@ target_link_libraries(ihstest_game_activity PRIVATE ihs-test-session)
 
 ihs_add_test(launch_transactions test_launch_transactions.c)
 target_link_libraries(ihstest_launch_transactions PRIVATE ihs-test-session)
-target_link_options(ihstest_launch_transactions PRIVATE -Wl,--wrap=clock_gettime)
+target_link_options(ihstest_launch_transactions PRIVATE -Wl,--wrap=clock_gettime -Wl,--wrap=time)
 
 ihs_add_test(frame_tracker test_frame_tracker.c)
 set_tests_properties(frame_tracker PROPERTIES TIMEOUT 20)

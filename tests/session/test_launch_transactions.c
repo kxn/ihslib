@@ -12,6 +12,13 @@
 static unsigned progress, authorized;
 static atomic_int failures;
 static atomic_int clock_forward;
+/* Freeze wall seconds except for the deliberate +16s deadline input. Real
+ * subsecond boundaries must not inject legitimate retries into ownership checks. */
+time_t __wrap_time(time_t *out) {
+    time_t now = 1000 + atomic_load(&clock_forward);
+    if (out) *out = now;
+    return now;
+}
 int __real_clock_gettime(clockid_t, struct timespec *);
 int __wrap_clock_gettime(clockid_t clock, struct timespec *time) {
     int ret=__real_clock_gettime(clock,time);
@@ -51,7 +58,7 @@ int main(void) {
     assert(!bind(fd,(void*)&a,sizeof(a)));socklen_t size=sizeof(a);assert(!getsockname(fd,(void*)&a,&size));
     struct timeval timeout={.tv_sec=2};setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
     IHS_Client *c=IHS_ClientCreate(&clientConfig);assert(c);
-    IHS_HostInfo host={.clientId=23,.instanceId=45};
+    IHS_HostInfo host={.clientId=23,.instanceId=45,.universe=IHS_SteamUniversePublic};
     IHS_IPAddressFromString(&host.address.ip,"127.0.0.1");host.address.port=ntohs(a.sin_port);
     IHS_ClientStreamingCallbacks cb={.progress=on_progress,.failed=on_failure};IHS_ClientSetStreamingCallbacks(c,&cb,NULL);
     IHS_StreamingRequest req={.gameId=2358720};
