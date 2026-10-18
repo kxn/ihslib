@@ -40,7 +40,6 @@ struct IHS_Client {
     struct {
         IHS_HostInfo host;
         uint32_t requestId;
-        uint64_t until, lastCancel;
     } canceled[8];
     unsigned canceledNext;
     IHS_HostInfo lastLaunchHost;

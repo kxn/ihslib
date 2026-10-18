@@ -11,6 +11,12 @@ ihs_add_test(video_control test_video_control.c)
 target_link_libraries(ihstest_video_control PRIVATE ihs-test-session)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ihs-network-test-discovery-oracle network_test_discovery_oracle.c)
+    target_include_directories(ihs-network-test-discovery-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-network-test-discovery-oracle PRIVATE ihslib)
+    target_compile_options(ihs-network-test-discovery-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-network-test-discovery-oracle PRIVATE -Wl,--wrap=IHS_CryptoRandomUInt32
+        -Wl,--wrap=clock_gettime)
     ihs_add_test(network_test_lifetime test_network_test_lifetime.c)
     target_link_libraries(ihstest_network_test_lifetime PRIVATE ihs-test-session)
     target_link_options(ihstest_network_test_lifetime PRIVATE -Wl,--wrap=realloc
@@ -267,6 +273,7 @@ target_link_libraries(ihstest_game_activity PRIVATE ihs-test-session)
 
 ihs_add_test(launch_transactions test_launch_transactions.c)
 target_link_libraries(ihstest_launch_transactions PRIVATE ihs-test-session)
+target_link_options(ihstest_launch_transactions PRIVATE -Wl,--wrap=clock_gettime)
 
 ihs_add_test(frame_tracker test_frame_tracker.c)
 set_tests_properties(frame_tracker PROPERTIES TIMEOUT 20)

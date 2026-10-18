@@ -1,9 +1,11 @@
-/* Real UDP/auth/cipher/owner and teardown; peer is controlled, no Steam ticket
- * acquisition or device/decoder is claimed. Source body/HMAC constants §119. */
+/* Real discovery request/credential decrypt -> Session UDP/auth/cipher/owner
+ * and teardown. Peer/identity are controlled, not a real Steam host (§119–120). */
 #include "crc32c.h"
+#include "crypto.h"
 #include "ihs_buffer.h"
 #include "ihs_buffer_ext.h"
 #include "ihslib.h"
+#include "network_test_discovery_peer.h"
 #include "network_test_fec.h"
 #include "session/session_pri.h"
 #include <arpa/inet.h>
@@ -30,6 +32,78 @@ static uint64_t millis(void) {
     struct timespec t;
     assert(!clock_gettime(CLOCK_MONOTONIC, &t));
     return (uint64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+typedef struct Credentials {
+    IHS_SessionInfo info;
+    atomic_bool ready;
+} Credentials;
+static void ticket_success(IHS_Client *client, const IHS_HostInfo *host,
+                           const IHS_SocketAddress *address, const uint8_t *key, size_t length,
+                           void *context) {
+    (void)client;
+    (void)host;
+    Credentials *reply = context;
+    assert(length == 32);
+    reply->info.address = *address;
+    reply->info.sessionKeyLen = length;
+    reply->info.steamId = 123456;
+    memcpy(reply->info.sessionKey, key, length);
+    atomic_store(&reply->ready, true);
+}
+static IHS_SessionInfo request_ticket(int fd, uint16_t port, const IHS_ClientConfig *config) {
+    IHS_Client *client = IHS_ClientCreate(config);
+    assert(client);
+    Credentials reply = {0};
+    const IHS_ClientStreamingCallbacks callbacks = {.success = ticket_success};
+    IHS_ClientSetStreamingCallbacks(client, &callbacks, &reply);
+    IHS_HostInfo host = {.clientId = 123, .address.port = port};
+    assert(IHS_IPAddressFromString(&host.address.ip, "127.0.0.1"));
+    IHS_StreamingRequest request = {.networkTest = true,
+                                    .streamingEnable = {true, true, true},
+                                    .maxResolution = {1280, 720},
+                                    .audioChannelCount = 2};
+    assert(IHS_ClientStreamingRequest(client, &host, &request));
+    struct pollfd poller = {.fd = fd, .events = POLLIN};
+    assert(poll(&poller, 1, 2000) == 1);
+    uint8_t wire[4096];
+    struct sockaddr_in from;
+    socklen_t len = sizeof(from);
+    ssize_t n = recvfrom(fd, wire, sizeof(wire), 0, (void *)&from, &len);
+    assert(n > 16 && !memcmp(wire, test_discovery_magic, 8));
+    uint32_t hs = test_discovery_u32(wire + 8);
+    assert(hs + 16u <= (size_t)n);
+    uint32_t count = test_discovery_u32(wire + 12 + hs);
+    assert(count + hs + 16u == (size_t)n);
+    CMsgRemoteDeviceStreamingRequest *req =
+        cmsg_remote_device_streaming_request__unpack(NULL, count, wire + 16 + hs);
+    assert(req && req->has_network_test && req->network_test);
+    CMsgRemoteDeviceStreamingResponse response = CMSG_REMOTE_DEVICE_STREAMING_RESPONSE__INIT;
+    response.request_id = req->request_id;
+    response.result = k_ERemoteDeviceStreamingSuccess;
+    response.has_port = response.has_encrypted_session_key = true;
+    response.port = port;
+    uint8_t key[32], cipher[128], body[256];
+    for (unsigned i = 0; i < 32; ++i)
+        key[i] = i;
+    size_t capacity = sizeof(cipher);
+    assert(!IHS_CryptoSymmetricEncrypt(key, 32, config->secretKey, 32, cipher, &capacity));
+    response.encrypted_session_key.data = cipher;
+    response.encrypted_session_key.len = capacity;
+    size_t size = cmsg_remote_device_streaming_response__pack(&response, body);
+    test_discovery_send(fd, &from, body, size);
+    uint64_t deadline = millis() + 2000;
+    while (!atomic_load(&reply.ready) && millis() < deadline)
+        poll(NULL, 0, 1);
+    assert(atomic_load(&reply.ready));
+    for (unsigned i = 0; i < 32; ++i)
+        assert(reply.info.sessionKey[i] == i);
+    assert(reply.info.address.port == port);
+    cmsg_remote_device_streaming_request__free_unpacked(req, NULL);
+    IHS_ClientStreamingEstablished(client);
+    IHS_ClientStop(client);
+    IHS_ClientThreadedJoin(client);
+    IHS_ClientDestroy(client);
+    return reply.info;
 }
 static void send_peer(int fd, const struct sockaddr_in *to, uint8_t local, unsigned type,
                       unsigned ch, unsigned id, const uint8_t *body, size_t count, bool crc) {
@@ -70,14 +144,12 @@ static void one(bool crc, IHS_NetworkTestMode mode, bool fec) {
     assert(!bind(fd, (void *)&addr, sizeof(addr)));
     socklen_t len = sizeof(addr);
     assert(!getsockname(fd, (void *)&addr, &len));
-    IHS_SessionInfo info = {
-        .address.port = ntohs(addr.sin_port), .sessionKeyLen = 32, .steamId = 123456};
-    assert(IHS_IPAddressFromString(&info.address.ip, "127.0.0.1"));
+    uint8_t secret[32];
     for (unsigned i = 0; i < 32; ++i)
-        info.sessionKey[i] = i;
-    const uint8_t secret[32] = {0};
+        secret[i] = 32 + i;
     IHS_ClientConfig client = {
         .deviceId = 1, .secretKey = secret, .deviceName = "network-test peer"};
+    IHS_SessionInfo info = request_ticket(fd, ntohs(addr.sin_port), &client);
     IHS_Session *s = IHS_SessionCreate(&client, &info);
     assert(s);
     assert(IHS_SessionConfigureNetworkTest(s, mode, 20000));

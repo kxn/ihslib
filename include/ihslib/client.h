@@ -103,6 +103,11 @@ typedef struct IHS_StreamingRequest {
     int32_t gamepadCount;
     /** Optional real game ID from host activity. Zero starts the selected interface. */
     uint64_t gameId;
+    /** Request a dedicated network-test endpoint/key (discovery field 12).
+     * The normal success callback supplies its credentials. Create a fresh
+     * Session, configure its network-test mode, then connect; no game/decoder
+     * or settings change is implied. False requests ordinary streaming. */
+    bool networkTest;
 } IHS_StreamingRequest;
 
 typedef struct IHS_ClientDiscoveryCallbacks {
@@ -202,6 +207,10 @@ bool IHS_ClientAuthorizationCancel(IHS_Client *client);
  * - Streaming functions
  * ---------------------------------------------------- */
 
+/** Request ordinary streaming or a network-test ticket. Waiting/Busy retries
+ * every second until a terminal response or explicit StreamingCancel; this
+ * API does not invent a silent-host deadline. Unauthorized is returned to
+ * the caller's separate pairing UI. Credentials are borrowed during success. */
 bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
                                 const IHS_StreamingRequest *request);
 
