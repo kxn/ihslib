@@ -189,7 +189,8 @@ void IHS_SessionChannelDataReceived(IHS_SessionChannel *channel, IHS_SessionPack
 void IHS_SessionChannelDataLost(IHS_SessionChannel *channel) {
     CStreamDataLostMsg message = CSTREAM_DATA_LOST_MSG__INIT;
     IHS_SessionPacket packet;
-    IHS_SessionChannelInitializePacket(channel, &packet, IHS_SessionPacketTypeUnreliable, true,
+    /* Final Socket emission adds CRC only when negotiated (protocol RE §113). */
+    IHS_SessionChannelInitializePacket(channel, &packet, IHS_SessionPacketTypeUnreliable, false,
                                        IHS_PACKET_ID_NEXT);
     IHS_BufferAppendUInt8(&packet.body, k_EStreamDataLost);
     IHS_BufferAppendMessage(&packet.body, (const ProtobufCMessage *)&message);
