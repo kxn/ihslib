@@ -150,10 +150,24 @@ static void invalid_flush(IHS_Session *s, const IHS_VideoEpochInfo *e, IHS_Strea
     (void)ctx;
     assert(false);
 }
-static void flush_requires_tracked_callbacks(void) {
+static void invalid_interrupt(IHS_Session *s,const IHS_VideoEpochInfo *e,bool restart,void *ctx) {
+    (void)s;(void)e;(void)restart;(void)ctx;assert(false);
+}
+static void invalid_think(IHS_Session *s,const IHS_VideoEpochInfo *e,void *ctx) {
+    (void)s;(void)e;(void)ctx;assert(false);
+}
+static int invalid_start(IHS_Session *s,const IHS_VideoEpochInfo *e,
+                          const IHS_StreamVideoConfig *config,void *ctx) {
+    (void)s;(void)e;(void)config;(void)ctx;assert(false);return -1;
+}
+static void extensions_require_tracked_callbacks(unsigned mode) {
     IHS_Session *s = IHS_TestSessionCreate();
     assert(s);
-    IHS_StreamVideoCallbacks cb = {.flushTracked = invalid_flush};
+    IHS_StreamVideoCallbacks cb = {0};
+    if(mode==0) cb.flushTracked=invalid_flush;
+    if(mode==1 || mode>=3) cb.thinkTracked=invalid_think;
+    if(mode==2 || mode>=3) cb.interruptTracked=invalid_interrupt;
+    if(mode==4) cb.startTracked=invalid_start;
     IHS_SessionSetVideoCallbacks(s, &cb, NULL);
     assert(s->invalidVideoCallbacks);
     CStartVideoDataMsg msg = CSTART_VIDEO_DATA_MSG__INIT;
@@ -171,7 +185,7 @@ static void flush_requires_tracked_callbacks(void) {
 }
 int main(void) {
     IHS_Init();
-    flush_requires_tracked_callbacks();
+    for(unsigned mode=0;mode<5;++mode) extensions_require_tracked_callbacks(mode);
     stats_construction_failures();
     construction_failures();
     for (int i = SUCCESS; i <= NO_START; ++i)

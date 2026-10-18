@@ -202,4 +202,14 @@ typedef struct IHS_StreamVideoCallbacks {
      * original trigger (AVCodec get_format). Suppresses generic Start info.
      * Rebuild/zero-initialize callback tables for this source ABI addition. */
     bool reportsDecoderInfo;
+    /* Optional pair for a deferred SDK format callback. interruptTracked runs
+     * before worker join (possibly under Base): cancel/wake only, no SDK/join
+     * or Base/decoder lock. `restarting` preserves same-decoder pending values.
+     * thinkTracked runs on the lifecycle actor after control FIFO, before the
+     * client stage, outside Base. Session/epoch are borrowed for this call.
+     * Interrupt is idempotent, including failed-start cleanup and joined
+     * destruction (discard late publications). A key never opened is a no-op.
+     * Requires the tracked triple. Rebuild this source ABI and zero-init. */
+    void (*interruptTracked)(IHS_Session *, const IHS_VideoEpochInfo *, bool restarting, void *);
+    void (*thinkTracked)(IHS_Session *, const IHS_VideoEpochInfo *, void *);
 } IHS_StreamVideoCallbacks;

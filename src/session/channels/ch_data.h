@@ -110,7 +110,7 @@ void IHS_SessionChannelDataUpdateAt(IHS_SessionChannelData *, uint32_t tick);
 bool IHS_SessionChannelDataPollLocked(IHS_SessionChannelData *, IHS_SessionFrame *, uint16_t *missing);
 /* RX owner, outside Base/state locks: exclude and join decoder, purge only its
  * complete-frame FIFO. Connection receive windows/FEC groups stay alive. */
-void IHS_SessionChannelDataJoinAndPurge(IHS_SessionChannelData *);
+void IHS_SessionChannelDataJoinAndPurge(IHS_SessionChannelData *, bool restarting);
 void IHS_SessionChannelDataRestartWorker(IHS_SessionChannelData *);
 
 /* Complete-frame consumer used by the data worker, outside windowLock. */

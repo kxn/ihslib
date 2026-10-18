@@ -737,6 +737,7 @@ static void SessionUpdateAt(IHS_Base *base, void *context, uint32_t tick) {
          * updates, outside the network lock; handlers can join consumers. */
         if (!base->interrupted && !session->transport.detached)
             IHS_SessionChannelControlDrainIncoming(session->channels[IHS_SessionChannelIdControl]);
+        IHS_SessionVideoHandleFormatRequests(session);
         /* Drain incoming reliable frames before choosing one client stage. */
         if (!base->interrupted && !session->transport.detached)
             IHS_SessionChannelControlUpdateStage(session->channels[IHS_SessionChannelIdControl],

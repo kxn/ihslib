@@ -91,6 +91,7 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
                          IHS_Buffer *body);
 
 static void DataStop(IHS_SessionChannel *channel);
+static void DataInterrupt(IHS_SessionChannel *channel, bool restarting);
 
 static size_t VideoFrameHeaderParse(IHS_VideoFrameHeader *header, const uint8_t *data);
 
@@ -134,6 +135,7 @@ static const IHS_SessionChannelDataClass ChannelClass = {
      .deinit = ChannelVideoDeinit,
      .received = IHS_SessionChannelDataReceived,
      .stopped = IHS_SessionChannelDataStopped,
+     .dataInterrupt = DataInterrupt,
      .instanceSize = sizeof(IHS_SessionChannelVideo)},
     .start = DataStart,
     .dataFrame = DataReceived,
@@ -191,6 +193,9 @@ static void ChannelVideoInit(IHS_SessionChannel *channel, const void *config) {
 
 static void ChannelVideoDeinit(IHS_SessionChannel *channel) {
     IHS_SessionChannelDataDeinit(channel);
+    /* A canceled SDK call may publish a request after the first interrupt.
+     * Worker is now joined: discard that last old-object request as well. */
+    DataInterrupt(channel, false);
     /* The worker is joined; shared rollback is now safe and idempotent. */
     DataStop(channel);
     IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
@@ -228,11 +233,24 @@ static bool DataStart(IHS_SessionChannel *channel) {
         videoCh->backendReady = true; /* Preserve legacy submit-only callbacks. */
         return true;
     }
+    if (videoCh->tracked) {
+        IHS_BaseLock(&session->base);
+        assert(!session->videoStarting);
+        session->videoStartingEpoch = videoCh->epoch;
+        session->videoStarting = true;
+        IHS_BaseUnlock(&session->base);
+    }
     int started =
         videoCh->tracked
             ? callbacks->startTracked(session, &videoCh->epoch, &videoCh->config,
                                       session->callbackContexts.video)
             : callbacks->start(session, &videoCh->config, session->callbackContexts.video);
+    if (videoCh->tracked) {
+        IHS_BaseLock(&session->base);
+        session->videoStarting = false;
+        session->videoStartingEpoch = (IHS_VideoEpochInfo){0};
+        IHS_BaseUnlock(&session->base);
+    }
     bool unavailable = callbacks->prepare && started == 1;
     if (started != 0 && !unavailable) {
         if (videoCh->tracked)
@@ -443,6 +461,25 @@ static void DataStop(IHS_SessionChannel *channel) {
     videoCh->backendReady = false;
 }
 
+static void DataInterrupt(IHS_SessionChannel *channel, bool restarting) {
+    IHS_SessionChannelVideo *video = (void *)channel;
+    IHS_Session *session = channel->session;
+    const IHS_StreamVideoCallbacks *callbacks = session->callbacks.video;
+    if (video->tracked && !session->invalidVideoCallbacks && callbacks && callbacks->interruptTracked)
+        callbacks->interruptTracked(session, &video->epoch, restarting,
+                                      session->callbackContexts.video);
+}
+
+void IHS_SessionVideoHandleFormatRequests(IHS_Session *session) {
+    if (session->base.interrupted || session->transport.detached) return;
+    IHS_SessionChannel *ch = IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataVideo);
+    if (!ch || ch->cls != &ChannelClass.base) return;
+    IHS_SessionChannelVideo *video = (void *)ch;
+    const IHS_StreamVideoCallbacks *callbacks = session->callbacks.video;
+    if (video->tracked && video->appStarted && callbacks && callbacks->thinkTracked)
+        callbacks->thinkTracked(session, &video->epoch, session->callbackContexts.video);
+}
+
 void IHS_SessionVideoHandlePendingReset(IHS_Session *session) {
     if (session->base.interrupted || session->transport.detached)
         return;
@@ -454,7 +491,7 @@ void IHS_SessionVideoHandlePendingReset(IHS_Session *session) {
     if (!atomic_load(&video->resetRequested) || !video->appStarted) return;
     /* No Base/state mutex across join or callbacks. RX is this actor, so channel
      * replacement cannot race this section. New complete data is excluded. */
-    IHS_SessionChannelDataJoinAndPurge(&video->base);
+    IHS_SessionChannelDataJoinAndPurge(&video->base, true);
     DataStop(ch);
     atomic_store(&video->resetRequested, false); /* Coalesce old-worker requests. */
     if (session->base.interrupted || session->transport.detached) return;
@@ -762,12 +799,18 @@ bool IHS_SessionVideoRequestReset(IHS_Session *session) {
 bool IHS_SessionVideoDecoderInfo(IHS_Session *session, const IHS_VideoEpochInfo *epoch,
                                   const char *info, uint32_t threads) {
     if (!session || !epoch) return false;
-    IHS_SessionChannel *ch = IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataVideo);
-    if (!ch || ch->cls != &ChannelClass.base) return false;
-    IHS_SessionChannelVideo *video = (void *)ch;
-    if (!video->tracked || video->epoch.session_id != epoch->session_id ||
-        video->epoch.video_epoch != epoch->video_epoch) return false;
     IHS_BaseLock(&session->base);
+    IHS_SessionChannel *ch = IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataVideo);
+    IHS_SessionChannelVideo *video = ch && ch->cls == &ChannelClass.base ? (void *)ch : NULL;
+    bool current = video && video->tracked && video->epoch.session_id == epoch->session_id &&
+                   video->epoch.video_epoch == epoch->video_epoch;
+    bool starting = session->videoStarting &&
+        session->videoStartingEpoch.session_id == epoch->session_id &&
+        session->videoStartingEpoch.video_epoch == epoch->video_epoch;
+    if (!current && !starting) {
+        IHS_BaseUnlock(&session->base);
+        return false;
+    }
     char *copy = NULL;
     if (info && info[0]) {
         size_t size = strlen(info) + 1;

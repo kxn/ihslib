@@ -146,6 +146,10 @@ struct IHS_Session {
     bool invalidVideoCallbacks;
     IHS_StreamClientCapabilities clientCapabilities; /* session-owned strings */
     char *videoDecoderInfo; /* Current backend; session-owned, Base-locked. */
+    /* Actor's startTracked call can synchronously report get_format before
+     * ChannelAdd publishes the new decoder. No channel/context pointer escapes. */
+    IHS_VideoEpochInfo videoStartingEpoch;
+    bool videoStarting;
     struct {
         const IHS_StreamSessionCallbacks *session;
         const IHS_StreamAudioCallbacks *audio;

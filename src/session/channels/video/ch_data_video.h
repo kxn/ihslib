@@ -54,3 +54,5 @@ enum {
 IHS_SessionChannel *IHS_SessionChannelDataVideoCreate(IHS_Session *session, const CStartVideoDataMsg *message);
 /* Client-cycle owner only; before network/ordinary control consumption. */
 void IHS_SessionVideoHandlePendingReset(IHS_Session *);
+/* Same actor, after ordinary control FIFO, before the client stage. */
+void IHS_SessionVideoHandleFormatRequests(IHS_Session *);

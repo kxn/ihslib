@@ -147,7 +147,7 @@ int main(int argc, char **argv) {
     if (reset)
         IHS_SessionVideoHandlePendingReset(s);
     else {
-        IHS_SessionChannelDataJoinAndPurge(&video->base);
+        IHS_SessionChannelDataJoinAndPurge(&video->base, false);
         DataStop(ch);
     }
     marking = false;

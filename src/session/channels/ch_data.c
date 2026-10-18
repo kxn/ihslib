@@ -35,7 +35,7 @@
 
 static void DataThreadWorker(IHS_SessionChannelData *channel);
 
-static void DataThreadInterrupt(IHS_SessionChannelData *channel);
+static void DataThreadInterrupt(IHS_SessionChannelData *channel, bool restarting);
 
 void IHS_SessionChannelDataReceiveFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame);
 
@@ -152,12 +152,13 @@ bool IHS_SessionChannelDataInit(IHS_SessionChannel *channel, uint16_t windowCapa
     }
     channel->initFailed = !dataCh->worker;
     if (channel->initFailed)
-        DataThreadInterrupt(dataCh);
+        DataThreadInterrupt(dataCh, false);
     return !channel->initFailed;
 }
 
 void IHS_SessionChannelDataDeinit(IHS_SessionChannel *channel) {
     IHS_SessionChannelData *dataCh = (IHS_SessionChannelData *)channel;
+    if (channel->cls && channel->cls->dataInterrupt) channel->cls->dataInterrupt(channel, false);
 
     assert(!dataCh->worker || dataCh->interrupted);
 
@@ -197,11 +198,11 @@ void IHS_SessionChannelDataLost(IHS_SessionChannel *channel) {
 }
 
 void IHS_SessionChannelDataStopped(IHS_SessionChannel *channel) {
-    DataThreadInterrupt((IHS_SessionChannelData *)channel);
+    DataThreadInterrupt((IHS_SessionChannelData *)channel, false);
 }
 
-void IHS_SessionChannelDataJoinAndPurge(IHS_SessionChannelData *data) {
-    DataThreadInterrupt(data);
+void IHS_SessionChannelDataJoinAndPurge(IHS_SessionChannelData *data, bool restarting) {
+    DataThreadInterrupt(data, restarting);
     atomic_store(&data->interrupted, true);
     if (data->worker) IHS_ThreadJoin(data->worker);
     data->worker = NULL;
@@ -301,7 +302,9 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
         cls->stop((IHS_SessionChannel *)channel);
 }
 
-static void DataThreadInterrupt(IHS_SessionChannelData *channel) {
+static void DataThreadInterrupt(IHS_SessionChannelData *channel, bool restarting) {
+    if (channel->base.cls && channel->base.cls->dataInterrupt)
+        channel->base.cls->dataInterrupt(&channel->base, restarting);
     if (!channel->worker || channel->interrupted) {
         return;
     }

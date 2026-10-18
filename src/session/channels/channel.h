@@ -50,6 +50,9 @@ typedef struct IHS_SessionChannelClass {
     void (*stopped)(IHS_SessionChannel *channel);
 
     size_t instanceSize;
+    /* Optional data-worker cancellation. Generic data fixtures/consumers may
+     * provide this base class without the larger DataClass extension. */
+    void (*dataInterrupt)(IHS_SessionChannel *channel, bool restarting);
 } IHS_SessionChannelClass;
 
 struct IHS_SessionChannel {

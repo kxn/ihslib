@@ -101,7 +101,9 @@ void IHS_SessionSetVideoCallbacks(IHS_Session *session, const IHS_StreamVideoCal
                                        !!callbacks->stopTracked
                                  : 0;
     session->invalidVideoCallbacks = (tracked != 0 && tracked != 3) ||
-                                    (callbacks && callbacks->flushTracked && tracked != 3);
+                                    (callbacks && callbacks->flushTracked && tracked != 3) ||
+                                    (callbacks && (callbacks->interruptTracked || callbacks->thinkTracked) &&
+                                     (tracked != 3 || !callbacks->interruptTracked || !callbacks->thinkTracked));
     session->callbacks.video = callbacks;
     session->callbackContexts.video = context;
     IHS_BaseUnlock(&session->base);
