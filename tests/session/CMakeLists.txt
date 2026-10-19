@@ -11,6 +11,11 @@ ihs_add_test(video_control test_video_control.c)
 target_link_libraries(ihstest_video_control PRIVATE ihs-test-session)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    ihs_add_test(udp_error_worker test_udp_error_worker.c)
+    target_link_libraries(ihstest_udp_error_worker PRIVATE ihs-test-session)
+    target_link_options(ihstest_udp_error_worker PRIVATE -Wl,--wrap=IHS_BaseSend
+        -Wl,--wrap=IHS_ThreadJoin -Wl,--wrap=IHS_UDPSocketWaitReadable -Wl,--wrap=IHS_UDPSocketReceive)
+    set_tests_properties(udp_error_worker PROPERTIES TIMEOUT 20)
     add_executable(ihs-fec-resource-oracle fec_resource_oracle.c)
     target_include_directories(ihs-fec-resource-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-fec-resource-oracle PRIVATE ihslib)

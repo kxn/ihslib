@@ -12,11 +12,23 @@ static IHS_Session *session;
 static atomic_uint tick;
 static atomic_uint disconnected;
 static bool background;
-static bool receiveFailure;
+static unsigned failureMode; /* 0: empty read, 1: negative read, 2: negative wait */
 static unsigned receives;
 static const uint32_t start = 1000000;
 uint32_t __wrap_IHS_SessionPacketTimestamp(void) {
     return atomic_load(&tick);
+}
+static void advance_deadline(void) {
+    assert(session->transport.lastReceive == start); /* errors are not packets */
+    uint32_t threshold = (background ? 180u : 15u) * 65536u;
+    if (receives == 2) {
+        assert(session->state.connectionState == IHS_SessionConnectionStateHandshaking);
+        assert(session->state.crcRequired);
+        atomic_store(&tick, start + threshold - 1);
+    } else if (receives == 3) {
+        assert(!session->transport.timedOut);
+        atomic_store(&tick, start + threshold);
+    }
 }
 static int ScriptReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) {
     (void)socket;
@@ -36,19 +48,9 @@ static int ScriptReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) {
             IHS_SessionSetForeground(session, false);
         return 1;
     }
-    if (receiveFailure)
-        return -1;
-    uint32_t threshold = (background ? 180u : 15u) * 65536u;
-    if (receives == 2) {
-        assert(session->state.connectionState == IHS_SessionConnectionStateHandshaking);
-        assert(session->state.crcRequired);
-        atomic_store(&tick, start + threshold - 1);
-    } else if (receives == 3) {
-        assert(!session->transport.timedOut);
-        atomic_store(&tick, start + threshold);
-    }
+    advance_deadline();
     usleep(1000);
-    return 0;
+    return failureMode == 1 ? -1 : 0;
 }
 static void on_disconnected(IHS_Session *s, void *context) {
     (void)s;
@@ -58,6 +60,12 @@ static void on_disconnected(IHS_Session *s, void *context) {
 static bool endBatch;
 int __wrap_IHS_UDPSocketWaitReadable(IHS_UDPSocket *socket, uint32_t timeoutMs) {
     (void)socket; (void)timeoutMs;
+    if (failureMode == 2 && receives) {
+        ++receives;
+        advance_deadline();
+        usleep(1000);
+        return -1;
+    }
     return 1;
 }
 int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *packet) {
@@ -69,9 +77,9 @@ int __wrap_IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *packet) {
 
 int main(void) {
     IHS_Init();
-    for (unsigned i = 0; i < 3; ++i) {
-        background = i == 1;
-        receiveFailure = i == 2;
+    for (unsigned i = 0; i < 6; ++i) {
+        background = i & 1;
+        failureMode = i / 2;
         receives = 0;
         atomic_store(&tick, start);
         atomic_store(&disconnected, 0);
@@ -81,12 +89,11 @@ int main(void) {
         IHS_SessionSetSessionCallbacks(session, &callbacks, NULL);
         assert(IHS_SessionConnect(session));
         IHS_SessionThreadedJoin(session);
-        assert(session->transport.timedOut == !receiveFailure);
-        if (!receiveFailure)
-            assert(!session->transport.active);
+        assert(session->transport.timedOut && !session->transport.active);
+        assert(session->transport.lastReceive == start);
         assert(session->base.interrupted);
         assert(!IHS_SessionHostRequestedStop(session));
-        assert(atomic_load(&disconnected) == (receiveFailure ? 0u : 1u));
+        assert(atomic_load(&disconnected) == 1);
         IHS_SessionDestroy(session);
     }
     IHS_Quit();

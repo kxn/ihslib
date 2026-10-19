@@ -41,7 +41,12 @@ IHS_UDPSocket *IHS_UDPSocketOpen(bool broadcast);
 
 void IHS_UDPSocketClose(IHS_UDPSocket *socket);
 
-/* Readiness only: 1 ready, 0 timeout/retry, -1 fatal local error. */
+/* Actual stream packet constructor/TransportUDP::Recv uses 2272 bytes (§157).
+ * This is not the negotiated MTU or a decoder/payload limit. */
+#define IHS_STREAM_UDP_RECV_CAPACITY 2272u
+
+/* Readiness only. POSIX follows the output fd_set even on select errors;
+ * other backends can return -1. Session still advances its connection tick. */
 int IHS_UDPSocketWaitReadable(IHS_UDPSocket *, uint32_t timeoutMs);
 
 int IHS_UDPSocketReceive(IHS_UDPSocket *s, IHS_UDPPacket *packet);

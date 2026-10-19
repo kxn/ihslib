@@ -69,8 +69,10 @@ static int ScriptReceive(IHS_UDPSocket *socket, IHS_UDPPacket *received) {
         return 0;
     default:
         assert(atomic_load(&attempts) == 4); /* accepted Connected stops retries */
-        usleep(1000);
-        return -1;
+        /* End the scripted run explicitly. A negative socket read is not a
+         * shutdown request; transient-error continuation is tested separately. */
+        IHS_SessionInterrupt(session);
+        return 0;
     }
 }
 static bool endBatch;

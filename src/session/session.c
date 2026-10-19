@@ -690,7 +690,7 @@ static void SessionInitialized(IHS_Base *base, void *context) {
 static void SessionFinalized(IHS_Base *base, void *context) {
     (void)context;
     IHS_Session *session = (IHS_Session *)base;
-    /* A fatal receive error may end BaseWorker without a requested stop.
+    /* Initialization failure may end BaseWorker without a requested stop.
      * Wake the send worker before joining it in that path too. */
     IHS_SessionInterrupt(session);
     if (session->sendThread)
@@ -726,13 +726,14 @@ static bool SessionReceiveCycle(IHS_Base *base, void *context, IHS_UDPPacket *pa
     unsigned waitMs = session->outgoing.blocked ? 0 : 2;
     IHS_BaseUnlock(base);
     int readable = IHS_UDPSocketWaitReadable(base->socket, waitMs);
-    if (readable < 0 || base->interrupted) return false;
+    if (base->interrupted) return false;
     uint32_t tick = IHS_SessionPacketTimestamp();
-    if (readable) {
+    if (readable > 0) {
         for (;;) {
             int result = IHS_UDPSocketReceive(base->socket, packet);
-            if (result < 0) return false; /* local fatal-I/O shutdown protection */
-            if (!result) break;
+            /* Official UDP Recv maps every nonpositive read to end-of-batch;
+             * Socket::Update still runs Connection::Update afterwards (§157). */
+            if (result <= 0) break;
             SessionRecvAt(base, &packet->address, &packet->buffer, tick);
             IHS_BufferClear(&packet->buffer, false);
             tick = IHS_SessionPacketTimestamp();

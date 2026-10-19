@@ -96,9 +96,10 @@ int IHS_UDPSocketWaitReadable(IHS_UDPSocket *s, uint32_t timeoutMs) {
     fd_set reads;
     FD_ZERO(&reads); FD_SET(s->fd, &reads);
     struct timeval timeout = {.tv_sec = timeoutMs / 1000, .tv_usec = (timeoutMs % 1000) * 1000};
-    int result = select(s->fd + 1, &reads, NULL, NULL, &timeout);
-    if (result < 0 && errno == EINTR) return 0;
-    return result < 0 ? -1 : result > 0;
+    /* TransportUDP::BWait @8026f8 ignores select's return and checks the
+     * output set. Preserve that result on errors as well (§157). */
+    (void)select(s->fd + 1, &reads, NULL, NULL, &timeout);
+    return FD_ISSET(s->fd, &reads) != 0;
 }
 
 int IHS_UDPSocketReceive(IHS_UDPSocket *s, IHS_UDPPacket *packet) {
@@ -126,8 +127,9 @@ int IHS_UDPSocketReceive(IHS_UDPSocket *s, IHS_UDPPacket *packet) {
             case EHOSTUNREACH:
                 return 0;
             default:
-                fprintf(stderr, "IHS_UDPSocketReceive: fatal recvfrom errno=%d (%s)\n",
-                        errno, strerror(errno));
+                /* The session owner ends this read batch and updates its
+                 * connection/deadline. Generic owners may still stop. Never
+                 * flood blocking stderr on a continuing receive path. */
                 return -1;
         }
     }

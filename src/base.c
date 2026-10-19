@@ -201,7 +201,10 @@ static void BaseWorker(IHS_Base *base) {
         base->callbacks.run->initialized(base, base->callbackContexts.run);
     }
     IHS_UDPPacket recv;
-    IHS_BufferInit(&recv.buffer, 2048, 2048);
+    size_t receiveCapacity = base->callbacks.run && base->callbacks.run->receiveCycle
+                                 ? IHS_STREAM_UDP_RECV_CAPACITY
+                                 : 2048;
+    IHS_BufferInit(&recv.buffer, receiveCapacity, receiveCapacity);
     for (;;) {
         IHS_BaseLock(base);
         bool interrupted = base->interrupted;
