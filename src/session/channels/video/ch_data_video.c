@@ -407,7 +407,10 @@ static uint32_t DataThink(IHS_SessionChannel *channel) {
     IHS_MutexLock(videoCh->stateMutex);
     /* Official OnThink consumes through one finishing fragment. After submit
      * it returns 1ms when more partials remain, otherwise infinite. */
-    if (!videoCh->base.interrupted && AssembleFrame(channel)) {
+    /* An entered FIFO batch still reaches original OnThink after Stop. Backend
+     * format cancellation/local freeze are handled by the submit owner, not
+     * by skipping protocol assembly here (protocol RE sections166/167). */
+    if (AssembleFrame(channel)) {
         /* Official OnThink 7b2648..26f8: only the finishing fragment decides
          * mode. A transition requests an asynchronous reset. Every pending
          * request, including one from a previous backend submit, gates FinalDecode. */
