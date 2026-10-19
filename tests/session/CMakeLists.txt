@@ -113,6 +113,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         -Wl,--wrap=IHS_SessionSendControlMessage -Wl,--wrap=IHS_SessionChannelDataLost)
     add_test(NAME video_content_mode_capacity COMMAND ihs-video-content-mode-oracle --capacity)
     set_tests_properties(video_content_mode_capacity PROPERTIES TIMEOUT 10)
+    add_executable(ihs-video-identity-oracle video_identity_oracle.c)
+    target_include_directories(ihs-video-identity-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-video-identity-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-video-identity-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-video-identity-oracle PRIVATE -Wl,--wrap=IHS_SessionChannelDataThink
+        -Wl,--wrap=IHS_SessionChannelDataReceiveFrame -Wl,--wrap=IHS_ThreadCreate
+        -Wl,--wrap=IHS_CondWait -Wl,--wrap=IHS_CondWaitTimeout -Wl,--wrap=IHS_FrameTrackerCopyStats
+        -Wl,--wrap=IHS_FrameTicketVideoDecodeStage
+        -Wl,--wrap=IHS_FrameStatsRecordComplete
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_SessionSendControlMessage
+        -Wl,--wrap=IHS_SessionChannelDataLost)
     add_executable(ihs-video-pressure-oracle video_pressure_oracle.c)
     target_include_directories(ihs-video-pressure-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-video-pressure-oracle PRIVATE ihs-test-session ihslib)

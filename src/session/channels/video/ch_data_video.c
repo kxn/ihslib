@@ -50,7 +50,7 @@ typedef struct IHS_SessionChannelVideo {
     IHS_StreamVideoConfig config;
     struct {
         uint16_t expectedSequence;
-        uint16_t lastFrameId;
+        uint16_t lastFrameId; /* Cancellation cursor: key sets ID-1, finish sets ID. */
         uint32_t lastRecoveryRequest;
         bool waitingKeyFrame, syncingBacklog;
         int32_t overflowFrameSpan;
@@ -158,6 +158,7 @@ IHS_SessionChannel *IHS_SessionChannelDataVideoCreate(IHS_Session *session,
 static void ChannelVideoInit(IHS_SessionChannel *channel, const void *config) {
     IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
     const CStartVideoDataMsg *message = config;
+    videoCh->states.lastFrameId = UINT16_MAX; /* Original video constructor +418. */
     videoCh->config.width = message->width;
     videoCh->config.height = message->height;
     videoCh->config.codec = (IHS_StreamVideoCodec)message->codec;
@@ -317,16 +318,27 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
                                      .inputReceived = header->inputRecvTimestamp ? header->inputRecvTimestamp - offset : 0,
                                      .frameSize = receivedPayloadSize};
         IHS_FrameBeginResult result =
-            IHS_FrameTrackerBegin(channel->session->frameTracker, videoCh->epoch.video_epoch,
-                                  header->id, &received, &videoCh->incoming);
+            IHS_FrameTrackerBeginInput(channel->session->frameTracker, videoCh->epoch.video_epoch,
+                                       header->id, &received, &videoCh->incoming);
         if (result != IHS_FrameBeginOK) {
-            if (result != IHS_FrameBeginStale)
-                IHS_SessionDisconnect(channel->session);
+            IHS_SessionDisconnect(channel->session);
             goto unlock;
         }
     }
 
     if (vhead.flags & VideoFrameFlagKeyFrame) {
+        /* Official DecodeFrame 7b208c..20d8 cancels the modular interval
+         * after the last finishing fragment, excluding the new key itself.
+         * This is protocol statistics, not ownership of retained pictures. */
+        uint16_t id = (uint16_t)(videoCh->states.lastFrameId + 1);
+        if (channel->session->frameStats) {
+            while (id != header->id) {
+                IHS_FrameStatsRecordComplete(channel->session->frameStats, id,
+                                             IHS_VideoFrameResultDroppedReset);
+                ++id;
+            }
+        }
+        videoCh->states.lastFrameId = (uint16_t)(header->id - 1);
         DiscardPending(videoCh);
         const IHS_StreamVideoCallbacks *callbacks = channel->session->callbacks.video;
         if (videoCh->tracked && callbacks->flushTracked) {
@@ -355,7 +367,6 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
         videoCh->states.waitingKeyFrame = true;
     }
     videoCh->states.expectedSequence = vhead.sequence + 1;
-    videoCh->states.lastFrameId = header->id;
     if (videoCh->states.waitingKeyFrame) {
         goto unlock;
     }
@@ -382,9 +393,7 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
 unlock:
     if (videoCh->incoming) {
         if (!videoCh->contributed) {
-            IHS_FrameOutcome outcome = {.result = IHS_VideoFrameResultDroppedNetworkLost,
-                                        .completionUs = IHS_TimerNow() * 1000};
-            IHS_FrameTicketComplete(videoCh->incoming, &outcome);
+            IHS_FrameTicketAbandonInput(videoCh->incoming);
         }
         IHS_FrameTicketRelease(videoCh->incoming);
         videoCh->incoming = NULL;
@@ -563,14 +572,18 @@ static bool AssembleFrame(IHS_SessionChannel *channel) {
             return false;
         }
         if (partial->header.flags & VideoFrameFlagFrameFinish) {
+            videoCh->states.lastFrameId = partial->frameId;
             /* Original OnThink 7b258c/261c selects the finishing fragment's
              * identity. A wire-ID change does not invalidate assembled bytes.
-             * Transfer only local ownership; unresolved contributor metadata
-             * remains pending for the existing tracker settlement/epoch close. */
+             * Retire consumed contributor ownership without a protocol result;
+             * its protocol receive slot is independent of this endpoint. */
             if (videoCh->tracked && partial->ticket != videoCh->assembly) {
                 if (!partial->ticket || !IHS_FrameTicketRetain(partial->ticket))
                     return false;
-                if (videoCh->assembly) IHS_FrameTicketRelease(videoCh->assembly);
+                if (videoCh->assembly) {
+                    IHS_FrameTicketAbandonInput(videoCh->assembly);
+                    IHS_FrameTicketRelease(videoCh->assembly);
+                }
                 videoCh->assembly = partial->ticket;
             }
             videoCh->assemblyId = partial->frameId;
@@ -579,6 +592,8 @@ static bool AssembleFrame(IHS_SessionChannel *channel) {
             videoCh->frame.contentMode = (partial->header.flags & VideoFrameFlagContentMode) != 0;
             videoCh->states.frameFinished = true;
         }
+        if (partial->ticket && partial->ticket != videoCh->assembly)
+            IHS_FrameTicketAbandonInput(partial->ticket);
         IHS_BufferClear(&partial->data, true);
         IHS_VideoPartialFramesRemove(&videoCh->frame.partial, partial);
         partial = next;
@@ -662,24 +677,22 @@ static void CheckPartialOverflow(IHS_SessionChannel *channel) {
 }
 
 static void DiscardPending(IHS_SessionChannelVideo *channel) {
-    IHS_FrameOutcome outcome = {.result = IHS_VideoFrameResultDroppedReset,
-                                .completionUs = IHS_TimerNow() * 1000};
     if (channel->assembly) {
         if (channel->assembly != channel->incoming)
-            IHS_FrameTicketComplete(channel->assembly, &outcome);
+            IHS_FrameTicketAbandonInput(channel->assembly);
         IHS_FrameTicketRelease(channel->assembly);
         channel->assembly = NULL;
     }
     for (size_t n = 0; n < channel->frame.deferredCount; ++n) {
         IHS_FrameTicket *ticket = channel->frame.deferred[n];
         if (ticket != channel->incoming)
-            IHS_FrameTicketComplete(ticket, &outcome);
+            IHS_FrameTicketAbandonInput(ticket);
         IHS_FrameTicketRelease(ticket);
     }
     channel->frame.deferredCount = 0;
     for (IHS_VideoPartialFrame *part = channel->frame.partial.head; part; part = part->next)
         if (part->ticket && part->ticket != channel->incoming)
-            IHS_FrameTicketComplete(part->ticket, &outcome);
+            IHS_FrameTicketAbandonInput(part->ticket);
     IHS_BufferClear(&channel->frame.buffer, 0);
     channel->states.frameStarted = channel->states.frameFinished = false;
     size_t clearedCount = IHS_VideoPartialFramesClear(&channel->frame.partial);

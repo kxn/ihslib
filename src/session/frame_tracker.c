@@ -12,7 +12,7 @@ struct IHS_FrameTicket {
     IHS_FrameTracker *owner;
     atomic_uint refs;
     atomic_int publication;
-    bool occupied, settled;
+    bool occupied, settled, input;
     IHS_TrackedFrame frame;   /* receive/decode under owner lock; identity immutable */
     IHS_FrameOutcome payload; /* claimant only, readable after READY(acquire) */
     uint64_t completionSerial;
@@ -183,8 +183,9 @@ bool IHS_FrameTicketComplete(IHS_FrameTicket *r, const IHS_FrameOutcome *outcome
     IHS_FrameTicketPublish(r, outcome);
     return true;
 }
-IHS_FrameBeginResult IHS_FrameTrackerBegin(IHS_FrameTracker *t, uint64_t epoch, uint16_t frameId,
-                                           const IHS_FrameReceive *receive, IHS_FrameTicket **out) {
+static IHS_FrameBeginResult begin_frame(IHS_FrameTracker *t, uint64_t epoch, uint16_t frameId,
+                                      const IHS_FrameReceive *receive, IHS_FrameTicket **out,
+                                      bool input) {
     *out = NULL;
     IHS_MutexLock(t->lock);
     IHS_FrameBeginResult result = IHS_FrameBeginOK;
@@ -192,9 +193,10 @@ IHS_FrameBeginResult IHS_FrameTrackerBegin(IHS_FrameTracker *t, uint64_t epoch, 
         result = IHS_FrameBeginClosed;
         goto done;
     }
-    /* Leave one wrap of headroom for reordered frames preceding the first id. */
+    /* Legacy aggregation leaves headroom for reordering before the first ID.
+     * Fresh input endpoints keep only a raw-ID hint, never a history gate. */
     uint64_t seq = 65536u + (uint64_t)frameId;
-    if (t->haveSequence) {
+    if (!input && t->haveSequence) {
         uint16_t delta = (uint16_t)(frameId - (uint16_t)t->highestSequence);
         if (delta == 32768) {
             result = IHS_FrameBeginAmbiguous;
@@ -219,7 +221,7 @@ IHS_FrameBeginResult IHS_FrameTrackerBegin(IHS_FrameTracker *t, uint64_t epoch, 
     RecordIterator it = {.block = &t->first};
     IHS_FrameTicket *r;
     while ((r = next_record(&it))) {
-        if (r->occupied && r->frame.identity.epoch == epoch &&
+        if (!input && !r->input && r->occupied && r->frame.identity.epoch == epoch &&
             r->frame.identity.wireSequence == seq) {
             if (r->settled || atomic_load_explicit(&r->publication, memory_order_acquire) != OPEN) {
                 result = IHS_FrameBeginStale;
@@ -262,7 +264,7 @@ IHS_FrameBeginResult IHS_FrameTrackerBegin(IHS_FrameTracker *t, uint64_t epoch, 
             collectedRecord = r;
     }
     size_t seenIndex = seq % IHS_FRAME_TRACKER_CAPACITY;
-    if (t->seenValid[seenIndex] && t->seen[seenIndex] == seq) {
+    if (!input && t->seenValid[seenIndex] && t->seen[seenIndex] == seq) {
         result = IHS_FrameBeginStale;
         goto done;
     }
@@ -294,20 +296,42 @@ IHS_FrameBeginResult IHS_FrameTrackerBegin(IHS_FrameTracker *t, uint64_t epoch, 
     freeRecord->videoTimestamp = 0;
     freeRecord->videoDecodeActive = freeRecord->videoDecodeEnded = false;
     freeRecord->occupied = true;
+    freeRecord->input = input;
     freeRecord->settled = false;
     freeRecord->statsConsumed = false;
     freeRecord->statsReusable = false;
     atomic_store_explicit(&freeRecord->refs, 1, memory_order_relaxed);
     atomic_store_explicit(&freeRecord->publication, OPEN, memory_order_release);
-    t->seenValid[seenIndex] = true;
-    t->seen[seenIndex] = seq;
-    if (!t->haveSequence || seq > t->highestSequence)
-        t->highestSequence = seq;
-    t->haveSequence = true;
+    if (!input) {
+        t->seenValid[seenIndex] = true;
+        t->seen[seenIndex] = seq;
+        if (!t->haveSequence || seq > t->highestSequence)
+            t->highestSequence = seq;
+        t->haveSequence = true;
+    }
     *out = freeRecord;
 done:
     IHS_MutexUnlock(t->lock);
     return result;
+}
+IHS_FrameBeginResult IHS_FrameTrackerBegin(IHS_FrameTracker *t, uint64_t epoch, uint16_t frameId,
+                                           const IHS_FrameReceive *receive, IHS_FrameTicket **out) {
+    return begin_frame(t, epoch, frameId, receive, out, false);
+}
+IHS_FrameBeginResult IHS_FrameTrackerBeginInput(IHS_FrameTracker *t, uint64_t epoch, uint16_t frameId,
+                                                const IHS_FrameReceive *receive, IHS_FrameTicket **out) {
+    return begin_frame(t, epoch, frameId, receive, out, true);
+}
+bool IHS_FrameTicketAbandonInput(IHS_FrameTicket *r) {
+    IHS_FrameTracker *t = r->owner;
+    IHS_MutexLock(t->lock);
+    int state = OPEN;
+    bool retired = r->input && !r->settled && !r->videoDecodeActive && !r->frame.hasDecodeBegin &&
+                   atomic_compare_exchange_strong_explicit(&r->publication, &state, CLOSED,
+                                                            memory_order_acq_rel, memory_order_acquire);
+    if (retired) r->settled = true;
+    IHS_MutexUnlock(t->lock);
+    return retired;
 }
 bool IHS_FrameTrackerDecodeStage(IHS_FrameTracker *t, IHS_FrameTicket *r, bool end, uint64_t us) {
     IHS_MutexLock(t->lock);

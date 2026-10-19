@@ -39,6 +39,14 @@ void IHS_FrameTrackerCloseEpoch(IHS_FrameTracker *, uint64_t epoch);
 void IHS_FrameTrackerClose(IHS_FrameTracker *);
 IHS_FrameBeginResult IHS_FrameTrackerBegin(IHS_FrameTracker *, uint64_t epoch,
     uint16_t frameId, const IHS_FrameReceive *, IHS_FrameTicket **out);
+/* Video input ownership is independent of wire-ID history/deduplication.
+ * Every received input gets a fresh endpoint; only the finishing contributor
+ * becomes the submitted AU's endpoint. This does not admit sequence gaps. */
+IHS_FrameBeginResult IHS_FrameTrackerBeginInput(IHS_FrameTracker *, uint64_t epoch,
+    uint16_t frameId, const IHS_FrameReceive *, IHS_FrameTicket **out);
+/* Retire unsubmitted input metadata without a protocol completion. A live
+ * reference is required; submitted/claimed/completed tasks cannot be retired. */
+bool IHS_FrameTicketAbandonInput(IHS_FrameTicket *);
 bool IHS_FrameTrackerDecodeStage(IHS_FrameTracker *, IHS_FrameTicket *, bool end, uint64_t us);
 size_t IHS_FrameTrackerSettle(IHS_FrameTracker *, uint64_t nowUs, uint64_t timeoutUs,
                              IHS_TrackedFrame *out, size_t capacity);

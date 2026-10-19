@@ -9,6 +9,8 @@
 typedef struct IHS_FrameTicket IHS_FrameTicket;
 typedef struct IHS_FrameIdentity {
     uint64_t sessionId, epoch, receiveSerial, slotVersion;
+    /* Correlation hint, not task identity or decoder admission. Video input
+     * endpoints may have the same hint; receiveSerial distinguishes them. */
     uint64_t wireSequence;
     uint16_t frameId;
 } IHS_FrameIdentity;
