@@ -13,7 +13,6 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-static atomic_uint_fast64_t tick;
 static atomic_int_fast64_t wall;
 static atomic_uint step, attempts, encryptions, pin_encryptions, failures;
 static atomic_int failure_code;
@@ -21,16 +20,6 @@ static _Thread_local bool in_token;
 static uint8_t ivs[16][16], secrets[16][32], ticket_secret[32];
 static bool failed_step[16], have_ticket;
 static pthread_mutex_t observer = PTHREAD_MUTEX_INITIALIZER;
-int __real_clock_gettime(clockid_t, struct timespec *);
-int __wrap_clock_gettime(clockid_t id, struct timespec *t) {
-    if (id == CLOCK_MONOTONIC) {
-        uint64_t n = atomic_load(&tick);
-        t->tv_sec = n / 1000;
-        t->tv_nsec = n % 1000 * 1000000;
-        return 0;
-    }
-    return __real_clock_gettime(id, t);
-}
 time_t __wrap_time(time_t *p) {
     time_t n = atomic_load(&wall);
     if (p)
@@ -185,7 +174,6 @@ int main(int argc, char **argv) {
             unhex(colon + 1, ivs[i], 16);
         }
     }
-    atomic_store(&tick, 1000000);
     atomic_store(&wall, 1000);
     IHS_Init();
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -224,7 +212,6 @@ int main(int argc, char **argv) {
         if (i && memcmp(secrets[i], secrets[i - 1], 32))
             IHS_ClientSetSecretKey(c, secrets[i]);
         atomic_store(&wall, 1000 + i * 3);
-        atomic_store(&tick, 1000025 + i * (auth ? 3000 : 1000));
         receive(c, fd, auth);
     }
     IHS_ClientStop(c);

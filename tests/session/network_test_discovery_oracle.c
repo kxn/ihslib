@@ -18,17 +18,8 @@ static uint8_t received_key[128];
 static size_t key_size;
 static IHS_SocketAddress received_address;
 static bool virtual_clock;
+/* Controlled wall milliseconds; never replace the condition wait's clock. */
 static atomic_uint_fast64_t virtual_now;
-int __real_clock_gettime(clockid_t, struct timespec *);
-int __wrap_clock_gettime(clockid_t clock, struct timespec *time) {
-    if (virtual_clock && clock == CLOCK_MONOTONIC) {
-        uint64_t now = atomic_load(&virtual_now);
-        time->tv_sec = now / 1000;
-        time->tv_nsec = (now % 1000) * 1000000;
-        return 0;
-    }
-    return __real_clock_gettime(clock, time);
-}
 time_t __wrap_time(time_t *out) { time_t n = virtual_clock ? atomic_load(&virtual_now)/1000 : 1000; if(out)*out=n; return n; }
 uint32_t __wrap_IHS_CryptoRandomUInt32(void) {
     return 17;

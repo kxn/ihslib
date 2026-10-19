@@ -12,19 +12,10 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+/* Controlled wall milliseconds only; real monotonic time drives RX waits. */
 static atomic_uint_fast64_t tick;
 static atomic_uint encryptions;
 static bool crypto_failure;
-int __real_clock_gettime(clockid_t, struct timespec *);
-int __wrap_clock_gettime(clockid_t id, struct timespec *t) {
-    if (id == CLOCK_MONOTONIC) {
-        uint64_t v = atomic_load(&tick);
-        t->tv_sec = v / 1000;
-        t->tv_nsec = v % 1000 * 1000000;
-        return 0;
-    }
-    return __real_clock_gettime(id, t);
-}
 time_t __wrap_time(time_t *out) { time_t n=atomic_load(&tick)/1000; if(out)*out=n; return n; }
 uint32_t __wrap_IHS_CryptoRandomUInt32(void) {
     return 17;
