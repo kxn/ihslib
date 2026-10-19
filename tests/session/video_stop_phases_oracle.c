@@ -5,6 +5,7 @@
 #include "../../src/session/channels/video/ch_data_video.c"
 #include "ihs_buffer_ext.h"
 #include "test_session.h"
+#include "decoder_direct_consumer.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -106,6 +107,8 @@ static void feed(IHS_SessionChannel *ch, uint16_t id, uint16_t seq, uint8_t flag
     IHS_BufferAppendMem(&body, (const uint8_t *)"partial-packet", 14);
     IHS_SessionDataFrameHeader h = {.id = id, .timestamp = 1000000};
     DataReceived(ch, &h, &body);
+    /* Explicit consumer boundary, matching the Source action fixture. */
+    (void)DataThink(ch);
     IHS_BufferClear(&body, true);
 }
 int main(int argc, char **argv) {

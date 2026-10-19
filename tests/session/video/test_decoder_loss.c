@@ -31,6 +31,7 @@
 #include "protobuf/pb_utils.h"
 
 #include "test_session.h"
+#include "decoder_direct_consumer.h"
 
 /** Mirrors session.c — the queue item layout is private there. */
 typedef struct IHS_QueueItem {
@@ -144,6 +145,7 @@ static void Feed(uint16_t frameId, uint32_t timestamp, uint16_t sequence, uint8_
     IHS_SessionDataFrameHeader header = {.id = frameId, .timestamp = timestamp};
     const IHS_SessionChannelDataClass *cls = (const IHS_SessionChannelDataClass *) channel->cls;
     cls->dataFrame(channel, &header, &body);
+    while (cls->think(channel) == 1) {}
     IHS_BufferClear(&body, true);
 }
 

@@ -37,8 +37,6 @@ static void DataThreadWorker(IHS_SessionChannelData *channel);
 
 static void DataThreadInterrupt(IHS_SessionChannelData *channel, bool restarting);
 
-void IHS_SessionChannelDataReceiveFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame);
-
 static const char *DataChannelName(IHS_SessionChannelType type);
 
 typedef struct IHS_FECFrameNode {
@@ -276,25 +274,31 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
                    channelName);
     while (!channel->interrupted) {
         IHS_MutexLock(channel->windowLock);
-        bool hasFrame;
         uint16_t missing;
-        for (;;) {
-            hasFrame = IHS_SessionChannelDataPollLocked(channel, &frame, &missing);
-            if (hasFrame)
-                break;
-            /* Stop may have signalled before this worker acquired windowLock. */
-            if (channel->interrupted)
-                break;
-            IHS_CondWait(channel->windowCond, channel->windowLock);
-            if (!channel->worker || channel->interrupted) {
-                break;
-            }
-        }
+        bool hasFrame = IHS_SessionChannelDataPollLocked(channel, &frame, &missing);
         IHS_MutexUnlock(channel->windowLock);
         if (hasFrame) {
             IHS_SessionChannelDataReceiveFrame(channel, &frame);
             IHS_SessionPacketsWindowReleaseFrame(&frame);
+            continue;
         }
+        if (channel->interrupted)
+            break;
+        /* Official RunDecodeLoop 766dd8..766e48 drains queued DecodeFrame
+         * inputs before OnThink. A newer key fragment can flush an older
+         * complete image before it reaches the SDK. Never hold FIFO lock over
+         * decoder/platform callbacks. */
+        uint32_t timeout = IHS_SessionChannelDataThink(&channel->base);
+        IHS_MutexLock(channel->windowLock);
+        /* Cond signals are not persistent events. Recheck under the producer's
+         * mutex so input/stop during OnThink cannot be followed by a lost wait. */
+        if (!channel->interrupted && !channel->fecHead) {
+            if (timeout == UINT32_MAX)
+                IHS_CondWait(channel->windowCond, channel->windowLock);
+            else if (timeout)
+                IHS_CondWaitTimeout(channel->windowCond, channel->windowLock, timeout);
+        }
+        IHS_MutexUnlock(channel->windowLock);
     }
     IHS_SessionLog(channel->base.session, IHS_LogLevelInfo, "Data", "Stopping %s channel",
                    channelName);
@@ -307,6 +311,10 @@ static void DataThreadInterrupt(IHS_SessionChannelData *channel, bool restarting
     if (channel->base.cls && channel->base.cls->dataInterrupt)
         channel->base.cls->dataInterrupt(&channel->base, restarting);
     if (!channel->worker || channel->interrupted) {
+        /* OnStreamStopped 76716c clears active even when OS Start failed.
+         * Partial initialization may not have created/initialized this FIFO. */
+        if (channel->windowLock)
+            atomic_store(&channel->interrupted, true);
         return;
     }
     IHS_MutexLock(channel->lock);
@@ -316,39 +324,6 @@ static void DataThreadInterrupt(IHS_SessionChannelData *channel, bool restarting
     IHS_MutexLock(channel->windowLock);
     IHS_CondSignal(channel->windowCond);
     IHS_MutexUnlock(channel->windowLock);
-}
-
-void IHS_SessionChannelDataReceiveFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
-    assert(frame->header.type == IHS_SessionPacketTypeUnreliable ||
-           frame->header.type == IHS_SessionPacketTypeUnreliableFEC ||
-           frame->header.type == IHS_SessionPacketTypeReliable);
-    if (frame->body.size < 1)
-        return;
-    EStreamDataMessage type = *IHS_BufferPointer(&frame->body);
-    IHS_BufferOffsetBy(&frame->body, 1);
-    if (type != k_EStreamDataPacket) {
-        return;
-    }
-    IHS_SessionDataFrameHeader header = {0};
-    bool hasHeader = false;
-    if (frame->body.size >= IHS_SESSION_DATA_FRAME_HEADER_SIZE) {
-        hasHeader = true;
-        size_t offset = IHS_SessionChannelDataFrameHeaderParse(&header, &frame->body);
-        IHS_BufferOffsetBy(&frame->body, (int)offset);
-        header.sendTimestamp = frame->header.sendTimestamp;
-        header.receiveTimestamp = frame->header.receiveTimestamp;
-        header.receiveBegin = frame->header.receiveBegin;
-        if (frame->mediaPrepared) {
-            header.timestamp -= frame->mediaOffset;
-            header.sendTimestamp -= frame->mediaOffset;
-            if (header.inputRecvTimestamp) header.inputRecvTimestamp -= frame->mediaOffset;
-            header.timestampsLocal = true;
-            header.receivedRecorded = true;
-        }
-    }
-    const IHS_SessionChannelDataClass *cls = (const IHS_SessionChannelDataClass *)channel->base.cls;
-    if (hasHeader)
-        cls->dataFrame((IHS_SessionChannel *)channel, &header, &frame->body);
 }
 
 static const char *DataChannelName(IHS_SessionChannelType type) {

@@ -89,6 +89,7 @@ static bool DataStart(IHS_SessionChannel *channel);
 
 static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrameHeader *header,
                          IHS_Buffer *body);
+static uint32_t DataThink(IHS_SessionChannel *channel);
 
 static void DataStop(IHS_SessionChannel *channel);
 static void DataInterrupt(IHS_SessionChannel *channel, bool restarting);
@@ -140,6 +141,7 @@ static const IHS_SessionChannelDataClass ChannelClass = {
     .start = DataStart,
     .dataFrame = DataReceived,
     .stop = DataStop,
+    .think = DataThink,
     .startOnCaller = true,
 };
 
@@ -377,7 +379,26 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
         AddPartialFrame(videoCh, header->id, header->timestamp - offset, &vhead, body);
     }
 
-    while (!videoCh->base.interrupted && AssembleFrame(channel)) {
+unlock:
+    if (videoCh->incoming) {
+        if (!videoCh->contributed) {
+            IHS_FrameOutcome outcome = {.result = IHS_VideoFrameResultDroppedNetworkLost,
+                                        .completionUs = IHS_TimerNow() * 1000};
+            IHS_FrameTicketComplete(videoCh->incoming, &outcome);
+        }
+        IHS_FrameTicketRelease(videoCh->incoming);
+        videoCh->incoming = NULL;
+    }
+    IHS_MutexUnlock(videoCh->stateMutex);
+}
+
+static uint32_t DataThink(IHS_SessionChannel *channel) {
+    IHS_SessionChannelVideo *videoCh = (IHS_SessionChannelVideo *)channel;
+    uint32_t timeout = UINT32_MAX;
+    IHS_MutexLock(videoCh->stateMutex);
+    /* Official OnThink consumes through one finishing fragment. After submit
+     * it returns 1ms when more partials remain, otherwise infinite. */
+    if (!videoCh->base.interrupted && AssembleFrame(channel)) {
         /* Official OnThink 7b2648..26f8: only the finishing fragment decides
          * mode. A transition requests an asynchronous reset. Every pending
          * request, including one from a previous backend submit, gates FinalDecode. */
@@ -390,7 +411,7 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
             if (videoCh->assembly) {
                 if (videoCh->frame.deferredCount == IHS_FRAME_TRACKER_CAPACITY) {
                     IHS_SessionDisconnect(channel->session); /* Local ownership bound. */
-                    break;
+                    goto done;
                 }
                 videoCh->frame.deferred[videoCh->frame.deferredCount++] = videoCh->assembly;
                 videoCh->assembly = NULL;
@@ -399,10 +420,10 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
              * following frames. Do not submit or clear the accumulated bytes. */
             videoCh->states.frameStarted = videoCh->states.frameFinished = false;
             videoCh->frame.flags = 0;
-            continue;
+            timeout = 0; /* Original pending-reset branch skips CheckOverflow. */
+            goto done;
         }
-        IHS_StreamVideoSubmitResult result =
-            SubmitFrame(channel, videoCh->assemblyId, &videoCh->frame.buffer, videoCh->frame.flags);
+        SubmitFrame(channel, videoCh->assemblyId, &videoCh->frame.buffer, videoCh->frame.flags);
         if (videoCh->assembly) {
             IHS_FrameTicketRelease(videoCh->assembly);
             videoCh->assembly = NULL;
@@ -412,21 +433,13 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
         videoCh->frame.flags = 0;
         videoCh->states.frameFinished = false;
         videoCh->states.frameStarted = false;
-        if (result == IHS_StreamVideoSubmitError)
-            break;
+        if (videoCh->frame.partial.head)
+            timeout = 1;
     }
     CheckPartialOverflow(channel);
-unlock:
-    if (videoCh->incoming) {
-        if (!videoCh->contributed) {
-            IHS_FrameOutcome outcome = {.result = IHS_VideoFrameResultDroppedNetworkLost,
-                                        .completionUs = IHS_TimerNow() * 1000};
-            IHS_FrameTicketComplete(videoCh->incoming, &outcome);
-        }
-        IHS_FrameTicketRelease(videoCh->incoming);
-        videoCh->incoming = NULL;
-    }
+done:
     IHS_MutexUnlock(videoCh->stateMutex);
+    return timeout;
 }
 
 static void DataStop(IHS_SessionChannel *channel) {

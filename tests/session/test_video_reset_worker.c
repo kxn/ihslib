@@ -26,6 +26,7 @@ static unsigned prepares, starts, stops, infos, lost, waits, submissions;
 static unsigned order, joinedAt, stoppedAt, startedAt, lostAt, waitAt;
 static unsigned unavailableStarts;
 static atomic_uint processed;
+#include "decoder_think_observer.h"
 static IHS_Thread *worker;
 static IHS_VideoEpochInfo active;
 static IHS_FrameTicket *held;
@@ -79,7 +80,7 @@ void __real_IHS_SessionPacketsWindowReleaseFrame(IHS_SessionFrame *);
 void __wrap_IHS_SessionPacketsWindowReleaseFrame(IHS_SessionFrame *f) {
     __real_IHS_SessionPacketsWindowReleaseFrame(f);
     assert(!pthread_equal(owner, pthread_self()));
-    atomic_fetch_add(&processed, 1);
+    atomic_fetch_add(&decoderInputsConsumed, 1);
 }
 bool __real_IHS_SessionSendControlMessage(IHS_Session *, EStreamControlMessage,
                                           const ProtobufCMessage *);
@@ -316,7 +317,9 @@ int main(void) {
     assert(!pthread_create(&releaser, NULL, releaseDuringJoin, NULL));
     cycle(s);
     assert(!pthread_join(releaser, NULL));
-    waitProcessed(5);
+    /* Stop interrupted the decoder before its next OnThink, but joined the
+     * current input release. This is consumption, not a submitted image. */
+    assert(atomic_load(&decoderInputsConsumed) == 5);
     assert(submissions == 1 && stops == 2 && starts == 3 && prepares == 1 && lost == 2);
     assert(active.video_epoch == 3 && video->receive == rx &&
            slots == IHS_SessionPacketsWindowSize(rx->window));

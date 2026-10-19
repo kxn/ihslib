@@ -81,7 +81,11 @@ static void deliver(IHS_SessionFrame *f) {
         IHS_ReadUInt16LE(IHS_BufferPointerAt(&f->body, 1), &id);
         admitted[admittedCount++] = id;
     }
-    if (videoMode) IHS_SessionChannelDataReceiveFrame(media, f);
+    if (videoMode) {
+        IHS_SessionChannelDataReceiveFrame(media, f);
+        const IHS_SessionChannelDataClass *cls = (const void *)media->base.cls;
+        while (cls->think(&media->base) == 1) {}
+    }
 }
 static void drain_media(void) {
     if (!media) return;

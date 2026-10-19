@@ -8,6 +8,7 @@
 #include "session/channels/video/ch_data_video.h"
 #include "session/session_pri.h"
 #include "test_session.h"
+#include "decoder_direct_consumer.h"
 #include <assert.h>
 #include <pthread.h>
 #include <string.h>
@@ -82,6 +83,7 @@ static void fragment(IHS_SessionChannel *ch, uint16_t id, uint16_t seq, uint8_t 
     IHS_BufferAppendUInt8(&b, payload);
     IHS_SessionDataFrameHeader h = {.id = id};
     ((const IHS_SessionChannelDataClass *)ch->cls)->dataFrame(ch, &h, &b);
+    while (((const IHS_SessionChannelDataClass *)ch->cls)->think(ch) == 1) {}
     IHS_BufferClear(&b, true);
 }
 static IHS_SessionChannel *create(IHS_Session *session) {

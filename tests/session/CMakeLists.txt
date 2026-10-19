@@ -91,39 +91,49 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_include_directories(ihs-video-subframe-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-video-subframe-oracle PRIVATE ihs-test-session ihslib)
     target_compile_options(ihs-video-subframe-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
-    target_link_options(ihs-video-subframe-oracle PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
+    target_link_options(ihs-video-subframe-oracle PRIVATE -Wl,--wrap=IHS_ThreadCreate -Wl,--wrap=IHS_SessionPacketTimestamp
         -Wl,--wrap=IHS_SessionSendControlMessage -Wl,--wrap=IHS_SessionChannelDataLost)
     add_executable(ihs-video-nal-oracle video_nal_oracle.c)
     target_include_directories(ihs-video-nal-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-video-nal-oracle PRIVATE ihs-test-session ihslib)
     target_compile_options(ihs-video-nal-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
-    target_link_options(ihs-video-nal-oracle PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
+    target_link_options(ihs-video-nal-oracle PRIVATE -Wl,--wrap=IHS_ThreadCreate -Wl,--wrap=IHS_SessionPacketTimestamp
         -Wl,--wrap=IHS_SessionSendControlMessage -Wl,--wrap=IHS_SessionChannelDataLost)
     add_executable(ihs-video-crypto-oracle video_crypto_oracle.c)
     target_include_directories(ihs-video-crypto-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-video-crypto-oracle PRIVATE ihs-test-session ihslib)
     target_compile_options(ihs-video-crypto-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
-    target_link_options(ihs-video-crypto-oracle PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
+    target_link_options(ihs-video-crypto-oracle PRIVATE -Wl,--wrap=IHS_ThreadCreate -Wl,--wrap=IHS_SessionPacketTimestamp
         -Wl,--wrap=IHS_SessionSendControlMessage -Wl,--wrap=IHS_SessionChannelDataLost)
     add_executable(ihs-video-content-mode-oracle video_content_mode_oracle.c)
     target_include_directories(ihs-video-content-mode-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-video-content-mode-oracle PRIVATE ihs-test-session ihslib)
     target_compile_options(ihs-video-content-mode-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
-    target_link_options(ihs-video-content-mode-oracle PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
+    target_link_options(ihs-video-content-mode-oracle PRIVATE -Wl,--wrap=IHS_ThreadCreate -Wl,--wrap=IHS_SessionPacketTimestamp
         -Wl,--wrap=IHS_SessionSendControlMessage -Wl,--wrap=IHS_SessionChannelDataLost)
     add_test(NAME video_content_mode_capacity COMMAND ihs-video-content-mode-oracle --capacity)
     set_tests_properties(video_content_mode_capacity PROPERTIES TIMEOUT 10)
+    add_executable(ihs-video-queue-oracle video_queue_oracle.c)
+    target_include_directories(ihs-video-queue-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-video-queue-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-video-queue-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-video-queue-oracle PRIVATE -Wl,--wrap=IHS_SessionChannelDataThink
+        -Wl,--wrap=IHS_SessionChannelDataReceiveFrame
+        -Wl,--wrap=IHS_ThreadCreate
+        -Wl,--wrap=IHS_CondWait -Wl,--wrap=IHS_CondWaitTimeout
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_SessionSendControlMessage
+        -Wl,--wrap=IHS_SessionChannelDataLost)
     add_executable(ihs-video-keyframe-oracle video_keyframe_oracle.c)
     target_include_directories(ihs-video-keyframe-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-video-keyframe-oracle PRIVATE ihs-test-session ihslib)
     target_compile_options(ihs-video-keyframe-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
-    target_link_options(ihs-video-keyframe-oracle PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
+    target_link_options(ihs-video-keyframe-oracle PRIVATE -Wl,--wrap=IHS_ThreadCreate -Wl,--wrap=IHS_SessionPacketTimestamp
         -Wl,--wrap=IHS_SessionSendControlMessage -Wl,--wrap=IHS_SessionChannelDataLost)
     add_executable(ihs-video-stop-phases-oracle video_stop_phases_oracle.c)
     target_include_directories(ihs-video-stop-phases-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-video-stop-phases-oracle PRIVATE ihs-test-session ihslib)
     target_compile_options(ihs-video-stop-phases-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
-    target_link_options(ihs-video-stop-phases-oracle PRIVATE -Wl,--wrap=IHS_SessionPacketTimestamp
+    target_link_options(ihs-video-stop-phases-oracle PRIVATE -Wl,--wrap=IHS_ThreadCreate -Wl,--wrap=IHS_SessionPacketTimestamp
         -Wl,--wrap=IHS_SessionSendControlMessage -Wl,--wrap=IHS_SessionChannelDataLost)
     add_executable(ihs-video-start-oracle video_start_oracle.c)
     target_include_directories(ihs-video-start-oracle PRIVATE ${TEST_INCLUDES})
@@ -273,7 +283,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_tests_properties(initial_send initial_send_worker PROPERTIES TIMEOUT 20)
     ihs_add_test(video_reset_worker test_video_reset_worker.c)
     target_link_libraries(ihstest_video_reset_worker PRIVATE ihs-test-session)
-    target_link_options(ihstest_video_reset_worker PRIVATE -Wl,--wrap=IHS_ThreadCreate
+    target_link_options(ihstest_video_reset_worker PRIVATE -Wl,--wrap=IHS_SessionChannelDataThink
+        -Wl,--wrap=IHS_ThreadCreate
         -Wl,--wrap=IHS_ThreadJoin -Wl,--wrap=IHS_SessionPacketsWindowReleaseFrame
         -Wl,--wrap=IHS_SessionChannelControlOnMessageReceived
         -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_SessionSendControlMessage
@@ -281,7 +292,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_tests_properties(video_reset_worker PROPERTIES TIMEOUT 20)
     ihs_add_test(video_tracked test_video_tracked.c)
     target_link_libraries(ihstest_video_tracked PRIVATE ihs-test-session)
-    target_link_options(ihstest_video_tracked PRIVATE -Wl,--wrap=IHS_SessionSendControlMessage)
+    target_link_options(ihstest_video_tracked PRIVATE -Wl,--wrap=IHS_ThreadCreate -Wl,--wrap=IHS_SessionSendControlMessage)
     set_tests_properties(video_tracked PROPERTIES TIMEOUT 20)
     ihs_add_test(video_start_lifetime test_video_start_lifetime.c)
     target_link_libraries(ihstest_video_start_lifetime PRIVATE ihs-test-session)

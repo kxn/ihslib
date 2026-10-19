@@ -71,6 +71,10 @@ typedef struct IHS_SessionChannelDataClass {
 
     void (*stop)(struct IHS_SessionChannel *channel);
 
+    /* Decoder OnThink runs after the input FIFO is empty. Return milliseconds
+     * until the next think, or UINT32_MAX to wait for input. */
+    uint32_t (*think)(struct IHS_SessionChannel *channel);
+
     bool startOnCaller; /* Start on lifecycle actor; stop only after worker join/purge. */
 } IHS_SessionChannelDataClass;
 
@@ -115,3 +119,6 @@ void IHS_SessionChannelDataRestartWorker(IHS_SessionChannelData *);
 
 /* Complete-frame consumer used by the data worker, outside windowLock. */
 void IHS_SessionChannelDataReceiveFrame(IHS_SessionChannelData *, IHS_SessionFrame *);
+
+/* Decoder step after all currently queued complete inputs have been consumed. */
+uint32_t IHS_SessionChannelDataThink(IHS_SessionChannel *);
