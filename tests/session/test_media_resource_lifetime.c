@@ -13,11 +13,24 @@
 #include <string.h>
 #include <unistd.h>
 static bool fail_realloc, fail_node, expect_close;
+static unsigned fail_calloc_at;
 static size_t node_bytes;
 static void *freed_pointer;
 static unsigned freed_count, close_count, feedback_count;
+static unsigned lost_calls;
 static IHS_Session *watched_session;
 static IHS_SessionChannelData *watched_channel;
+void __real_IHS_SessionChannelDataLost(IHS_SessionChannel *);
+void __wrap_IHS_SessionChannelDataLost(IHS_SessionChannel *ch) {
+    ++lost_calls;
+    __real_IHS_SessionChannelDataLost(ch);
+}
+void *__real_calloc(size_t, size_t);
+void *__wrap_calloc(size_t n, size_t width) {
+    if (fail_calloc_at && !--fail_calloc_at)
+        return NULL;
+    return __real_calloc(n, width);
+}
 void *__real_realloc(void *, size_t);
 void *__wrap_realloc(void *p, size_t n) {
     if (fail_realloc) {
@@ -238,15 +251,68 @@ static void allocation_close(bool reliable) {
     fail_realloc = true;
     unsigned before = close_count;
     feedback_count = 0;
+    lost_calls = 0;
     if (reliable)
         IHS_SessionReliableUpdateChannelAt(s, 9, 1000000);
     else
         IHS_SessionUnreliableUpdateAt(s, 9, 1000000);
-    assert(!fail_realloc && !expect_close && close_count == before + 1 && !feedback_count);
+    assert(!fail_realloc && !expect_close && close_count == before + 1 && !feedback_count &&
+           !lost_calls);
     assert(atomic_load(&s->transport.closeRequested) && s->base.interrupted);
     IHS_SessionDestroy(s);
     watched_session = NULL;
     watched_channel = NULL;
+}
+typedef struct fec_failure_observation {
+    bool failed, closed;
+    unsigned closes, feedback, queued;
+} fec_failure_observation;
+static fec_failure_observation fec_allocation_failure(unsigned stage) {
+    IHS_SessionChannelData *ch;
+    IHS_Session *s = setup(&ch);
+    /* Original k3/m2/S32 codewords: systematic index2, parity0, parity1.
+     * Thus the last call really needs RS for missing indices0/1. */
+    static const uint8_t shards[3][32] = {
+        {0x4b, 0x70, 0x95, 0xba, 0xdf, 0x04, 0x29, 0x4e, 0x73, 0x98, 0xbd, 0xe2, 0x07, 0x2c, 0x51,
+         0x76},
+        {0xc2, 0xbf, 0x95, 0x60, 0x2a, 0xb4, 0x3b, 0x0b, 0xf8, 0xa9, 0xd3,
+         0xd9, 0xf3, 0xf2, 0xba, 0x31, 0x01, 0xab, 0x14, 0x43, 0x77, 0x66,
+         0x2e, 0x8e, 0x25, 0x6c, 0x38, 0xfc, 0xe8, 0xa1, 0x4a, 0xaa},
+        {0x3e, 0x31, 0x1d, 0x50, 0x8e, 0x23, 0xc9, 0xb0, 0x4b, 0x35, 0x79,
+         0x75, 0x59, 0x47, 0x6e, 0xc5, 0x31, 0x9b, 0xcf, 0x73, 0x67, 0x56,
+         0xf5, 0xbe, 0x15, 0xb7, 0x08, 0xec, 0xd8, 0x7a, 0x5a, 0x9a},
+    };
+    watched_session = s;
+    watched_channel = ch;
+    expect_close = true;
+    feedback_count = 0;
+    lost_calls = 0;
+    unsigned before = close_count;
+    for (unsigned i = 0; i < (stage < 2 ? 1u : 3u); ++i) {
+        IHS_SessionPacket p = {.header = {.channelId = 9,
+                                          .type = IHS_SessionPacketTypeUnreliableFEC,
+                                          .fragmentId = (int16_t)(i + 2)},
+                               .body = IHS_BUFFER_INIT(40, 40)};
+        IHS_BufferAppendUInt32LE(&p.body, 80);
+        IHS_BufferAppendUInt16LE(&p.body, 32);
+        IHS_BufferAppendUInt16LE(&p.body, 2);
+        IHS_BufferAppendMem(&p.body, shards[i], 32);
+        if (stage < 2 || i == 2)
+            fail_calloc_at = stage % 2 + 1;
+        IHS_SessionUnreliableReceived(s, &p);
+        IHS_SessionPacketClear(&p, true);
+    }
+    fec_failure_observation out = {.failed = !fail_calloc_at,
+                                   .closed = atomic_load(&s->transport.closeRequested) &&
+                                             s->base.interrupted,
+                                   .closes = close_count - before,
+                                   .feedback = feedback_count + lost_calls,
+                                   .queued = ch->fecQueuedCount};
+    expect_close = false;
+    watched_session = NULL;
+    watched_channel = NULL;
+    IHS_SessionDestroy(s);
+    return out;
 }
 int main(void) {
     alarm(10);
@@ -255,6 +321,10 @@ int main(void) {
     padded_fec();
     allocation_close(false);
     allocation_close(true);
+    for (unsigned stage = 0; stage < 4; ++stage) {
+        fec_failure_observation out = fec_allocation_failure(stage);
+        assert(out.failed && out.closed && out.closes == 1 && !out.feedback && !out.queued);
+    }
     IHS_Quit();
     alarm(0);
     return 0;

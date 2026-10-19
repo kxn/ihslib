@@ -142,10 +142,11 @@ bool IHS_SessionChannelDataInit(IHS_SessionChannel *channel, uint16_t windowCapa
         dataCh->receive->maxReceiveDelay = 6553; /* StartAudio/VideoData setter */
     dataCh->fecQueueCapacity = windowCapacity;
     dataCh->fecQueueLimit = (size_t)windowCapacity * 2048;
-    /* Keep a single supported payload admissible even for small audio/test
-     * windows. This is the local FIFO memory bound, not a wire limit. */
-    if (dataCh->fecQueueLimit < IHS_FEC_MAX_PAYLOAD + sizeof(IHS_FECFrameNode))
-        dataCh->fecQueueLimit = IHS_FEC_MAX_PAYLOAD + sizeof(IHS_FECFrameNode);
+    /* Retain the existing 2MiB floor for small audio/test windows. This FIFO
+     * budget is independent of FEC data storage, not a wire/HW limit. */
+    size_t minimumQueueBytes = 2u * 1024u * 1024u + sizeof(IHS_FECFrameNode);
+    if (dataCh->fecQueueLimit < minimumQueueBytes)
+        dataCh->fecQueueLimit = minimumQueueBytes;
     atomic_init(&dataCh->interrupted, false);
     if (!dataCh->lock || !dataCh->windowLock || !dataCh->windowCond || !dataCh->receive) {
         channel->initFailed = true;

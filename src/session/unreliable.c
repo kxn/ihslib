@@ -76,7 +76,16 @@ void IHS_SessionUnreliableReceived(IHS_Session *s, IHS_SessionPacket *packet) {
     if (type == IHS_SessionPacketTypeUnreliableFEC) {
         IHS_SessionFrame frame = {0};
         bool ready = IHS_FECReceiverAdd(rx->fec, packet, &frame);
+        IHS_FECReceiveError error = IHS_FECReceiverLastError(rx->fec);
         IHS_MutexUnlock(rx->lock);
+        if (error != IHS_FECReceiveOK) {
+            IHS_SessionFrameClear(&frame, true);
+            /* Local resource protection, as for ordinary/reliable assembly.
+             * Not a wire gap or an inferred official allocator-failure policy. */
+            IHS_SessionLog(s, IHS_LogLevelError, "Data", "FEC resource failure: %d", error);
+            IHS_SessionDisconnect(s);
+            return;
+        }
         if (ready)
             IHS_SessionDeliverReliableFrame(s, &frame);
         IHS_SessionFrameClear(&frame, true);

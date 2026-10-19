@@ -13,6 +13,7 @@ struct IHS_FECReceiver {
     uint16_t shardSize, parityCount, group, lastDelivered;
     uint32_t received;
     IHS_SessionPacketHeader firstHeader;
+    IHS_FECReceiveError error;
 };
 
 IHS_FECReceiver *IHS_FECReceiverCreate(void) {
@@ -51,6 +52,10 @@ void IHS_FECReceiverDestroy(IHS_FECReceiver *r) {
     free(r);
 }
 
+IHS_FECReceiveError IHS_FECReceiverLastError(const IHS_FECReceiver *r) {
+    return r->error;
+}
+
 static void MultiplyAdd(const IHS_FECReceiver *r, uint8_t *dst, const uint8_t *src,
                         uint8_t coefficient, size_t length) {
     const uint8_t *table = r->multiply[coefficient];
@@ -86,6 +91,7 @@ static bool Reconstruct(IHS_FECReceiver *r) {
     if (!matrix || !rhs) {
         free(matrix);
         free(rhs);
+        r->error = IHS_FECReceiveNoMemory;
         return false;
     }
     for (unsigned row = 0; row < count; ++row) {
@@ -144,7 +150,10 @@ static bool Reconstruct(IHS_FECReceiver *r) {
 
 bool IHS_FECReceiverAdd(IHS_FECReceiver *r, const IHS_SessionPacket *packet,
                         IHS_SessionFrame *frame) {
-    if (!r || packet->header.type != IHS_SessionPacketTypeUnreliableFEC || packet->body.size < 9 ||
+    if (!r)
+        return false;
+    r->error = IHS_FECReceiveOK;
+    if (packet->header.type != IHS_SessionPacketTypeUnreliableFEC || packet->body.size < 9 ||
         !packet->body.data)
         return false;
     uint16_t group = packet->header.packetId;
@@ -157,7 +166,7 @@ bool IHS_FECReceiverAdd(IHS_FECReceiver *r, const IHS_SessionPacket *packet,
     IHS_ReadUInt32LE(bytes, &length);
     IHS_ReadUInt16LE(bytes + 4, &shardSize);
     IHS_ReadUInt16LE(bytes + 6, &parity);
-    if (!length || length > IHS_FEC_MAX_PAYLOAD || !shardSize ||
+    if (!length || length > IHS_FEC_MAX_DATA_BYTES || !shardSize ||
         packet->body.size != (size_t)shardSize + 8)
         return false;
     uint32_t data = (length + shardSize - 1u) / shardSize;
@@ -165,7 +174,8 @@ bool IHS_FECReceiverAdd(IHS_FECReceiver *r, const IHS_SessionPacket *packet,
     uint16_t index = (uint16_t)packet->header.fragmentId;
     /* Coding has at most 255 GF elements. No-parity groups may be larger;
      * the 16-bit shard index and payload bound still limit their allocation. */
-    if (total > (uint32_t)UINT16_MAX + 1u || index >= total || (parity && total > 255))
+    if ((size_t)data * shardSize > IHS_FEC_MAX_DATA_BYTES || total > (uint32_t)UINT16_MAX + 1u ||
+        index >= total || (parity && total > 255))
         return false;
     if (r->shards && r->group == group &&
         (r->length != length || r->shardSize != shardSize || r->parityCount != parity))
@@ -176,6 +186,7 @@ bool IHS_FECReceiverAdd(IHS_FECReceiver *r, const IHS_SessionPacket *packet,
         r->present = calloc(total, 1);
         if (!r->shards || !r->present) {
             Reset(r);
+            r->error = IHS_FECReceiveNoMemory;
             return false;
         }
         r->group = group;

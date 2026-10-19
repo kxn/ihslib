@@ -11,11 +11,25 @@ ihs_add_test(video_control test_video_control.c)
 target_link_libraries(ihstest_video_control PRIVATE ihs-test-session)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ihs-fec-resource-oracle fec_resource_oracle.c)
+    target_include_directories(ihs-fec-resource-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-fec-resource-oracle PRIVATE ihslib)
+    target_compile_options(ihs-fec-resource-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-fec-resource-oracle PRIVATE -Wl,--wrap=calloc -Wl,--wrap=free)
+    add_test(NAME fec_resource_failures COMMAND ihs-fec-resource-oracle --self-test)
+    set_tests_properties(fec_resource_failures PROPERTIES TIMEOUT 10)
+    ihs_add_test(fec_resource_worker test_fec_resource_worker.c)
+    target_link_libraries(ihstest_fec_resource_worker PRIVATE ihs-test-session)
+    target_link_options(ihstest_fec_resource_worker PRIVATE -Wl,--wrap=calloc
+        -Wl,--wrap=IHS_ThreadJoin
+        -Wl,--wrap=IHS_FECReceiverAdd -Wl,--wrap=IHS_SessionChannelDataLost
+        -Wl,--wrap=IHS_BaseSend -Wl,--wrap=IHS_UDPSocketWaitReadable -Wl,--wrap=IHS_UDPSocketReceive)
+    set_tests_properties(fec_resource_worker PROPERTIES TIMEOUT 20)
     ihs_add_test(media_resource_lifetime test_media_resource_lifetime.c)
     target_link_libraries(ihstest_media_resource_lifetime PRIVATE ihs-test-session)
-    target_link_options(ihstest_media_resource_lifetime PRIVATE -Wl,--wrap=realloc -Wl,--wrap=malloc
+    target_link_options(ihstest_media_resource_lifetime PRIVATE -Wl,--wrap=realloc -Wl,--wrap=malloc -Wl,--wrap=calloc
         -Wl,--wrap=free -Wl,--wrap=IHS_ThreadCreate -Wl,--wrap=IHS_BaseSend
-        -Wl,--wrap=IHS_SessionDisconnect)
+        -Wl,--wrap=IHS_SessionDisconnect -Wl,--wrap=IHS_SessionChannelDataLost)
     set_tests_properties(media_resource_lifetime PROPERTIES TIMEOUT 15)
     ihs_add_test(window_resource test_window_resource.c)
     target_link_options(ihstest_window_resource PRIVATE -Wl,--wrap=realloc)
