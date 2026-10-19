@@ -56,14 +56,20 @@ static bool PollFEC(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
     channel->fecQueuedCount--;
     IHS_BufferClear(&frame->body, true);
     *frame = node->frame;
-    /* The worker also reuses this buffer for ordinary assembled messages. */
-    if (frame->body.maxCapacity < IHS_FEC_MAX_PAYLOAD)
-        frame->body.maxCapacity = IHS_FEC_MAX_PAYLOAD;
     free(node);
     return true;
 }
 
 static bool QueueFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
+    IHS_Buffer *body = &frame->body;
+    /* Admission is about owned bytes, not a protocol/HW maximum. Preserve
+     * offset and suffix when shrinking geometric or padded FEC storage. */
+    if (body->offset > body->capacity || body->suffix > body->capacity - body->offset ||
+        body->size > body->capacity - body->offset - body->suffix ||
+        (body->capacity && !body->data)) {
+        IHS_BufferClear(body, true);
+        return false;
+    }
     /* Official client OnStreamPacket 7ad00c..7ad01c: transport windows,
      * reconstruction and feedback still run while paused; gate complete data
      * frames before handing them to the media consumer. Frames already owned
@@ -75,14 +81,28 @@ static bool QueueFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame)
         IHS_BufferClear(&frame->body, true);
         return false;
     }
-    size_t size = frame->body.capacity + sizeof(IHS_FECFrameNode);
-    if (size > channel->fecQueueLimit) {
+    size_t nodeSize = sizeof(IHS_FECFrameNode);
+    size_t used = body->offset + body->size + body->suffix;
+    if (channel->fecQueueLimit < nodeSize || used > channel->fecQueueLimit - nodeSize) {
         IHS_BufferClear(&frame->body, true);
         return false;
     }
-    while (channel->fecHead &&
-           (channel->fecQueuedBytes + size > channel->fecQueueLimit ||
-            channel->fecQueuedCount == channel->fecQueueCapacity)) {
+    if (body->capacity > channel->fecQueueLimit - nodeSize) {
+        if (!used) {
+            IHS_BufferClear(body, true);
+        } else {
+            void *compact = realloc(body->data, used);
+            if (!compact) {
+                IHS_BufferClear(body, true);
+                return false;
+            }
+            body->data = compact;
+            body->capacity = used;
+        }
+    }
+    size_t size = body->capacity + nodeSize;
+    while (channel->fecHead && (channel->fecQueuedBytes > channel->fecQueueLimit - size ||
+                                channel->fecQueuedCount == channel->fecQueueCapacity)) {
         IHS_SessionFrame old = {0};
         PollFEC(channel, &old);
         IHS_BufferClear(&old.body, true);
@@ -127,8 +147,7 @@ bool IHS_SessionChannelDataInit(IHS_SessionChannel *channel, uint16_t windowCapa
     if (dataCh->fecQueueLimit < IHS_FEC_MAX_PAYLOAD + sizeof(IHS_FECFrameNode))
         dataCh->fecQueueLimit = IHS_FEC_MAX_PAYLOAD + sizeof(IHS_FECFrameNode);
     atomic_init(&dataCh->interrupted, false);
-    if (!dataCh->lock || !dataCh->windowLock || !dataCh->windowCond ||
-        !dataCh->receive) {
+    if (!dataCh->lock || !dataCh->windowLock || !dataCh->windowCond || !dataCh->receive) {
         channel->initFailed = true;
         return false;
     }
@@ -159,7 +178,8 @@ bool IHS_SessionChannelDataInit(IHS_SessionChannel *channel, uint16_t windowCapa
 
 void IHS_SessionChannelDataDeinit(IHS_SessionChannel *channel) {
     IHS_SessionChannelData *dataCh = (IHS_SessionChannelData *)channel;
-    if (channel->cls && channel->cls->dataInterrupt) channel->cls->dataInterrupt(channel, false);
+    if (channel->cls && channel->cls->dataInterrupt)
+        channel->cls->dataInterrupt(channel, false);
 
     assert(!dataCh->worker || dataCh->interrupted);
 
@@ -206,11 +226,13 @@ void IHS_SessionChannelDataStopped(IHS_SessionChannel *channel) {
 void IHS_SessionChannelDataJoinAndPurge(IHS_SessionChannelData *data, bool restarting) {
     DataThreadInterrupt(data, restarting);
     atomic_store(&data->interrupted, true);
-    if (data->worker) IHS_ThreadJoin(data->worker);
+    if (data->worker)
+        IHS_ThreadJoin(data->worker);
     data->worker = NULL;
     IHS_MutexLock(data->windowLock);
     IHS_SessionFrame frame = {0};
-    while (PollFEC(data, &frame)) IHS_BufferClear(&frame.body, true);
+    while (PollFEC(data, &frame))
+        IHS_BufferClear(&frame.body, true);
     IHS_MutexUnlock(data->windowLock);
 }
 
@@ -240,12 +262,13 @@ size_t IHS_SessionChannelDataFrameHeaderParse(IHS_SessionDataFrameHeader *header
 }
 
 void IHS_SessionChannelDataReceiveReliableFrame(IHS_SessionChannel *channel,
-                                                 IHS_SessionFrame *frame) {
+                                                IHS_SessionFrame *frame) {
     IHS_SessionChannelData *data = (void *)channel;
     IHS_MutexLock(data->windowLock);
     if (!data->interrupted && !data->discardFrames) {
-        IHS_SessionFrame owned = {.header = frame->header, .mediaOffset = frame->mediaOffset,
-                                   .mediaPrepared = frame->mediaPrepared};
+        IHS_SessionFrame owned = {.header = frame->header,
+                                  .mediaOffset = frame->mediaOffset,
+                                  .mediaPrepared = frame->mediaPrepared};
         IHS_BufferTransferOwnership(&frame->body, &owned.body);
         if (QueueFrame(data, &owned)) {
             data->decoderWakePending = true;
@@ -256,7 +279,7 @@ void IHS_SessionChannelDataReceiveReliableFrame(IHS_SessionChannel *channel,
 }
 
 bool IHS_SessionChannelDataPollLocked(IHS_SessionChannelData *channel, IHS_SessionFrame *frame,
-                                       uint16_t *missing) {
+                                      uint16_t *missing) {
     *missing = 0;
     return PollFEC(channel, frame);
 }
@@ -271,11 +294,13 @@ static void WaitForDecoderEvent(IHS_SessionChannelData *channel, uint32_t timeou
             woke = IHS_CondWait(channel->windowCond, channel->windowLock);
         } else {
             uint64_t elapsed = IHS_TimerNow() - start;
-            if (elapsed >= timeout) break;
+            if (elapsed >= timeout)
+                break;
             woke = IHS_CondWaitTimeout(channel->windowCond, channel->windowLock,
                                        timeout - (uint32_t)elapsed);
         }
-        if (!woke) break; /* Timeout/error, like the original platform boundary. */
+        if (!woke)
+            break; /* Timeout/error, like the original platform boundary. */
     }
     channel->decoderWakePending = false;
 }

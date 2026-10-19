@@ -39,7 +39,10 @@ IHS_UnreliableChannel *IHS_SessionUnreliableGet(IHS_Session *s, uint8_t id, uint
 bool IHS_SessionUnreliableSetDelay(IHS_Session *s, uint8_t id, uint32_t delay) {
     IHS_OutgoingRegister(s, id);
     IHS_UnreliableChannel *rx = IHS_SessionUnreliableGet(s, id, 2048);
-    if (!rx) { IHS_SessionDisconnect(s); return false; }
+    if (!rx) {
+        IHS_SessionDisconnect(s);
+        return false;
+    }
     rx->maxReceiveDelay = delay;
     return true;
 }
@@ -134,17 +137,31 @@ void IHS_SessionUnreliableUpdateAt(IHS_Session *s, uint8_t id, uint32_t tick) {
     if (!rx)
         return;
     for (;;) {
-        IHS_SessionFrame frame = {.body = IHS_BUFFER_INIT(1024, IHS_FEC_MAX_PAYLOAD)};
+        /* Ordinary assembly is not a type11 payload. The completed frame's
+         * retained allocation is bounded by the consumer FIFO, like reliable
+         * media. Do not impose the unrelated FEC length assertion here. */
+        IHS_SessionFrame frame = {.body = IHS_BUFFER_INIT(1024, 0)};
         uint16_t missing = 0;
         IHS_MutexLock(rx->lock);
         bool ready = IHS_SessionPacketsWindowPoll(rx->window, &frame);
-        if (!ready) {
+        IHS_WindowPollError error = IHS_SessionPacketsWindowLastError(rx->window);
+        if (!ready && error == IHS_WindowPollOK) {
             IHS_SessionPacketsWindowDiscardEx(
                 rx->window, IHS_StreamClockReceiveDelayTicks(&s->clock, rx->maxReceiveDelay),
                 &missing);
             ready = IHS_SessionPacketsWindowPoll(rx->window, &frame);
+            error = IHS_SessionPacketsWindowLastError(rx->window);
         }
         IHS_MutexUnlock(rx->lock);
+        if (error != IHS_WindowPollOK) {
+            IHS_BufferClear(&frame.body, true);
+            /* Local resource failure, not a packet gap: do not fabricate a
+             * NACK/DataLost or retry while retaining an unassemblable head. */
+            IHS_SessionLog(s, IHS_LogLevelError, "Data", "Frame assembly resource failure: %d",
+                           error);
+            IHS_SessionDisconnect(s);
+            return;
+        }
         if (ready)
             IHS_SessionDeliverReliableFrame(s, &frame);
         IHS_BufferClear(&frame.body, true);

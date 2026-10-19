@@ -13,22 +13,32 @@ IHS_ReliableChannel *IHS_SessionReliableGet(IHS_Session *s, uint8_t channel) {
     IHS_OutgoingRegister(s, channel);
     return &s->reliable[channel];
 }
-static uint32_t ReliableDrainFrames(IHS_Session *s, IHS_ReliableChannel *state) {
-    uint32_t retries = 0;
+static bool ReliableDrainFrames(IHS_Session *s, IHS_ReliableChannel *state, uint32_t *retries) {
+    *retries = 0;
     IHS_SessionFrame frame = {.body = IHS_BUFFER_INIT(1024, 0)};
     for (;;) {
         IHS_MutexLock(s->reliableLock);
         bool ready = state->framePacketWindow &&
                      IHS_SessionPacketsWindowPoll(state->framePacketWindow, &frame);
+        IHS_WindowPollError error =
+            state->framePacketWindow ? IHS_SessionPacketsWindowLastError(state->framePacketWindow)
+                                     : IHS_WindowPollOK;
         IHS_MutexUnlock(s->reliableLock);
+        if (error != IHS_WindowPollOK) {
+            IHS_BufferClear(&frame.body, true);
+            IHS_SessionLog(s, IHS_LogLevelError, "Data", "Frame assembly resource failure: %d",
+                           error);
+            IHS_SessionDisconnect(s);
+            return false;
+        }
         if (!ready)
             break;
-        retries += frame.receivedRetries;
+        *retries += frame.receivedRetries;
         IHS_SessionDeliverReliableFrame(s, &frame);
         IHS_SessionPacketsWindowReleaseFrame(&frame);
     }
     IHS_BufferClear(&frame.body, true);
-    return retries;
+    return true;
 }
 /* Original Channel::UpdateReliableState; see protocol reference §45. Run on
  * the receive worker so frame/decrypt callbacks keep their existing thread. */
@@ -50,7 +60,9 @@ void IHS_SessionReliableUpdateChannelAt(IHS_Session *session, uint8_t channelId,
     IHS_MutexUnlock(session->reliableLock);
     /* Application delegates retain their existing lock domain. Only feedback
      * state + Socket attempts need Base -> reliableLock serialization. */
-    uint32_t retries = ReliableDrainFrames(session, state);
+    uint32_t retries;
+    if (!ReliableDrainFrames(session, state, &retries))
+        return;
     IHS_SessionRecordNetworkLost(session, now, retries);
     IHS_BaseLock(&session->base);
     IHS_MutexLock(session->reliableLock);
@@ -130,7 +142,7 @@ void IHS_SessionReliableReceived(IHS_Session *session, IHS_SessionPacket *packet
         IHS_MutexUnlock(session->reliableLock);
         if (inserted && packet->header.retransmitCount > 1)
             IHS_SessionRecordNetworkLost(session, packet->header.receiveTimestamp,
-                                          packet->header.retransmitCount - 1u);
+                                         packet->header.retransmitCount - 1u);
         if (!added) {
             /* Log and disconnect once: the packets keep coming, and firing a
              * disconnect per packet floods the link and re-enters teardown. */

@@ -39,6 +39,7 @@ struct IHS_SessionPacketsWindow {
     WindowItem *data;
     uint16_t capacity;
     bool reliable;
+    IHS_WindowPollError pollError;
     /*
      * [+][+][+][-]
      *       ^ head.pos = 2
@@ -124,8 +125,9 @@ bool IHS_SessionPacketsWindowAdd(IHS_SessionPacketsWindow *window, IHS_SessionPa
 }
 
 bool IHS_SessionPacketsWindowAddEx(IHS_SessionPacketsWindow *window, IHS_SessionPacket *packet,
-                                    bool *inserted) {
-    if (inserted) *inserted = false;
+                                   bool *inserted) {
+    if (inserted)
+        *inserted = false;
     /* Calculate distance of 2 items */
     int tailOffset =
         window->tail.pos < 0 ? 1 : (int16_t)(packet->header.packetId - window->tail.id);
@@ -172,7 +174,8 @@ bool IHS_SessionPacketsWindowAddEx(IHS_SessionPacketsWindow *window, IHS_Session
         return true;
     }
     FrameItemUsePacket(tailPkt, packet);
-    if (inserted) *inserted = true;
+    if (inserted)
+        *inserted = true;
     /* BInsertPacket 0x7f73d0..7430: max at this slot, then propagate a
      * smaller timestamp backwards even through occupied slots. Never modify
      * the packet's actual transport timestamp, which is used by frame stats. */
@@ -198,7 +201,44 @@ bool IHS_SessionPacketsWindowAddEx(IHS_SessionPacketsWindow *window, IHS_Session
     return true;
 }
 
+/* Keep the existing geometric allocation for supported inputs, but never
+ * turn resource failure into an assertion or overwrite the owned pointer. */
+static IHS_WindowPollError ReserveFrame(IHS_Buffer *body, size_t length) {
+    if (body->offset > SIZE_MAX - body->suffix || length > SIZE_MAX - body->offset - body->suffix)
+        return IHS_WindowPollLimit;
+    size_t wanted = body->offset + length + body->suffix;
+    if (body->maxCapacity && wanted > body->maxCapacity)
+        return IHS_WindowPollLimit;
+    if (body->capacity && !body->data)
+        return IHS_WindowPollLimit;
+    if (body->capacity && wanted <= body->capacity)
+        return IHS_WindowPollOK;
+    size_t capacity = body->capacity ? body->capacity : body->initialCapacity;
+    if (!capacity)
+        capacity = body->maxCapacity && body->maxCapacity < 1024 ? body->maxCapacity : 1024;
+    while (capacity < wanted) {
+        if (capacity > SIZE_MAX / 2) {
+            capacity = wanted;
+            break;
+        }
+        capacity *= 2;
+    }
+    if (body->maxCapacity && capacity > body->maxCapacity)
+        capacity = wanted ? wanted : body->maxCapacity;
+    void *allocated = realloc(body->data, capacity);
+    if (!allocated)
+        return IHS_WindowPollNoMemory;
+    body->data = allocated;
+    body->capacity = capacity;
+    return IHS_WindowPollOK;
+}
+
+IHS_WindowPollError IHS_SessionPacketsWindowLastError(const IHS_SessionPacketsWindow *window) {
+    return window->pollError;
+}
+
 bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionFrame *frame) {
+    window->pollError = IHS_WindowPollOK;
     uint16_t size = IHS_SessionPacketsWindowSize(window);
     if (size == 0) {
         return false;
@@ -241,14 +281,24 @@ bool IHS_SessionPacketsWindowPoll(IHS_SessionPacketsWindow *window, IHS_SessionF
             (item->header.type != IHS_SessionPacketTypeUnreliableFrag ||
              item->header.fragmentId != i - window->head.pos - 1))
             return false;
+        if (item->body.offset > item->body.capacity ||
+            item->body.suffix > item->body.capacity - item->body.offset ||
+            item->body.size > item->body.capacity - item->body.offset - item->body.suffix ||
+            item->body.size > SIZE_MAX - frameBodyLen) {
+            window->pollError = IHS_WindowPollLimit;
+            return false;
+        }
         frameBodyLen += item->body.size;
     }
+    window->pollError = ReserveFrame(&frame->body, frameBodyLen);
+    if (window->pollError != IHS_WindowPollOK)
+        return false;
     frame->header = head->header;
     frame->mediaOffset = 0;
     frame->mediaPrepared = false; /* fresh transport assembly, not a decoder FIFO item */
     frame->header.receiveBegin = head->header.receiveTimestamp;
     frame->receivedRetries = 0;
-    IHS_BufferEnsureMaxSize(&frame->body, frameBodyLen);
+    frame->body.size = 0;
 
     for (int i = window->head.pos, j = window->head.pos + packetsCount; i < j; i++) {
         WindowItem *item = &window->data[i % window->capacity];
@@ -278,8 +328,9 @@ uint16_t IHS_SessionPacketsWindowDiscard(IHS_SessionPacketsWindow *window, uint3
 }
 
 uint16_t IHS_SessionPacketsWindowDiscardEx(IHS_SessionPacketsWindow *window, uint32_t diff,
-                                            uint16_t *missing) {
-    if (missing) *missing = 0;
+                                           uint16_t *missing) {
+    if (missing)
+        *missing = 0;
     uint16_t size = IHS_SessionPacketsWindowSize(window);
     if (!size)
         return 0;
@@ -289,7 +340,8 @@ uint16_t IHS_SessionPacketsWindowDiscardEx(IHS_SessionPacketsWindow *window, uin
         WindowItem *item = &window->data[window->head.pos % window->capacity];
         if ((int32_t)(newest - item->senderTimestamp) <= (int32_t)diff)
             break;
-        if (missing && !FrameItemIsUsed(item)) ++*missing;
+        if (missing && !FrameItemIsUsed(item))
+            ++*missing;
         FrameItemRecycle(item);
         window->head.pos = (window->head.pos + 1) % window->capacity;
         discarded++;
@@ -441,19 +493,17 @@ bool IHS_SessionPacketsWindowMediaFeedback(const IHS_SessionPacketsWindow *windo
 
 /* Reliable gap age scans every present successor, independently of the 320
  * bits representable in a NACK. The receive timestamp is local, not sender time. */
-bool IHS_SessionPacketsWindowReliableFeedback(const IHS_SessionPacketsWindow *window,
-                                               uint32_t now, IHS_MediaFeedback *feedback,
-                                               bool *mature) {
+bool IHS_SessionPacketsWindowReliableFeedback(const IHS_SessionPacketsWindow *window, uint32_t now,
+                                              IHS_MediaFeedback *feedback, bool *mature) {
     *mature = false;
     if (!IHS_SessionPacketsWindowMediaFeedback(window, feedback))
         return false;
-    unsigned first = (uint16_t)(feedback->base -
-        IHS_SessionPacketsWindowNextNeededPacketId(window));
+    unsigned first =
+        (uint16_t)(feedback->base - IHS_SessionPacketsWindowNextNeededPacketId(window));
     unsigned size = IHS_SessionPacketsWindowSize(window);
     for (unsigned i = first; i < size; ++i) {
         const WindowItem *item = &window->data[(window->head.pos + i) % window->capacity];
-        if (FrameItemIsUsed(item) &&
-            (int32_t)(item->header.receiveTimestamp - (now - 65u)) < 0) {
+        if (FrameItemIsUsed(item) && (int32_t)(item->header.receiveTimestamp - (now - 65u)) < 0) {
             *mature = true;
             break;
         }
