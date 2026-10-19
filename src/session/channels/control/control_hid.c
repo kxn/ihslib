@@ -219,11 +219,10 @@ bool IHS_SessionHIDNotifyDeviceChange(IHS_Session *session) {
 }
 
 bool IHS_SessionHIDSendReport(IHS_Session *session) {
-    // Preserve the existing input-disabled early return and pending holders.
-    // This is not proof of the official generator's disabled-input policy (§152).
     /* Original UpdateHIDDeviceReports @7bd860 exits before collecting holders
-     * outside client state6. Do not consume a delta that cannot yet be sent. */
-    if (!IHS_SessionStreaming(session) || !IHS_SessionInputEnabled(session)) return false;
+     * outside client state6. Within state6 the generator consumes reports even
+     * when input is disabled; SubmitHIDReport gates publication (§153). */
+    if (!IHS_SessionStreaming(session)) return false;
     IHS_MutexLock(session->hidManager->reportSendLock);
     CHIDMessageFromRemote outMessage = CHIDMESSAGE_FROM_REMOTE__INIT;
     outMessage.command_case = CHIDMESSAGE_FROM_REMOTE__COMMAND_REPORTS;
