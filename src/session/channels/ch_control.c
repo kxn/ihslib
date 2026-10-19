@@ -279,6 +279,10 @@ static IHS_SendAdmission ControlSendLocked(IHS_SessionChannelControl *control,
 bool IHS_SessionChannelControlSubmitHIDReport(IHS_SessionChannel *channel, const uint8_t *data,
                                               size_t dataLen, bool activeInput) {
     assert(channel->id == IHS_SessionChannelIdControl);
+    /* Original SendRemoteHIDMessage @7ab39c checks both gates before preparing
+     * protobuf/encryption (§152). This fast report path bypasses SendHIDMsg. */
+    if (!IHS_SessionStreaming(channel->session) || !IHS_SessionInputEnabled(channel->session))
+        return false;
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *)channel;
     IHS_MutexLock(control->sendLock);
     control->hidSubmitted++;

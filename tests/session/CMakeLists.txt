@@ -349,6 +349,12 @@ ihs_add_test(window_join_midmessage window_join_midmessage.c)
 ihs_add_test(retransmission_state_machine retransmission_state_machine.c)
 ihs_add_test(control_hid_admission control_hid_admission.c)
 target_link_libraries(ihstest_control_hid_admission PRIVATE ihs-test-session)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ihs-hid-producer-oracle hid_producer_oracle.c)
+    target_include_directories(ihs-hid-producer-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-hid-producer-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-hid-producer-oracle PRIVATE -UNDEBUG -Wall -Wextra -Wno-unknown-pragmas -Werror=format)
+endif()
 
 add_subdirectory(video)
 

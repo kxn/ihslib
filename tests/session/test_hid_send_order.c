@@ -32,7 +32,7 @@ static void generate(void *context) {
 int main(void) {
     IHS_Init();
     Fixture f = {.session = IHS_TestSessionCreate()};
-    f.session->state.connectionState = IHS_SessionConnectionStateHandshaking;
+    f.session->state.connectionState = IHS_SessionConnectionStateConnected;
     IHS_TimerTaskStopImmediate(f.session->retransmission.timer);
     IHS_SessionChannelControl *c = (void *)f.session->channels[1];
     f.device = calloc(1, sizeof(*f.device));

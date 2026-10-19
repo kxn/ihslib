@@ -146,6 +146,10 @@ bool IHS_SessionChannelControlSendHIDMsg(IHS_SessionChannel *channel, const CHID
     if (!IHS_SessionStreaming(channel->session)) return false;
     if (!IHS_SessionInputEnabled(channel->session)) return false;
     CRemoteHIDMsg wrapped = CREMOTE_HIDMSG__INIT;
+    /* Original wrapper always writes field2, including false; these device
+     * lifecycle/response messages do not represent an active input batch. */
+    wrapped.has_active_input = true;
+    wrapped.active_input = false;
     size_t messageSize = chidmessage_from_remote__get_packed_size(message);
     wrapped.has_data = true;
     wrapped.data.data = malloc(messageSize);
@@ -215,10 +219,11 @@ bool IHS_SessionHIDNotifyDeviceChange(IHS_Session *session) {
 }
 
 bool IHS_SessionHIDSendReport(IHS_Session *session) {
-    // Short-circuit before the per-device lock storm if input streaming is disabled.
-    // The polling task still calls device->poll() so device state stays current; only
-    // the wire send is suppressed (matches Steam's BStreamingInput gating behavior).
-    if (!IHS_SessionInputEnabled(session)) return false;
+    // Preserve the existing input-disabled early return and pending holders.
+    // This is not proof of the official generator's disabled-input policy (§152).
+    /* Original UpdateHIDDeviceReports @7bd860 exits before collecting holders
+     * outside client state6. Do not consume a delta that cannot yet be sent. */
+    if (!IHS_SessionStreaming(session) || !IHS_SessionInputEnabled(session)) return false;
     IHS_MutexLock(session->hidManager->reportSendLock);
     CHIDMessageFromRemote outMessage = CHIDMESSAGE_FROM_REMOTE__INIT;
     outMessage.command_case = CHIDMESSAGE_FROM_REMOTE__COMMAND_REPORTS;

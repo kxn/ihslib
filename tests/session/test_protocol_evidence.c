@@ -280,6 +280,8 @@ static void diagnostic_and_header_bounds(void) {
     char out[4096];
     while (IHS_SessionChannelControlDrainPendingHIDReports(out, sizeof(out))) {}
     IHS_Session *s = session_new();
+    /* HID production is only legal after Streaming, unlike transport ACKs. */
+    s->state.connectionState = IHS_SessionConnectionStateConnected;
     uint8_t bytes[512]; memset(bytes, 0x5a, sizeof(bytes));
     assert(IHS_SessionChannelControlSubmitHIDReport(s->channels[1], bytes, sizeof(bytes), true));
     char small[2] = {'x', 'y'};
