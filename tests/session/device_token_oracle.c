@@ -123,6 +123,19 @@ static void receive(IHS_Client *c, int fd, bool auth) {
     assert(h);
     bool pending = IHS_TimerTaskVisitOwned(
         c->timers, auth ? &c->taskHandles.authorization : &c->taskHandles.streaming, noop, NULL);
+    if (h->msg_type == k_ERemoteDeviceStreamingCancelRequest ||
+        h->msg_type == k_ERemoteDeviceAuthorizationCancelRequest) {
+        /* Cancel reaches the peer before a stopped timer's end callback has
+         * necessarily run. Source observes after its full failed producer
+         * call returns; wait for the actual Native terminal phase, without
+         * replacing retirement or the failure callback. */
+        for (unsigned i = 0; i < 2000 && (pending || !atomic_load(&failures)); ++i) {
+            poll(NULL, 0, 1);
+            pending = IHS_TimerTaskVisitOwned(c->timers,
+                auth ? &c->taskHandles.authorization : &c->taskHandles.streaming, noop, NULL);
+        }
+        assert(!pending && atomic_load(&failures) == 1);
+    }
     printf("{\"tag\":%d,\"pending\":%s,\"token\":\"", h->msg_type, pending ? "true" : "false");
     if (h->msg_type == k_ERemoteDeviceStreamingRequest) {
         CMsgRemoteDeviceStreamingRequest *r =
