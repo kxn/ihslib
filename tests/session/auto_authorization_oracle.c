@@ -14,6 +14,21 @@
 #include <unistd.h>
 static atomic_int_fast64_t wall;
 static atomic_uint received_count;
+static atomic_bool hold_update, update_held;
+static _Atomic(IHS_Cond *) receive_condition;
+bool __real_IHS_CondWaitTimeout(IHS_Cond *, IHS_Mutex *, uint32_t);
+bool __wrap_IHS_CondWaitTimeout(IHS_Cond *cond, IHS_Mutex *mutex, uint32_t ms) {
+    if (cond == atomic_load(&receive_condition) && atomic_load(&hold_update)) {
+        /* Explicit idle-gap gate. Release Base so runtime-style pumps can
+         * run, then restore ownership before forwarding the actual wait. */
+        IHS_MutexUnlock(mutex);
+        atomic_store(&update_held, true);
+        while (atomic_load(&hold_update)) poll(NULL, 0, 1);
+        IHS_MutexLock(mutex);
+        atomic_store(&update_held, false);
+    }
+    return __real_IHS_CondWaitTimeout(cond, mutex, ms);
+}
 static IHS_BaseReceivedFunction *original_received;
 static void received(IHS_Base *b, const IHS_SocketAddress *a, IHS_Buffer *wire) {
     original_received(b, a, wire);
@@ -269,7 +284,8 @@ static void snapshot(IHS_Client *c) {
     }
     puts("]}");
 }
-static void packet(IHS_Client *c, unsigned tag, uint64_t host, const char *body, bool dispatch) {
+static void packet(IHS_Client *c, unsigned tag, uint64_t host, const char *body,
+                   bool dispatch, bool wait) {
     IHS_BaseLock(&c->base);
     unsigned before = c->authorizationCount;
     IHS_BaseUnlock(&c->base);
@@ -288,6 +304,7 @@ static void packet(IHS_Client *c, unsigned tag, uint64_t host, const char *body,
     assert(sendto(peer, IHS_BufferPointer(&wire), wire.size, 0, (void *)&destination,
                   sizeof(destination)) == (ssize_t)wire.size);
     IHS_BufferClear(&wire, true);
+    if (!wait) return;
     bool queued = false;
     for (unsigned i = 0; i < 2000 && !queued; ++i) {
         IHS_BaseLock(&c->base);
@@ -317,6 +334,7 @@ int main(int argc, char **argv) {
         .deviceId = 0x1122334455667788ULL, .secretKey = secret, .deviceName = "Switch fixture"};
     IHS_Client *c = IHS_ClientCreate(&cfg);
     assert(c);
+    atomic_store(&receive_condition, c->receiveWake);
     IHS_ClientSetAuthorizationDeferred(c, true);
     IHS_ClientAuthorizationCallbacks ac = {.persist = persist};
     IHS_ClientStreamingCallbacks sc = {.authorization = authorization,
@@ -342,7 +360,13 @@ int main(int argc, char **argv) {
                                     .keySteamId = argc == 3 ? strtoull(argv[2], NULL, 10) : 0};
     strcpy(request.pin, "9876");
     assert(IHS_ClientStreamingRequest(c, &host, &request));
-    IHS_ClientPumpAuthorization(c, 32);
+    /* Native has a separate RX owner; source's initial Start cannot interrupt
+     * an in-progress manager Update. Let that real batch finish if needed. */
+    for (unsigned n = 0; n < 2000 && !observed_count; ++n) {
+        IHS_ClientPumpAuthorization(c, 32);
+        if (!observed_count) poll(NULL, 0, 1);
+    }
+    assert(observed_count);
     snapshot(c);
     char line[8192];
     while (fgets(line, sizeof(line), stdin)) {
@@ -350,7 +374,7 @@ int main(int argc, char **argv) {
         long long time;
         assert(sscanf(line, "%c %lld", &op, &time) == 2);
         atomic_store(&wall, time);
-        if (op == 'p' || op == 'q' || op == 'd') {
+        if (op == 'p' || op == 'q' || op == 'd' || op == 'w') {
             unsigned tag;
             unsigned long long id;
             char body[4096];
@@ -368,7 +392,7 @@ int main(int argc, char **argv) {
                 IHS_ClientStreamingCallback(c, &host.address, &h, m);
                 protobuf_c_message_free_unpacked(m, NULL);
             } else
-                packet(c, tag, id, body, op == 'p');
+                packet(c, tag, id, body, op == 'p', op != 'w');
         } else if (op == 'r') {
             char body[4096];
             assert(sscanf(line, "%c %lld %4095s", &op, &time, body) == 3);
@@ -397,9 +421,44 @@ int main(int argc, char **argv) {
             unsigned budget;
             assert(sscanf(line, "%c %lld %u", &op, &time, &budget) == 3);
             IHS_ClientPumpAuthorization(c, budget);
-        } else if (op == 'u')
+        } else if (op == 'g') {
+            unsigned hold;
+            assert(sscanf(line, "%c %lld %u", &op, &time, &hold) == 3 && hold <= 1);
+            IHS_BaseLock(&c->base);
+            uint64_t before = c->receiveGeneration;
+            IHS_BaseUnlock(&c->base);
+            atomic_store(&hold_update, hold != 0);
+            bool complete = false;
+            for (unsigned n = 0; n < 2000 && !complete; ++n) {
+                if (hold) complete = atomic_load(&update_held);
+                else {
+                    IHS_BaseLock(&c->base);
+                    complete = !c->receiveBatchActive && c->receiveGeneration != before;
+                    IHS_BaseUnlock(&c->base);
+                }
+                if (!complete) poll(NULL, 0, 1);
+            }
+            assert(complete);
+            if (!hold) IHS_ClientPumpAuthorization(c, 32);
+        } else if (op == 'n') {
+            IHS_ClientPumpAuthorization(c, 32); /* no new Update requested */
+        } else if (op == 'u') {
+            /* Source 'u' is a complete manager Update, not another pump in
+             * the idle gap between socket polls. Wait for the actual receive
+             * owner to publish a new completed batch; never forge its epoch. */
+            IHS_BaseLock(&c->base);
+            uint64_t before = c->receiveGeneration;
+            IHS_BaseUnlock(&c->base);
+            bool complete = false;
+            for (unsigned n = 0; n < 2000 && !complete; ++n) {
+                IHS_BaseLock(&c->base);
+                complete = !c->receiveBatchActive && c->receiveGeneration != before;
+                IHS_BaseUnlock(&c->base);
+                if (!complete) poll(NULL, 0, 1);
+            }
+            assert(complete);
             IHS_ClientPumpAuthorization(c, 32);
-        else {
+        } else {
             assert(op == 'c');
             IHS_ClientStreamingCancel(c);
         }

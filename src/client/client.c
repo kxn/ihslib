@@ -386,6 +386,13 @@ static void ClientInitialized(IHS_Base *base, void *context) {
 static bool ClientReceiveCycle(IHS_Base *base, void *context, IHS_UDPPacket *packet) {
     (void)context;
     IHS_Client *client = (IHS_Client *)base;
+    IHS_BaseLock(base);
+    if (base->interrupted) {
+        IHS_BaseUnlock(base);
+        return false;
+    }
+    client->receiveBatchActive = true;
+    IHS_BaseUnlock(base);
     uint64_t due = IHS_TimerNow() + 100;
     while (!base->interrupted) {
         int result = IHS_UDPSocketReceive(base->socket, packet);
@@ -397,6 +404,14 @@ static bool ClientReceiveCycle(IHS_Base *base, void *context, IHS_UDPPacket *pac
         IHS_BufferClear(&packet->buffer, false);
     }
     IHS_BufferClear(&packet->buffer, false);
+    IHS_BaseLock(base);
+    client->receiveBatchActive = false;
+    ++client->receiveGeneration;
+    bool update = !base->interrupted && !atomic_load(&client->deferAuthorization);
+    IHS_BaseUnlock(base);
+    /* Original manager Update drains input before checking due sends. Deferred
+     * owners do this after draining their published callback queue instead. */
+    if (update) IHS_ClientStreamingUpdate(client);
     IHS_BaseLock(base);
     while (!base->interrupted) {
         uint64_t now = IHS_TimerNow();

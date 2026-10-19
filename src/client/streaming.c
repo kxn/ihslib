@@ -39,6 +39,8 @@ typedef struct IHS_StreamingState {
     IHS_AuthorizationFlow authorization;
     bool authorizing, ticket, proofUpdated;
     int64_t nextSendWallSecond;
+    uint64_t receiveGeneration;
+    bool hasSent;
     bool terminal;
     bool timerFailed;
     uint8_t encryptedPin[3 * IHS_CRYPTO_AES_BLOCK_SIZE];
@@ -160,6 +162,7 @@ bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
     client->lastLaunchId = state->requestId;
     client->lastLaunchHost = *host;
     client->lastLaunchHasTicket = client->lastLaunchAuthorizing = false;
+    state->receiveGeneration = client->receiveGeneration;
     IHS_BaseUnlock(&client->base);
     uint32_t random;
     do {
@@ -566,22 +569,39 @@ static bool SendCurrentRequest(IHS_StreamingState *state) {
         return false;
     }
     int64_t sent = (int64_t)time(NULL);
+    state->hasSent = true;
     state->nextSendWallSecond = (int64_t)((uint64_t)sent + (state->authorizing ? 3u : 1u));
     return true;
+}
+static bool StreamingAdvance(IHS_StreamingState *state, bool initialOnly) {
+    if (state->terminal || state->ticket || (initialOnly && state->hasSent)) return true;
+    IHS_Client *client = state->client;
+    /* Timer visitor -> Base is the existing lock order. Hold Base through the
+     * due send so a new RX batch cannot start between this check and send. */
+    IHS_BaseLock(&client->base);
+    bool ready = !client->base.interrupted && !client->receiveBatchActive &&
+                 !client->authorizationCount;
+    bool fresh = state->receiveGeneration != client->receiveGeneration;
+    bool ok = true;
+    if (ready && (!state->hasSent || fresh)) {
+        state->receiveGeneration = client->receiveGeneration;
+        if ((int64_t)time(NULL) >= state->nextSendWallSecond)
+            ok = SendCurrentRequest(state);
+    }
+    IHS_BaseUnlock(&client->base);
+    return ok;
 }
 static uint64_t StreamingRequestTimer(int runCount, void *context) {
     (void)runCount;
     IHS_StreamingState *state = context;
     if (state->terminal) return 0;
     if (atomic_load_explicit(&state->client->deferAuthorization, memory_order_acquire)) return 1;
-    if (state->ticket || (int64_t)time(NULL) < state->nextSendWallSecond) return 1;
-    return SendCurrentRequest(state) ? 1 : 0;
+    /* First send may precede a poll; retries belong to completed RX updates. */
+    return StreamingAdvance(state, true) ? 1 : 0;
 }
 static void StreamingUpdateVisit(IHS_TimerTask *task, void *context) {
     (void)context;
-    IHS_StreamingState *state = IHS_TimerTaskGetContext(task);
-    if (!state->terminal && !state->ticket && (int64_t)time(NULL) >= state->nextSendWallSecond)
-        if (!SendCurrentRequest(state)) IHS_TimerTaskStop(task);
+    if (!StreamingAdvance(IHS_TimerTaskGetContext(task), false)) IHS_TimerTaskStop(task);
 }
 void IHS_ClientStreamingUpdate(IHS_Client *client) {
     IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.streaming, StreamingUpdateVisit, NULL);

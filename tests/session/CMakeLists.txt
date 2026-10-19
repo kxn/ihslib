@@ -56,7 +56,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         -Wl,--wrap=IHS_CryptoRandomBytes -Wl,--wrap=IHS_CryptoRandomUInt32
         -Wl,--wrap=IHS_CryptoKeyExchange -Wl,--wrap=IHS_CryptoSymmetricEncrypt
         -Wl,--wrap=IHS_CryptoRSAEncrypt -Wl,--wrap=IHS_ClientSend
-        -Wl,--wrap=IHS_CryptoSHA256 -Wl,--wrap=IHS_ClientStreamingCallback -Wl,--wrap=IHS_BaseInit)
+        -Wl,--wrap=IHS_CryptoSHA256 -Wl,--wrap=IHS_ClientStreamingCallback -Wl,--wrap=IHS_BaseInit
+        -Wl,--wrap=IHS_CondWaitTimeout)
 
     add_executable(ihs-device-token-oracle device_token_oracle.c)
     target_include_directories(ihs-device-token-oracle PRIVATE ${TEST_INCLUDES})

@@ -64,6 +64,8 @@ struct IHS_Client {
     unsigned authorizationHead, authorizationCount, authorizationDropped;
     IHS_Timer *timers;
     IHS_Cond *receiveWake;
+    uint64_t receiveGeneration;
+    bool receiveBatchActive;
     IHS_TimerTask *discoveryTimer;
     uint32_t discoveryInterval;
     uint32_t discoverySeq;
