@@ -580,7 +580,7 @@ static bool StreamingAdvance(IHS_StreamingState *state, bool initialOnly) {
      * due send so a new RX batch cannot start between this check and send. */
     IHS_BaseLock(&client->base);
     bool ready = !client->base.interrupted && !client->receiveBatchActive &&
-                 !client->authorizationCount;
+                 !client->authorizationCount && !client->authorizationDispatching;
     bool fresh = state->receiveGeneration != client->receiveGeneration;
     bool ok = true;
     if (ready && (!state->hasSent || fresh)) {

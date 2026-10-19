@@ -160,6 +160,7 @@ size_t IHS_ClientPumpAuthorization(IHS_Client *client, size_t budget) {
         ProtobufCMessage *message = client->authorizationQueue[index].message;
         client->authorizationHead = (index + 1) % 32;
         --client->authorizationCount;
+        ++client->authorizationDispatching;
         IHS_BaseUnlock(&client->base);
         /* Match BaseWorker's dispatch order: no Base lock around timer visitors. */
         if (header->msg_type == k_ERemoteDeviceAuthorizationResponse ||
@@ -170,6 +171,9 @@ size_t IHS_ClientPumpAuthorization(IHS_Client *client, size_t budget) {
         else
             client->privCallbacks.streaming(client, &address, header, message);
         FreeAuthorizationFrame(header, message);
+        IHS_BaseLock(&client->base);
+        --client->authorizationDispatching;
+        IHS_BaseUnlock(&client->base);
         ++dispatched;
     }
     IHS_BaseLock(&client->base);
@@ -267,18 +271,28 @@ bool IHS_ClientSend(IHS_Client *client, IHS_SocketAddress address, ERemoteClient
 
 bool IHS_ClientBroadcast(IHS_Client *client, ERemoteClientBroadcastMsg type,
                          ProtobufCMessage *message) {
-    IHS_SocketAddress address = {
-        {.v4 = {IHS_IPAddressFamilyIPv4, {0xFF, 0xFF, 0xFF, 0xFF}}}, 27036};
-    bool sent = IHS_ClientSend(client, address, type, message);
+    IHS_SocketAddress targets[9] = {{
+        .ip = {.v4 = {IHS_IPAddressFamilyIPv4, {0xFF, 0xFF, 0xFF, 0xFF}}}, .port = 27036}};
     /* 255.255.255.255 alone doesn't reach Steam hosts from every device and
      * network; send to each local subnet's broadcast address as well. Hosts
      * answer every copy, discovery already handles repeated status. */
     IHS_IPAddress directed[8];
     size_t count = IHS_UDPBroadcastAddresses(directed, sizeof(directed) / sizeof(directed[0]));
     for (size_t i = 0; i < count; i++) {
-        address.ip = directed[i];
-        sent = IHS_ClientSend(client, address, type, message) || sent;
+        targets[i + 1] = (IHS_SocketAddress){.ip = directed[i], .port = 27036};
     }
+    /* Original CDiscoverySocket::BSend fixes its destination list, then retries
+     * the whole list after a failed pass, at most twice. Only the raw socket
+     * changes; queued transactions and the client/RX owner remain intact. */
+    IHS_BaseLock(&client->base);
+    bool sent = false;
+    for (unsigned pass = 0; pass < 3 && !client->base.interrupted && client->base.socket; ++pass) {
+        for (size_t i = 0; i <= count; ++i)
+            sent = IHS_ClientSend(client, targets[i], type, message) || sent;
+        if (sent) break;
+        if (pass < 2) IHS_UDPSocketReopen(client->base.socket);
+    }
+    IHS_BaseUnlock(&client->base);
     return sent;
 }
 
@@ -411,7 +425,11 @@ static bool ClientReceiveCycle(IHS_Base *base, void *context, IHS_UDPPacket *pac
     IHS_BaseUnlock(base);
     uint64_t due = IHS_TimerNow() + 100;
     while (!base->interrupted) {
+        /* Discovery broadcast recovery can replace the raw fd. It holds Base
+         * through the change; no receive may retain the old descriptor. */
+        IHS_BaseLock(base);
         int result = IHS_UDPSocketReceive(base->socket, packet);
+        IHS_BaseUnlock(base);
         /* Original BReceive @cae2c0 treats all nonpositive recvfrom results
          * alike: end this Update's batch, retain socket for the next Update.
          * This client owner differs from the media session's receiveCycle. */

@@ -62,6 +62,7 @@ struct IHS_Client {
         ProtobufCMessage *message;
     } authorizationQueue[32]; /* Local memory budget, not a Steam protocol limit. */
     unsigned authorizationHead, authorizationCount, authorizationDropped;
+    unsigned authorizationDispatching;
     IHS_Timer *timers;
     IHS_Cond *receiveWake;
     uint64_t receiveGeneration;

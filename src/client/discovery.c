@@ -32,6 +32,8 @@
 typedef struct DiscoveryContext {
     IHS_Client *client;
     uint32_t interval;
+    uint64_t receiveGeneration, nextSend;
+    bool hasSent;
 } DiscoveryContext;
 static uint64_t DiscoveryTimerRun(int runCount, DiscoveryContext *context);
 static bool DiscoveryBroadcast(IHS_Client *client);
@@ -43,7 +45,7 @@ bool IHS_ClientStartDiscovery(IHS_Client *client, uint32_t interval) {
     DiscoveryContext *context = malloc(sizeof(*context));
     if (!context)
         return false;
-    *context = (DiscoveryContext){client, interval};
+    *context = (DiscoveryContext){.client = client, .interval = interval};
     if (!IHS_TimerTaskStartOwned(client->timers, &client->discoveryTimer,
                                  (IHS_TimerRunFunction *)DiscoveryTimerRun, free, 0, context)) {
         free(context);
@@ -87,9 +89,33 @@ void IHS_ClientDiscoveryCallback(IHS_Client *client, const IHS_SocketAddress *ad
 static uint64_t DiscoveryTimerRun(int runCount, DiscoveryContext *context) {
     (void)runCount;
     IHS_Client *client = context->client;
-    IHS_ClientLog(client, IHS_LogLevelVerbose, "Discovery", "Send broadcast");
-    DiscoveryBroadcast(client);
-    return context->interval;
+    /* Timer visitor -> Base, matching the streaming due-send lock order.
+     * Full reads and deferred callbacks must finish before an automatic
+     * broadcast can replace the discovery descriptor. */
+    IHS_BaseLock(&client->base);
+    if (client->base.interrupted) {
+        IHS_BaseUnlock(&client->base);
+        return 0;
+    }
+    bool ready = !client->receiveBatchActive && !client->authorizationCount &&
+                 !client->authorizationDispatching;
+    bool fresh = context->receiveGeneration != client->receiveGeneration;
+    bool done = false;
+    if (ready && fresh) {
+        context->receiveGeneration = client->receiveGeneration;
+        uint64_t now = IHS_TimerNow();
+        if (!context->hasSent || now >= context->nextSend) {
+            IHS_ClientLog(client, IHS_LogLevelVerbose, "Discovery", "Send broadcast");
+            DiscoveryBroadcast(client);
+            context->hasSent = true;
+            context->nextSend = now + context->interval;
+            done = context->interval == 0;
+        }
+    }
+    IHS_BaseUnlock(&client->base);
+    /* Official watcher scheduling is 100ms; interval=0 remains a one-shot.
+     * Full/fast round cadence is a separate policy from this owner gate. */
+    return done ? 0 : 100;
 }
 
 static bool DiscoveryBroadcast(IHS_Client *client) {

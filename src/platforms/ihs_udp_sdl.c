@@ -70,16 +70,34 @@ IHS_UDPSocket *IHS_UDPSocketOpen(bool broadcast) {
 
 void IHS_UDPSocketClose(IHS_UDPSocket *socket) {
     SDLNet_UDP_DelSocket(socket->sockets, socket->unblock);
-    SDLNet_UDP_DelSocket(socket->sockets, socket->socket);
+    if (socket->socket) SDLNet_UDP_DelSocket(socket->sockets, socket->socket);
 
     SDLNet_UDP_Close(socket->unblock);
-    SDLNet_UDP_Close(socket->socket);
+    if (socket->socket) SDLNet_UDP_Close(socket->socket);
     SDLNet_FreePacket(socket->packet);
     SDLNet_FreeSocketSet(socket->sockets);
     SDL_free(socket);
 }
 
+bool IHS_UDPSocketReopen(IHS_UDPSocket *socket) {
+    /* Owner excludes concurrent receive/send. Keep the interrupt socket and
+     * packet storage until normal stop/join/destroy. */
+    if (socket->socket) {
+        SDLNet_UDP_DelSocket(socket->sockets, socket->socket);
+        SDLNet_UDP_Close(socket->socket);
+    }
+    socket->socket = SDLNet_UDP_Open(0);
+    if (!socket->socket) return false;
+    if (SDLNet_UDP_AddSocket(socket->sockets, socket->socket) < 0) {
+        SDLNet_UDP_Close(socket->socket);
+        socket->socket = NULL;
+        return false;
+    }
+    return true;
+}
+
 int IHS_UDPSocketWaitReadable(IHS_UDPSocket *socket, uint32_t timeoutMs) {
+    if (!socket->socket) return -1;
     int result = SDLNet_CheckSockets(socket->sockets, timeoutMs);
     return result <= 0 ? result : !!SDLNet_SocketReady(socket->socket);
 }
@@ -101,7 +119,7 @@ int IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *packet) {
         // Drain interrupt packets
         while (SDLNet_UDP_Recv(socket->unblock, socket->packet) > 0);
     }
-    if (!SDLNet_SocketReady(socket->socket)) {
+    if (!socket->socket || !SDLNet_SocketReady(socket->socket)) {
         return 0;
     }
     if ((ret = SDLNet_UDP_Recv(socket->socket, socket->packet)) <= 0) {
@@ -113,6 +131,7 @@ int IHS_UDPSocketReceive(IHS_UDPSocket *socket, IHS_UDPPacket *packet) {
 }
 
 bool IHS_UDPSocketSend(IHS_UDPSocket *socket, const IHS_UDPPacket *packet) {
+    if (!socket->socket) return false;
     UDPpacket sdlPacket;
     SDL_memset(&sdlPacket, 0, sizeof(UDPpacket));
     AddressToSDL(&packet->address, &sdlPacket.address);

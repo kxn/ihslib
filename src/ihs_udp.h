@@ -56,9 +56,16 @@ int IHS_UDPSocketReceive(IHS_UDPSocket *s, IHS_UDPPacket *packet);
  *
  * @param s
  * @param packet
- * @return true if succeeded
+ * @return accepted by the socket policy, not proof of delivery. Discovery
+ * broadcast-enabled sockets treat a negative EHOSTUNREACH as nonfatal;
+ * ordinary media sockets and positive short sends still report failure.
  */
 bool IHS_UDPSocketSend(IHS_UDPSocket *s, const IHS_UDPPacket *packet);
+
+/** Replace the raw socket, retaining its owner object and nonblocking intent.
+ * The caller must serialize all receives, sends and teardown around this call.
+ * A failed reopen leaves an inert socket which can be reopened or closed. */
+bool IHS_UDPSocketReopen(IHS_UDPSocket *s);
 
 bool IHS_UDPSocketSetBlocking(IHS_UDPSocket *s, bool blocking);
 
