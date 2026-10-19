@@ -137,11 +137,25 @@ const char *IHS_LogLevelName(IHS_LogLevel level) {
 bool IHS_BaseStartWorker(IHS_Base *base, const char *name) {
     assert(base != NULL);
     IHS_BaseLock(base);
-    if (base->worker != NULL) {
+    if (base->worker != NULL || base->socket != NULL) {
         IHS_BaseUnlock(base);
         return false;
     }
+    /* Official discovery BStart reports failed BInit before becoming active.
+     * Resolve local resources before returning success to either owner. */
+    IHS_UDPSocket *socket = IHS_UDPSocketOpen(base->broadcast);
+    if (!socket) {
+        IHS_BaseUnlock(base);
+        return false;
+    }
+    base->socket = socket;
     base->worker = IHS_ThreadCreate((IHS_ThreadFunction *)BaseWorker, name, base);
+    if (!base->worker) {
+        base->socket = NULL;
+        IHS_UDPSocketClose(socket);
+        IHS_BaseUnlock(base);
+        return false;
+    }
     IHS_BaseLog(base, IHS_LogLevelInfo, "Worker", "Worker thread %s created", name);
     IHS_BaseUnlock(base);
     return true;
@@ -197,9 +211,8 @@ void IHS_BaseUnlock(IHS_Base *base) {
 
 static void BaseWorker(IHS_Base *base) {
     assert(base != NULL);
-    IHS_UDPSocket *socket = IHS_UDPSocketOpen(base->broadcast);
     IHS_BaseLock(base);
-    base->socket = socket;
+    IHS_UDPSocket *socket = base->socket;
     IHS_BaseUnlock(base);
     if (base->callbacks.run && base->callbacks.run->initialized) {
         base->callbacks.run->initialized(base, base->callbackContexts.run);

@@ -80,6 +80,10 @@ IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config) {
     client->authorizationCache.result = k_ERemoteDeviceAuthorizationFailed;
     atomic_init(&client->deferAuthorization, false);
     IHS_BaseInit(&client->base, config, ClientRecvCallback, true);
+    if (!client->base.lock) {
+        free(client);
+        return NULL;
+    }
     IHS_BaseSetRunCallbacks(&client->base, &ClientRunCallbacks, NULL);
     client->receiveWake = IHS_CondCreate();
     if (!client->receiveWake) {
@@ -88,12 +92,24 @@ IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config) {
         return NULL;
     }
     client->timers = IHS_TimerCreate();
+    if (!client->timers) {
+        IHS_CondDestroy(client->receiveWake);
+        IHS_BaseDestroy(&client->base);
+        free(client);
+        return NULL;
+    }
 
     client->privCallbacks.discovery = IHS_ClientDiscoveryCallback;
     client->privCallbacks.authorization = IHS_ClientAuthorizationCallback;
     client->privCallbacks.streaming = IHS_ClientStreamingCallback;
 
-    IHS_BaseStartWorker(&client->base, "IHSClient");
+    if (!IHS_BaseStartWorker(&client->base, "IHSClient")) {
+        IHS_TimerDestroy(client->timers);
+        IHS_CondDestroy(client->receiveWake);
+        IHS_BaseDestroy(&client->base);
+        free(client);
+        return NULL;
+    }
     return client;
 }
 

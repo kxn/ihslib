@@ -89,14 +89,26 @@ void IHS_TimerQuit() {
 IHS_Timer *IHS_TimerCreate() {
     IHS_MutexLock(state.lock);
     IHS_Timer *timer = (IHS_Timer *) IHS_QueueItemObtain(state.timers);
+    if (!timer) {
+        IHS_MutexUnlock(state.lock);
+        return NULL;
+    }
     timer->tasks = IHS_QueueCreate(sizeof(IHS_TimerTask));
     timer->mutex = IHS_MutexCreate();
-    IHS_QueueAppend(state.timers, (IHS_QueueItem *) timer);
+    if (!timer->tasks || !timer->mutex) goto failed;
     if (state.thread == NULL) {
         state.thread = IHS_ThreadCreate(TimerThreadWorker, "IHS.Timer", NULL);
+        if (!state.thread) goto failed;
     }
+    IHS_QueueAppend(state.timers, (IHS_QueueItem *) timer);
     IHS_MutexUnlock(state.lock);
     return (IHS_Timer *) timer;
+failed:
+    if (timer->mutex) IHS_MutexDestroy(timer->mutex);
+    if (timer->tasks) IHS_QueueDestroy(timer->tasks, NULL, NULL);
+    IHS_QueueItemFree((void *)timer);
+    IHS_MutexUnlock(state.lock);
+    return NULL;
 }
 
 void IHS_TimerDestroy(IHS_Timer *timer) {
@@ -126,6 +138,10 @@ IHS_TimerTask *IHS_TimerTaskStart(IHS_Timer *timer, IHS_TimerRunFunction *run, I
         return NULL;
     }
     IHS_TimerTask *task = (IHS_TimerTask *) IHS_QueueItemObtain(timer->tasks);
+    if (!task) {
+        IHS_MutexUnlock(timer->mutex);
+        return NULL;
+    }
     task->timer = timer;
     task->run = run;
     task->end = end;

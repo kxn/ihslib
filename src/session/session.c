@@ -73,7 +73,12 @@ static const IHS_BaseRunCallbacks SessionRunCallbacks = {
 IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig,
                                const IHS_SessionInfo *sessionInfo) {
     IHS_Session *session = calloc(1, sizeof(IHS_Session));
+    if (!session) return NULL;
     IHS_BaseInit(&session->base, clientConfig, SessionRecvCallback, false);
+    if (!session->base.lock) {
+        free(session);
+        return NULL;
+    }
     IHS_BaseSetRunCallbacks(&session->base, &SessionRunCallbacks, NULL);
     session->info = *sessionInfo;
     atomic_init(&session->state.connectionState, IHS_SessionConnectionStateUnconnected);
@@ -92,7 +97,10 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig,
     session->sendQueueCond = IHS_CondCreate();
     session->sendQueue = IHS_QueueCreate(sizeof(QueuedPacket));
     session->pendingData = IHS_QueueCreate(sizeof(QueuedPacket));
+    if (!session->sendQueueMutex || !session->reliableLock || !session->sendQueueCond ||
+        !session->sendQueue || !session->pendingData) goto failed_before_timer;
     session->timers = IHS_TimerCreate();
+    if (!session->timers) goto failed_before_timer;
     IHS_StreamClockInit(&session->clock);
     IHS_MediaNetworkStatsInit(&session->mediaNetworkStats);
     IHS_OutgoingInit(session, IHS_SessionPacketTimestamp());
@@ -118,6 +126,15 @@ IHS_Session *IHS_SessionCreate(const IHS_ClientConfig *clientConfig,
 
     session->hidManager->session = session;
     return session;
+failed_before_timer:
+    if (session->pendingData) IHS_QueueDestroy(session->pendingData, NULL, NULL);
+    if (session->sendQueue) IHS_QueueDestroy(session->sendQueue, NULL, NULL);
+    if (session->sendQueueCond) IHS_CondDestroy(session->sendQueueCond);
+    if (session->reliableLock) IHS_MutexDestroy(session->reliableLock);
+    if (session->sendQueueMutex) IHS_MutexDestroy(session->sendQueueMutex);
+    IHS_BaseDestroy(&session->base);
+    free(session);
+    return NULL;
 }
 
 bool IHS_SessionConnect(IHS_Session *session) {

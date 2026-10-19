@@ -57,10 +57,20 @@ static size_t AddressToSys(const IHS_SocketAddress *ihs, struct sockaddr_storage
 
 IHS_UDPSocket *IHS_UDPSocketOpen(bool broadcast) {
     IHS_UDPSocket *s = calloc(1, sizeof(IHS_UDPSocket));
+    if (!s) return NULL;
     s->fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    assert(s->fd >= 0);
+    if (s->fd < 0) {
+        int error = errno;
+        free(s);
+        errno = error;
+        return NULL;
+    }
     s->mutex = IHS_MutexCreate();
-    assert(s->mutex != NULL);
+    if (!s->mutex) {
+        close(s->fd);
+        free(s);
+        return NULL;
+    }
     /* A 1440p keyframe arrives as a burst of hundreds of datagrams. The default
      * receive buffer (~208 KiB) overflows mid-frame and the kernel drops the
      * remainder, so frames never reassemble. SO_RCVBUF is clamped to

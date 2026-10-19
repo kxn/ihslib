@@ -37,6 +37,7 @@ typedef struct IHS_UDPPacket {
     IHS_Buffer buffer;
 } IHS_UDPPacket;
 
+/* NULL means construction failed; no descriptor/object is transferred. */
 IHS_UDPSocket *IHS_UDPSocketOpen(bool broadcast);
 
 void IHS_UDPSocketClose(IHS_UDPSocket *socket);
