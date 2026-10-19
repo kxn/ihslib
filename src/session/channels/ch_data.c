@@ -322,7 +322,12 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
     }
     IHS_SessionLog(channel->base.session, IHS_LogLevelInfo, "Data", "%s channel started",
                    channelName);
-    while (!channel->interrupted) {
+    /* Original RunDecodeLoop checks active before its first FIFO batch and
+     * after OnThink/Wait, not between queued DecodeFrame calls. Stop rejects
+     * new producers; the batch already in progress still drains before join.
+     * A stop at the idle/entry boundary must not restart a nonempty batch. */
+    bool running = !atomic_load(&channel->interrupted);
+    while (running) {
         IHS_MutexLock(channel->windowLock);
         uint16_t missing;
         bool hasFrame = IHS_SessionChannelDataPollLocked(channel, &frame, &missing);
@@ -332,8 +337,6 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
             IHS_SessionPacketsWindowReleaseFrame(&frame);
             continue;
         }
-        if (channel->interrupted)
-            break;
         /* Official RunDecodeLoop 766dd8..766e48 drains queued DecodeFrame
          * inputs before OnThink. A newer key fragment can flush an older
          * complete image before it reaches the SDK. Never hold FIFO lock over
@@ -350,6 +353,7 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
             else if (timeout)
                 IHS_CondWaitTimeout(channel->windowCond, channel->windowLock, timeout);
         }
+        running = !atomic_load(&channel->interrupted);
         IHS_MutexUnlock(channel->windowLock);
     }
     IHS_SessionLog(channel->base.session, IHS_LogLevelInfo, "Data", "Stopping %s channel",
