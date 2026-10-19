@@ -73,6 +73,8 @@ static IHS_BaseRunCallbacks ClientRunCallbacks = {
     .receiveCapacity = 2048,
 };
 
+_Thread_local IHS_Client *IHS_ClientDispatchOwner;
+
 IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config) {
     IHS_Client *client = malloc(sizeof(IHS_Client));
     if (!client) return NULL;
@@ -165,6 +167,8 @@ size_t IHS_ClientPumpAuthorization(IHS_Client *client, size_t budget) {
         ++client->authorizationDispatching;
         IHS_BaseUnlock(&client->base);
         /* Match BaseWorker's dispatch order: no Base lock around timer visitors. */
+        IHS_Client *previousDispatch = IHS_ClientDispatchOwner;
+        IHS_ClientDispatchOwner = client;
         if (header->msg_type == k_ERemoteDeviceAuthorizationResponse ||
             header->msg_type == k_ERemoteDeviceAuthorizationConfirmed ||
             header->msg_type == k_ERemoteDeviceAuthorizationRequest ||
@@ -172,6 +176,7 @@ size_t IHS_ClientPumpAuthorization(IHS_Client *client, size_t budget) {
             client->privCallbacks.authorization(client, &address, header, message);
         else
             client->privCallbacks.streaming(client, &address, header, message);
+        IHS_ClientDispatchOwner = previousDispatch;
         FreeAuthorizationFrame(header, message);
         IHS_BaseLock(&client->base);
         --client->authorizationDispatching;
@@ -437,7 +442,10 @@ static bool ClientReceiveCycle(IHS_Base *base, void *context, IHS_UDPPacket *pac
          * alike: end this Update's batch, retain socket for the next Update.
          * This client owner differs from the media session's receiveCycle. */
         if (result <= 0) break;
+        IHS_Client *previousDispatch = IHS_ClientDispatchOwner;
+        IHS_ClientDispatchOwner = client;
         base->callbacks.received(base, &packet->address, &packet->buffer);
+        IHS_ClientDispatchOwner = previousDispatch;
         IHS_BufferClear(&packet->buffer, false);
     }
     IHS_BufferClear(&packet->buffer, false);

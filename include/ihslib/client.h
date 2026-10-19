@@ -222,8 +222,10 @@ bool IHS_ClientStopDiscovery(IHS_Client *client);
 /** Local discovery subscription. Enable adds one broadcast owner and requests a
  * fresh round; Disable balances one owner. The manager continues its wall-clock
  * rounds (including saved targets) until client destruction/StopDiscovery.
- * A full round is followed by at most two same-sequence fast sends. These APIs
- * cannot share a task with the explicit-interval legacy StartDiscovery API. */
+ * A full round is followed by at most two same-sequence fast sends. Accepted
+ * refreshes execute after complete receive/callback cycles: independent calls
+ * are retained; reentry from this client's dispatched callback coalesces.
+ * These APIs cannot share a task with the explicit-interval StartDiscovery API. */
 bool IHS_ClientEnableDiscovery(IHS_Client *client);
 bool IHS_ClientDisableDiscovery(IHS_Client *client);
 bool IHS_ClientTriggerDiscovery(IHS_Client *client);

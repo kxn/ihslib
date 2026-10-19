@@ -35,6 +35,14 @@
 typedef void (IHS_MessageCallback)(IHS_Client *client, const IHS_SocketAddress *address,
                                    CMsgRemoteClientBroadcastHeader *header, ProtobufCMessage *message);
 
+/* Preserve Update reentry semantics across the threaded ingress/deferred port.
+ * A different thread's independent refresh must not be mistaken for reentry. */
+#ifdef __cplusplus
+extern "C" { extern thread_local IHS_Client *IHS_ClientDispatchOwner; }
+#else
+extern _Thread_local IHS_Client *IHS_ClientDispatchOwner;
+#endif
+
 /* One most-recent key/result for the manager lifetime, not per request or host.
  * Timer visitors serialize writers, Base protects inspection; free after timer join. */
 typedef struct IHS_AuthorizationCache {

@@ -18,5 +18,7 @@ typedef struct IHS_DiscoveryContext {
     bool hasSent, rounds;
     int64_t full, fast;
     unsigned tries, broadcastOwners;
+    unsigned pendingFull;
+    bool nestedFull;
     IHS_DiscoveryRandom random;
 } IHS_DiscoveryContext;

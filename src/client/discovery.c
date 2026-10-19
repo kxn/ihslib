@@ -67,6 +67,11 @@ static void ChangeDiscovery(IHS_TimerTask *task, void *opaque) {
     if (!context->rounds) return;
     IHS_BaseLock(&change->client->base);
     if (!change->client->base.interrupted) {
+        bool nested = IHS_ClientDispatchOwner == change->client;
+        if (change->action >= 0 && !nested && context->pendingFull == UINT_MAX) {
+            IHS_BaseUnlock(&change->client->base);
+            return;
+        }
         if (change->action == 1 && context->broadcastOwners < UINT_MAX) {
             ++context->broadcastOwners;
             context->full = 0;
@@ -77,6 +82,10 @@ static void ChangeDiscovery(IHS_TimerTask *task, void *opaque) {
         } else if (!change->action) {
             context->full = 0;
             change->accepted = true;
+        }
+        if (change->accepted && change->action >= 0) {
+            if (nested) context->nestedFull = true;
+            else ++context->pendingFull;
         }
     }
     IHS_BaseUnlock(&change->client->base);
@@ -95,6 +104,8 @@ static bool ActivateDiscovery(IHS_Client *client, int action) {
     context->client = client;
     context->rounds = true;
     context->broadcastOwners = action == 1;
+    context->nestedFull = IHS_ClientDispatchOwner == client;
+    context->pendingFull = context->nestedFull ? 0 : 1;
     IHS_DiscoveryRandomSeed(&context->random, (int32_t)((uint32_t)time(NULL) ^ (uint32_t)getpid()));
     if (IHS_TimerTaskStartOwned(client->timers, &client->discoveryTimer,
             (IHS_TimerRunFunction *)DiscoveryTimerRun, free, 0, context)) return true;
@@ -224,7 +235,10 @@ static uint64_t DiscoveryTimerRun(int runCount, DiscoveryContext *context) {
             }
             int64_t now = (int64_t)time(NULL);
             bool send = false;
+            if (context->pendingFull || context->nestedFull) context->full = 0;
             if (now >= context->full) {
+                if (context->pendingFull) --context->pendingFull;
+                context->nestedFull = false;
                 context->full = now + 12 + IHS_DiscoveryRandomInt(&context->random, 1, 5);
                 context->fast = now + IHS_DiscoveryRandomInt(&context->random, 1, 3);
                 context->tries = 1;
