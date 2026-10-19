@@ -24,6 +24,14 @@ ihs_add_test(udp_broadcast test_udp_broadcast.c)
 # Calls into ihs-platforms directly, which needs ihslib again after it.
 target_link_libraries(${IHSTEST_TARGET} PRIVATE ihs-platforms ihslib)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ihs-thread-clock-oracle thread_clock_oracle.c)
+    target_include_directories(ihs-thread-clock-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-thread-clock-oracle PRIVATE ihs-platforms)
+    target_compile_options(ihs-thread-clock-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-thread-clock-oracle PRIVATE -Wl,--wrap=pthread_condattr_init
+        -Wl,--wrap=pthread_condattr_setclock -Wl,--wrap=pthread_condattr_destroy
+        -Wl,--wrap=pthread_cond_init -Wl,--wrap=pthread_cond_destroy
+        -Wl,--wrap=clock_gettime -Wl,--wrap=pthread_cond_timedwait)
     ihs_add_test(base_log_lock test_base_log_lock.c)
     set_tests_properties(base_log_lock PROPERTIES TIMEOUT 10)
     ihs_add_test(udp_send test_udp_send.c)

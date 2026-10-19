@@ -14,6 +14,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <time.h>
 
 struct IHS_Thread {
     pthread_t tid;
@@ -93,7 +94,22 @@ IHS_Cond *IHS_CondCreate() {
     IHS_Cond *c = calloc(1, sizeof(IHS_Cond));
     if (!c)
         return NULL;
-    if (pthread_cond_init(&c->cond, NULL)) {
+    int result;
+#if defined(__APPLE__)
+    /* Darwin provides a relative timed wait instead of condattr_setclock. */
+    result = pthread_cond_init(&c->cond, NULL);
+#else
+    pthread_condattr_t attr;
+    if (pthread_condattr_init(&attr) != 0) {
+        free(c);
+        return NULL;
+    }
+    result = pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    if (result == 0)
+        result = pthread_cond_init(&c->cond, &attr);
+    pthread_condattr_destroy(&attr);
+#endif
+    if (result != 0) {
         free(c);
         return NULL;
     }
@@ -121,8 +137,13 @@ bool IHS_CondWait(IHS_Cond *cond, IHS_Mutex *mutex) {
 }
 
 bool IHS_CondWaitTimeout(IHS_Cond *cond, IHS_Mutex *mutex, uint32_t milliseconds) {
+#if defined(__APPLE__)
+    struct timespec duration = {milliseconds / 1000, (long)(milliseconds % 1000) * 1000000};
+    return CondWakeResult(pthread_cond_timedwait_relative_np(&cond->cond, &mutex->mutex, &duration));
+#else
     struct timespec until;
-    clock_gettime(CLOCK_REALTIME, &until);
+    if (clock_gettime(CLOCK_MONOTONIC, &until) != 0)
+        return false;
     until.tv_sec += milliseconds / 1000;
     until.tv_nsec += (long)(milliseconds % 1000) * 1000000;
     if (until.tv_nsec >= 1000000000) {
@@ -130,4 +151,5 @@ bool IHS_CondWaitTimeout(IHS_Cond *cond, IHS_Mutex *mutex, uint32_t milliseconds
         until.tv_sec++;
     }
     return CondWakeResult(pthread_cond_timedwait(&cond->cond, &mutex->mutex, &until));
+#endif
 }
