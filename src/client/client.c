@@ -40,6 +40,7 @@
 #include "protobuf/pb_utils.h"
 
 static void ClientInitialized(IHS_Base *base, void *context);
+static bool ClientReceiveCycle(IHS_Base *base, void *context, IHS_UDPPacket *packet);
 
 static const unsigned char PACKET_MAGIC[8] = {0xff, 0xff, 0xff, 0xff, 0x21, 0x4c, 0x5f, 0xa0};
 
@@ -68,15 +69,24 @@ static const ProtobufCMessageDescriptor
 
 static IHS_BaseRunCallbacks ClientRunCallbacks = {
     .initialized = ClientInitialized,
+    .receiveCycle = ClientReceiveCycle,
+    .receiveCapacity = 2048,
 };
 
 IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config) {
     IHS_Client *client = malloc(sizeof(IHS_Client));
+    if (!client) return NULL;
     memset(client, 0, sizeof(IHS_Client));
     client->authorizationCache.result = k_ERemoteDeviceAuthorizationFailed;
     atomic_init(&client->deferAuthorization, false);
     IHS_BaseInit(&client->base, config, ClientRecvCallback, true);
     IHS_BaseSetRunCallbacks(&client->base, &ClientRunCallbacks, NULL);
+    client->receiveWake = IHS_CondCreate();
+    if (!client->receiveWake) {
+        IHS_BaseDestroy(&client->base);
+        free(client);
+        return NULL;
+    }
     client->timers = IHS_TimerCreate();
 
     client->privCallbacks.discovery = IHS_ClientDiscoveryCallback;
@@ -101,6 +111,9 @@ void IHS_ClientSetSecretKey(IHS_Client *client, const uint8_t *secretKey) {
 
 void IHS_ClientStop(IHS_Client *client) {
     IHS_BaseInterruptWorker(&client->base);
+    IHS_BaseLock(&client->base);
+    IHS_CondSignal(client->receiveWake);
+    IHS_BaseUnlock(&client->base);
 }
 
 void IHS_ClientThreadedJoin(IHS_Client *client) {
@@ -163,6 +176,7 @@ void IHS_ClientDestroy(IHS_Client *client) {
     IHS_TimerDestroy(client->timers);
     free(client->authorizationCache.key);
     IHS_ClientLog(client, IHS_LogLevelInfo, "Client", "Destroying client, bye!");
+    IHS_CondDestroy(client->receiveWake);
     IHS_BaseDestroy(&client->base);
     free(client);
 }
@@ -364,6 +378,32 @@ static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
 
 static void ClientInitialized(IHS_Base *base, void *context) {
     (void)context;
-    IHS_UDPSocketSetBlocking(base->socket, true);
-    IHS_UDPSocketSetRecvTimeout(base->socket, 10000 /* 10ms */);
+    /* Official CDiscoverySocket::BInit requests O_NONBLOCK (@caddbc).
+     * CServerManagerNetworkWatcher schedules Update at 100ms (@c9643c). */
+    IHS_UDPSocketSetBlocking(base->socket, false);
+}
+
+static bool ClientReceiveCycle(IHS_Base *base, void *context, IHS_UDPPacket *packet) {
+    (void)context;
+    IHS_Client *client = (IHS_Client *)base;
+    uint64_t due = IHS_TimerNow() + 100;
+    while (!base->interrupted) {
+        int result = IHS_UDPSocketReceive(base->socket, packet);
+        /* Original BReceive @cae2c0 treats all nonpositive recvfrom results
+         * alike: end this Update's batch, retain socket for the next Update.
+         * This client owner differs from the media session's receiveCycle. */
+        if (result <= 0) break;
+        base->callbacks.received(base, &packet->address, &packet->buffer);
+        IHS_BufferClear(&packet->buffer, false);
+    }
+    IHS_BufferClear(&packet->buffer, false);
+    IHS_BaseLock(base);
+    while (!base->interrupted) {
+        uint64_t now = IHS_TimerNow();
+        if (now >= due) break;
+        IHS_CondWaitTimeout(client->receiveWake, base->lock, (uint32_t)(due - now));
+    }
+    bool running = !base->interrupted;
+    IHS_BaseUnlock(base);
+    return running;
 }

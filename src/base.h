@@ -55,6 +55,9 @@ typedef struct IHS_BaseRunCallbacks {
     /* Optional protocol-owned readiness/drain cycle. False terminates the
      * receive worker; socket/buffer remain owned by BaseWorker until join. */
     bool (*receiveCycle)(IHS_Base *, void *context, IHS_UDPPacket *);
+
+    /* Zero preserves the existing stream-cycle/default receive budget. */
+    size_t receiveCapacity;
 } IHS_BaseRunCallbacks;
 
 struct IHS_Base {

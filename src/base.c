@@ -208,6 +208,8 @@ static void BaseWorker(IHS_Base *base) {
     size_t receiveCapacity = base->callbacks.run && base->callbacks.run->receiveCycle
                                  ? IHS_STREAM_UDP_RECV_CAPACITY
                                  : 2048;
+    if (base->callbacks.run && base->callbacks.run->receiveCapacity)
+        receiveCapacity = base->callbacks.run->receiveCapacity;
     IHS_BufferInit(&recv.buffer, receiveCapacity, receiveCapacity);
     for (;;) {
         IHS_BaseLock(base);

@@ -63,6 +63,7 @@ struct IHS_Client {
     } authorizationQueue[32]; /* Local memory budget, not a Steam protocol limit. */
     unsigned authorizationHead, authorizationCount, authorizationDropped;
     IHS_Timer *timers;
+    IHS_Cond *receiveWake;
     IHS_TimerTask *discoveryTimer;
     uint32_t discoveryInterval;
     uint32_t discoverySeq;
