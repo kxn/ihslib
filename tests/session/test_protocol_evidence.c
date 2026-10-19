@@ -277,28 +277,35 @@ static void session_feedback_and_early_data(void) {
     IHS_SessionDestroy(s);
 }
 static void diagnostic_and_header_bounds(void) {
+#if IHSLIB_DIAGNOSTICS
     char out[4096];
     while (IHS_SessionChannelControlDrainPendingHIDReports(out, sizeof(out))) {}
+#endif
     IHS_Session *s = session_new();
     /* HID production is only legal after Streaming, unlike transport ACKs. */
     s->state.connectionState = IHS_SessionConnectionStateConnected;
     uint8_t bytes[512]; memset(bytes, 0x5a, sizeof(bytes));
     assert(IHS_SessionChannelControlSubmitHIDReport(s->channels[1], bytes, sizeof(bytes), true));
+#if IHSLIB_DIAGNOSTICS
     char small[2] = {'x', 'y'};
     assert(IHS_SessionChannelControlDrainPendingHIDReports(small, 1) == 0);
     assert(small[1] == 'y'); /* no dequeue and no write beyond cap */
     assert(IHS_SessionChannelControlDrainPendingHIDReports(out, sizeof(out)) > 1024);
     assert(strstr(out, "5a5a5a5a"));
     assert(IHS_SessionChannelControlDrainPendingHIDReports(out, sizeof(out)) == 0);
+#endif
     for (unsigned i = 0; i < 130; i++) {
         bytes[0] = i;
         assert(IHS_SessionChannelControlSubmitHIDReport(s->channels[1], bytes, 1, true));
     }
+    assert(((IHS_SessionChannelControl *)s->channels[1])->hidSent == 131);
+#if IHSLIB_DIAGNOSTICS
     size_t off = 0; uint64_t ms; uint16_t len; uint8_t recent[96];
     for (unsigned i = 0; i < 128; i++) {
         IHS_SessionChannelControlGetRecentHIDReports(&ms, &len, recent, &off);
         assert(len == 1 && recent[0] == 129-i);
     }
+#endif
     IHS_SessionDataFrameHeader header;
     IHS_Buffer b = IHS_BUFFER_INIT(16, 16);
     for (unsigned i = 0; i < 12; i++) {

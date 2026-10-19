@@ -76,6 +76,7 @@ IHS_SessionChannel *IHS_SessionChannelControlCreate(IHS_Session *session) {
 
 /* Bounded diagnostic snapshots. Wire length and truncation are explicit;
  * this is not a complete packet capture. Initialized before session workers. */
+#if IHSLIB_DIAGNOSTICS
 #define HID_REPORT_RING_LEN 128
 #define HID_REPORT_RING_CAP 96
 #define HID_PENDING_CAP     512
@@ -180,6 +181,7 @@ void IHS_SessionChannelControlGetRecentHIDReports(uint64_t *out_ms, uint16_t *ou
     }
     IHS_MutexUnlock(hidPendingLock);
 }
+#endif
 
 static IHS_SendAdmission ControlSendLocked(IHS_SessionChannelControl *control,
                                            EStreamControlMessage type,
@@ -299,8 +301,10 @@ bool IHS_SessionChannelControlSubmitHIDReport(IHS_SessionChannel *channel, const
                           IHS_PACKET_ID_NEXT, NULL);
     if (ret == IHS_SendAdmissionAccepted)
         control->hidSent++;
+#if IHSLIB_DIAGNOSTICS
     if (ret == IHS_SendAdmissionAccepted)
         HIDPendingPush(IHS_TimerNow(), data, dataLen);
+#endif
     IHS_MutexUnlock(control->sendLock);
     if (ret == IHS_SendAdmissionLocalFailure &&
         !atomic_load(&channel->session->transport.shutdown) &&

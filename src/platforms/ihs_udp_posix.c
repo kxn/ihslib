@@ -73,12 +73,14 @@ IHS_UDPSocket *IHS_UDPSocketOpen(bool broadcast) {
 #else
     setsockopt(s->fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 #endif
+#if IHSLIB_DIAGNOSTICS
     int actual = 0;
     socklen_t actualLen = sizeof(actual);
     if (getsockopt(s->fd, SOL_SOCKET, SO_RCVBUF, &actual, &actualLen) == 0 && actual < rcvbuf) {
         fprintf(stderr, "IHS_UDPSocketOpen: SO_RCVBUF capped at %d bytes (wanted %d); "
                         "raise net.core.rmem_max to avoid dropped video packets\n", actual, rcvbuf);
     }
+#endif
     if (broadcast) {
         uint32_t opt = 1;
         setsockopt(s->fd, SOL_SOCKET, SO_BROADCAST, (char *) &opt, sizeof(opt));

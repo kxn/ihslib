@@ -40,7 +40,9 @@ static bool initialized;
 void IHS_Init() {
     if (initialized)
         return;
+#if IHSLIB_DIAGNOSTICS
     IHS_ControlDiagnosticsInit();
+#endif
     initialized = true;
     IHS_TimerInit();
 }
@@ -49,7 +51,9 @@ void IHS_Quit() {
     if (!initialized)
         return;
     IHS_TimerQuit();
+#if IHSLIB_DIAGNOSTICS
     IHS_ControlDiagnosticsQuit();
+#endif
     initialized = false;
 }
 

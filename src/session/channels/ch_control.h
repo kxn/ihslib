@@ -72,10 +72,12 @@ bool IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamControlMe
 
 /** Drain SD-persisted HID report records (formatted lines) for the diag
  * writer; called from the diag disk thread only. */
+#if IHSLIB_DIAGNOSTICS
 size_t IHS_SessionChannelControlDrainPendingHIDReports(char *out, size_t cap);
 
 void IHS_SessionChannelControlGetRecentHIDReports(uint64_t *out_ms, uint16_t *out_len,
                                                   uint8_t *out_data, size_t *out_off);
+#endif
 
 /** Submit one ordered CHID report batch without waiting for earlier ACKs. */
 bool IHS_SessionChannelControlSubmitHIDReport(IHS_SessionChannel *channel,
@@ -130,8 +132,10 @@ void IHS_SessionChannelControlOnMessageReceived(IHS_SessionChannel *channel, ESt
                                                 IHS_Buffer *payload, const IHS_SessionPacketHeader *header);
 
 /* IHS_Init/Quit own the diagnostic mutex; all consumers must stop before Quit. */
+#if IHSLIB_DIAGNOSTICS
 void IHS_ControlDiagnosticsInit(void);
 void IHS_ControlDiagnosticsQuit(void);
+#endif
 
 void IHS_SessionChannelControlUpdateFeedback(IHS_SessionChannelControl *control);
 
