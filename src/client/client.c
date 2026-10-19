@@ -78,6 +78,8 @@ IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config) {
     if (!client) return NULL;
     memset(client, 0, sizeof(IHS_Client));
     client->authorizationCache.result = k_ERemoteDeviceAuthorizationFailed;
+    /* BStart's initial no-subscriber Update has advanced the discovery round. */
+    client->discoverySeq = 1;
     atomic_init(&client->deferAuthorization, false);
     IHS_BaseInit(&client->base, config, ClientRecvCallback, true);
     if (!client->base.lock) {
@@ -194,6 +196,7 @@ void IHS_ClientDestroy(IHS_Client *client) {
                                client->authorizationQueue[index].message);
     }
     IHS_TimerDestroy(client->timers);
+    free(client->discoveryTargets);
     free(client->authorizationCache.key);
     IHS_ClientLog(client, IHS_LogLevelInfo, "Client", "Destroying client, bye!");
     IHS_CondDestroy(client->receiveWake);

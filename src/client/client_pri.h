@@ -70,6 +70,10 @@ struct IHS_Client {
     IHS_TimerTask *discoveryTimer;
     uint32_t discoveryInterval;
     uint32_t discoverySeq;
+    IHS_DiscoveryTarget *discoveryTargets;
+    size_t discoveryTargetCount, discoveryClientIdCount;
+    uint64_t *discoveryClientIds; /* Tail of the same owned allocation. */
+    bool discoveryTargetsChanged; /* Consumed under Base before due selection. */
     struct {
         const IHS_ClientDiscoveryCallbacks *discovery;
         const IHS_ClientAuthorizationCallbacks *authorization;

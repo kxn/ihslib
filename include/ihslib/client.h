@@ -219,6 +219,27 @@ bool IHS_ClientStartDiscovery(IHS_Client *client, uint32_t interval);
 
 bool IHS_ClientStopDiscovery(IHS_Client *client);
 
+/** Local discovery subscription. Enable adds one broadcast owner and requests a
+ * fresh round; Disable balances one owner. The manager continues its wall-clock
+ * rounds (including saved targets) until client destruction/StopDiscovery.
+ * A full round is followed by at most two same-sequence fast sends. These APIs
+ * cannot share a task with the explicit-interval legacy StartDiscovery API. */
+bool IHS_ClientEnableDiscovery(IHS_Client *client);
+bool IHS_ClientDisableDiscovery(IHS_Client *client);
+bool IHS_ClientTriggerDiscovery(IHS_Client *client);
+
+typedef struct IHS_DiscoveryTarget {
+    uint64_t clientId; /* Zero is an address hint, not a directed identity. */
+    IHS_IPAddress ip;
+} IHS_DiscoveryTarget;
+
+/** Replace the owned local discovery snapshot. Requests use port 27036 and the
+ * current round sequence for all saved addresses and broadcast. When no broad
+ * subscription exists, the broadcast carries the unique nonzero client IDs.
+ * Failure retains the previous complete snapshot. No authentication change. */
+bool IHS_ClientSetDiscoveryTargets(IHS_Client *client,
+    const IHS_DiscoveryTarget *targets, size_t count);
+
 /* ----------------------------------------------------
  * - Authorization functions
  * ---------------------------------------------------- */
