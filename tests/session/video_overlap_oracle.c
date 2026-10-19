@@ -118,6 +118,12 @@ static void snapshotGate(IHS_Session *s) {
     if (gateCount++) putchar(',');
     snapshot(s, true);
 }
+static unsigned hexDigit(char value) {
+    if (value >= '0' && value <= '9') return (unsigned)(value - '0');
+    if (value >= 'a' && value <= 'f') return (unsigned)(value - 'a' + 10);
+    if (value >= 'A' && value <= 'F') return (unsigned)(value - 'A' + 10);
+    assert(false); return 0;
+}
 int main(int argc, char **argv) {
     assert(argc == 2 || (argc == 3 && (!strcmp(argv[2], "--stop") || !strcmp(argv[2], "--deadline"))));
     budgetMode = argc == 3 && !strcmp(argv[2], "--deadline");
@@ -142,22 +148,24 @@ int main(int argc, char **argv) {
     assert(heldCount==1 && !video->base.worker);
     recording=true; holdStartup=false;
     printf("{\"gates\":[");
-    char line[16384], raw[15000]; bool started=false;
-    while (fgets(line, sizeof(line), stdin)) {
+    char *line=NULL; size_t lineCapacity=0; bool started=false;
+    while (getline(&line, &lineCapacity, stdin)>=0) {
         if (line[0]=='F' || line[0]=='A') {
-            unsigned id,seq,flags,stamp;
-            assert(sscanf(line, "%*c %u %u %u %u %14999s", &id,&seq,&flags,&stamp,raw)==5);
-            size_t size=strlen(raw)/2; uint8_t bytes[7500];
-            assert(strlen(raw)==size*2);
-            for (size_t n=0;n<size;++n) {
-                unsigned byte; assert(sscanf(raw+n*2,"%2x",&byte)==1); bytes[n]=byte;
-            }
+            unsigned id,seq,flags,stamp; int offset=0;
+            assert(sscanf(line, "%*c %u %u %u %u %n", &id,&seq,&flags,&stamp,&offset)==4 && offset>0);
+            const char *raw=line+offset;
+            size_t hexSize=strcspn(raw,"\r\n"),size=hexSize/2;
+            assert(hexSize==size*2 && size && size<=2*1024*1024);
+            uint8_t *bytes=malloc(size); assert(bytes);
+            for (size_t n=0;n<size;++n)
+                bytes[n]=(uint8_t)((hexDigit(raw[n*2])<<4)|hexDigit(raw[n*2+1]));
             if (line[0]=='A') {
                 IHS_MutexLock(video->base.windowLock);
                 atomic_store(&idle,false);
                 IHS_MutexUnlock(video->base.windowLock);
             }
             enqueueStamped(channel,id,seq,flags,stamp,bytes,size);
+            free(bytes);
             if (line[0]=='A') waitBoundary();
         } else if (line[0]=='S') {
             assert(!started); started=true; atomic_store(&idle,false);
@@ -179,6 +187,7 @@ int main(int argc, char **argv) {
             printf("],\"stopped\":true,\"joined\":true,\"released\":%s}\n",
                    !heldCount && !haveBackend ? "true" : "false");
             for (unsigned n=0;n<flowCount;++n) free(flow[n]);
+            free(line);
             assert(!pthread_cond_destroy(&gateCond) && !pthread_mutex_destroy(&gateMutex));
             return 0;
         } else {
@@ -187,6 +196,7 @@ int main(int argc, char **argv) {
             snapshotGate(s); resumeOne();
         }
     }
+    free(line);
     assert(started);
     /* Drain any extra submissions from a regression with no further producer
      * input. Normal exits, rather than fixture hangs, must expose wrong output. */

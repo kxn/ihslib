@@ -142,7 +142,8 @@ static void enqueueStamped(IHS_SessionChannel *ch, unsigned id, unsigned seq, un
                                      .sendTimestamp = 1000000,
                                      .receiveTimestamp = 1000000,
                                      .receiveBegin = 1000000}};
-    IHS_BufferInit(&f.body, 64, 65536);
+    /* Fixture storage must include the media envelope as well as a full AU. */
+    IHS_BufferInit(&f.body, 64, 2 * 1024 * 1024 + 20);
     IHS_BufferAppendUInt8(&f.body, k_EStreamDataPacket);
     IHS_BufferAppendUInt16LE(&f.body, id);
     IHS_BufferAppendUInt32LE(&f.body, stamp);
