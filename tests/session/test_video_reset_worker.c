@@ -317,9 +317,11 @@ int main(void) {
     assert(!pthread_create(&releaser, NULL, releaseDuringJoin, NULL));
     cycle(s);
     assert(!pthread_join(releaser, NULL));
-    /* Stop interrupted the decoder before its next OnThink, but joined the
-     * current input release. This is consumption, not a submitted image. */
-    assert(atomic_load(&decoderInputsConsumed) == 5);
+    /* Original RunDecodeLoop finishes the active FIFO batch before sampling
+     * active after OnThink/Wait. Inputs 5/6/7 are consumed/released before join;
+     * the pending reset still gates backend submission. This does not mean seven displayed images. */
+    assert(atomic_load(&decoderInputsConsumed) == 7);
+    assert(!video->fecQueuedCount && !video->fecQueuedBytes);
     assert(submissions == 1 && stops == 2 && starts == 3 && prepares == 1 && lost == 2);
     assert(active.video_epoch == 3 && video->receive == rx &&
            slots == IHS_SessionPacketsWindowSize(rx->window));
@@ -337,7 +339,7 @@ int main(void) {
     held = NULL;
     blockFlush = false;
     feed(s, 8, 7, true);
-    waitProcessed(6);
+    waitProcessed(8);
     failWorker = true;
     cycle(s); /* OS Start failure retains actor and bounded queue. */
     assert(!worker && starts == 4 && infos == 3 && lost == 3 && !video->interrupted);
@@ -352,7 +354,7 @@ int main(void) {
     control(s, k_EStreamControlStartVideoData, &m.base);
     video = (void *)IHS_SessionChannelForType(s, IHS_SessionChannelTypeDataVideo);
     feed(s, 10, 0, true);
-    waitProcessed(7);
+    waitProcessed(9);
     cancelOnStop = true;
     s->base.callbacks.run->update(&s->base, s->base.callbackContexts.run);
     assert(s->base.interrupted && starts == 5 && stops == 5 && lost == 3 && !worker);
