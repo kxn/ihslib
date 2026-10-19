@@ -13,6 +13,7 @@
 
 #include <pthread.h>
 #include <stdlib.h>
+#include <errno.h>
 
 struct IHS_Thread {
     pthread_t tid;
@@ -110,8 +111,13 @@ void IHS_CondSignal(IHS_Cond *cond) {
     pthread_cond_signal(&cond->cond);
 }
 
+static bool CondWakeResult(int result) {
+    /* An interrupted wait is transient, like a spurious wake: the caller
+     * must recheck its predicate/deadline rather than treating it as timeout. */
+    return result == 0 || result == EINTR;
+}
 bool IHS_CondWait(IHS_Cond *cond, IHS_Mutex *mutex) {
-    return pthread_cond_wait(&cond->cond, &mutex->mutex) == 0;
+    return CondWakeResult(pthread_cond_wait(&cond->cond, &mutex->mutex));
 }
 
 bool IHS_CondWaitTimeout(IHS_Cond *cond, IHS_Mutex *mutex, uint32_t milliseconds) {
@@ -123,5 +129,5 @@ bool IHS_CondWaitTimeout(IHS_Cond *cond, IHS_Mutex *mutex, uint32_t milliseconds
         until.tv_nsec -= 1000000000;
         until.tv_sec++;
     }
-    return pthread_cond_timedwait(&cond->cond, &mutex->mutex, &until) == 0;
+    return CondWakeResult(pthread_cond_timedwait(&cond->cond, &mutex->mutex, &until));
 }

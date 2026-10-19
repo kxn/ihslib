@@ -48,6 +48,7 @@ typedef struct IHS_SessionChannelData {
     IHS_UnreliableChannel *receive; /* borrowed from the connection */
     IHS_Mutex *windowLock; /* consumer FIFO lock; transport has receive->lock */
     IHS_Cond *windowCond;
+    bool decoderWakePending; /* windowLock: auto-reset decoder event, not a cond signal. */
 
     IHS_Thread *worker;
     atomic_bool interrupted;

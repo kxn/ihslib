@@ -32,6 +32,7 @@
 #include "session/session_pri.h"
 
 #include "ihs_buffer_ext.h"
+#include "ihs_timer.h"
 
 static void DataThreadWorker(IHS_SessionChannelData *channel);
 
@@ -62,7 +63,7 @@ static bool PollFEC(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
     return true;
 }
 
-static void QueueFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
+static bool QueueFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame) {
     /* Official client OnStreamPacket 7ad00c..7ad01c: transport windows,
      * reconstruction and feedback still run while paused; gate complete data
      * frames before handing them to the media consumer. Frames already owned
@@ -72,12 +73,12 @@ static void QueueFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame)
         (session->state.connectionState != IHS_SessionConnectionStateConnected ||
          session->transport.clientPaused)) {
         IHS_BufferClear(&frame->body, true);
-        return;
+        return false;
     }
     size_t size = frame->body.capacity + sizeof(IHS_FECFrameNode);
     if (size > channel->fecQueueLimit) {
         IHS_BufferClear(&frame->body, true);
-        return;
+        return false;
     }
     while (channel->fecHead &&
            (channel->fecQueuedBytes + size > channel->fecQueueLimit ||
@@ -89,7 +90,7 @@ static void QueueFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame)
     IHS_FECFrameNode *node = malloc(sizeof(*node));
     if (!node) {
         IHS_BufferClear(&frame->body, true);
-        return;
+        return false;
     }
     *node = (IHS_FECFrameNode){.frame = *frame};
     if (channel->fecTail)
@@ -100,6 +101,7 @@ static void QueueFrame(IHS_SessionChannelData *channel, IHS_SessionFrame *frame)
     channel->fecQueuedBytes += size;
     channel->fecQueuedCount++;
     memset(frame, 0, sizeof(*frame));
+    return true;
 }
 
 IHS_SessionChannel *IHS_SessionChannelDataCreate(const IHS_SessionChannelDataClass *cls,
@@ -114,6 +116,7 @@ bool IHS_SessionChannelDataInit(IHS_SessionChannel *channel, uint16_t windowCapa
     dataCh->lock = IHS_MutexCreate();
     dataCh->windowLock = IHS_MutexCreate();
     dataCh->windowCond = IHS_CondCreate();
+    dataCh->decoderWakePending = false;
     dataCh->receive = IHS_SessionUnreliableGet(channel->session, channel->id, windowCapacity);
     if (dataCh->receive)
         dataCh->receive->maxReceiveDelay = 6553; /* StartAudio/VideoData setter */
@@ -244,8 +247,10 @@ void IHS_SessionChannelDataReceiveReliableFrame(IHS_SessionChannel *channel,
         IHS_SessionFrame owned = {.header = frame->header, .mediaOffset = frame->mediaOffset,
                                    .mediaPrepared = frame->mediaPrepared};
         IHS_BufferTransferOwnership(&frame->body, &owned.body);
-        QueueFrame(data, &owned);
-        IHS_CondSignal(data->windowCond);
+        if (QueueFrame(data, &owned)) {
+            data->decoderWakePending = true;
+            IHS_CondSignal(data->windowCond);
+        }
     }
     IHS_MutexUnlock(data->windowLock);
 }
@@ -254,6 +259,25 @@ bool IHS_SessionChannelDataPollLocked(IHS_SessionChannelData *channel, IHS_Sessi
                                        uint16_t *missing) {
     *missing = 0;
     return PollFEC(channel, frame);
+}
+
+/* Caller holds windowLock. Original auto-reset event retains Set before Wait
+ * and consumes it on return; spurious cond wakes do not authorize OnThink. */
+static void WaitForDecoderEvent(IHS_SessionChannelData *channel, uint32_t timeout) {
+    uint64_t start = timeout != UINT32_MAX ? IHS_TimerNow() : 0;
+    while (!channel->interrupted && !channel->fecHead && !channel->decoderWakePending && timeout) {
+        bool woke;
+        if (timeout == UINT32_MAX) {
+            woke = IHS_CondWait(channel->windowCond, channel->windowLock);
+        } else {
+            uint64_t elapsed = IHS_TimerNow() - start;
+            if (elapsed >= timeout) break;
+            woke = IHS_CondWaitTimeout(channel->windowCond, channel->windowLock,
+                                       timeout - (uint32_t)elapsed);
+        }
+        if (!woke) break; /* Timeout/error, like the original platform boundary. */
+    }
+    channel->decoderWakePending = false;
 }
 
 static void DataThreadWorker(IHS_SessionChannelData *channel) {
@@ -292,7 +316,9 @@ static void DataThreadWorker(IHS_SessionChannelData *channel) {
         IHS_MutexLock(channel->windowLock);
         /* Cond signals are not persistent events. Recheck under the producer's
          * mutex so input/stop during OnThink cannot be followed by a lost wait. */
-        if (!channel->interrupted && !channel->fecHead) {
+        if (cls->think) {
+            WaitForDecoderEvent(channel, timeout);
+        } else if (!channel->interrupted && !channel->fecHead) {
             if (timeout == UINT32_MAX)
                 IHS_CondWait(channel->windowCond, channel->windowLock);
             else if (timeout)
@@ -313,8 +339,12 @@ static void DataThreadInterrupt(IHS_SessionChannelData *channel, bool restarting
     if (!channel->worker || channel->interrupted) {
         /* OnStreamStopped 76716c clears active even when OS Start failed.
          * Partial initialization may not have created/initialized this FIFO. */
-        if (channel->windowLock)
+        if (channel->windowLock) {
+            IHS_MutexLock(channel->windowLock);
             atomic_store(&channel->interrupted, true);
+            channel->decoderWakePending = true;
+            IHS_MutexUnlock(channel->windowLock);
+        }
         return;
     }
     IHS_MutexLock(channel->lock);
@@ -322,6 +352,7 @@ static void DataThreadInterrupt(IHS_SessionChannelData *channel, bool restarting
     IHS_MutexUnlock(channel->lock);
 
     IHS_MutexLock(channel->windowLock);
+    channel->decoderWakePending = true;
     IHS_CondSignal(channel->windowCond);
     IHS_MutexUnlock(channel->windowLock);
 }

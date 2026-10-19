@@ -52,6 +52,7 @@ void IHS_CondDestroy(IHS_Cond *cond);
 
 void IHS_CondSignal(IHS_Cond *cond);
 
+/* True includes transient/interrupted/spurious wake. Recheck the predicate. */
 bool IHS_CondWait(IHS_Cond *cond, IHS_Mutex *mutex);
 
 /* Bounded wait; caller always rechecks its predicate, including on timeout. */

@@ -17,6 +17,7 @@
 static bool holdStartup = true;
 static atomic_bool idle, inThink, releaseThink;
 static bool wakeMode;
+static atomic_uint actualThinks;
 static unsigned waits[IHS_VIDEO_QUEUE_OBSERVATIONS][2], waitCount, consumed[IHS_VIDEO_QUEUE_OBSERVATIONS][2], consumedCount;
 #ifdef IHS_VIDEO_IDENTITY_OBSERVER
 static unsigned completions[4096][3], completionCount;
@@ -65,7 +66,16 @@ IHS_Thread *__wrap_IHS_ThreadCreate(IHS_ThreadFunction *fn, const char *name, vo
 }
 bool __real_IHS_CondWait(IHS_Cond *, IHS_Mutex *);
 bool __real_IHS_CondWaitTimeout(IHS_Cond *, IHS_Mutex *, uint32_t);
+#ifdef IHS_VIDEO_BUDGET_OBSERVER
+bool IHS_TestDecoderTimedWait(uint32_t, bool *);
+#endif
 static void recordWait(uint32_t ms) {
+#ifndef IHS_VIDEO_REAL_WAITS
+    if (!wakeMode) {
+        if (ms == UINT32_MAX) atomic_store(&idle, true);
+        return;
+    }
+#endif
     assert(waitCount < IHS_VIDEO_QUEUE_OBSERVATIONS);
     waits[waitCount][0] = action;
     waits[waitCount++][1] = ms;
@@ -80,6 +90,13 @@ bool __wrap_IHS_CondWait(IHS_Cond *c, IHS_Mutex *m) {
 bool __wrap_IHS_CondWaitTimeout(IHS_Cond *c, IHS_Mutex *m, uint32_t ms) {
     if (video && c == video->base.windowCond)
         recordWait(ms);
+#ifdef IHS_VIDEO_BUDGET_OBSERVER
+    if (video && c == video->base.windowCond) {
+        bool handled;
+        bool result = IHS_TestDecoderTimedWait(ms, &handled);
+        if (handled) return result;
+    }
+#endif
     return __real_IHS_CondWaitTimeout(c, m, ms);
 }
 void __real_IHS_SessionChannelDataReceiveFrame(IHS_SessionChannelData *, IHS_SessionFrame *);
@@ -94,7 +111,21 @@ void __wrap_IHS_SessionChannelDataReceiveFrame(IHS_SessionChannelData *ch, IHS_S
 }
 uint32_t __real_IHS_SessionChannelDataThink(IHS_SessionChannel *);
 uint32_t __wrap_IHS_SessionChannelDataThink(IHS_SessionChannel *ch) {
+    if (recording) atomic_fetch_add(&actualThinks, 1);
     uint32_t timeout = __real_IHS_SessionChannelDataThink(ch);
+#ifndef IHS_VIDEO_REAL_WAITS
+    if (!wakeMode && recording) {
+        /* Match the older Source fixture's explicit Wait terminal. It stops
+         * on first idle/reset return; it does not emulate an OS event loop. */
+        assert(waitCount < IHS_VIDEO_QUEUE_OBSERVATIONS);
+        waits[waitCount][0] = action;
+        waits[waitCount++][1] = timeout;
+        if (timeout == UINT32_MAX || !timeout) {
+            atomic_store(&idle, true);
+            while (!((IHS_SessionChannelData *)ch)->interrupted) usleep(1000);
+        }
+    }
+#endif
     if (wakeMode && consumedCount == 1) {
         /* Pause after the real SDK/assembly call, before the FIFO recheck. */
         atomic_store(&inThink, true);
@@ -180,6 +211,7 @@ static void reportQueue(IHS_Session *session) {
     puts("]}");
 #endif
 }
+#ifndef IHS_VIDEO_QUEUE_EXTERNAL_MAIN
 int main(int argc, char **argv) {
     assert(argc == 2 || (argc == 3 && !strcmp(argv[2], "--wake")));
     wakeMode = argc == 3;
@@ -280,3 +312,4 @@ int main(int argc, char **argv) {
         free(flow[n]);
     return 0;
 }
+#endif

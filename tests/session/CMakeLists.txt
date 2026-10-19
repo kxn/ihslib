@@ -113,6 +113,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         -Wl,--wrap=IHS_SessionSendControlMessage -Wl,--wrap=IHS_SessionChannelDataLost)
     add_test(NAME video_content_mode_capacity COMMAND ihs-video-content-mode-oracle --capacity)
     set_tests_properties(video_content_mode_capacity PROPERTIES TIMEOUT 10)
+    add_executable(ihs-video-overlap-oracle video_overlap_oracle.c)
+    target_include_directories(ihs-video-overlap-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-video-overlap-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-video-overlap-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-video-overlap-oracle PRIVATE -Wl,--wrap=IHS_SessionChannelDataThink
+        -Wl,--wrap=IHS_SessionChannelDataReceiveFrame -Wl,--wrap=IHS_ThreadCreate
+        -Wl,--wrap=IHS_CondWait -Wl,--wrap=IHS_CondWaitTimeout
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_SessionSendControlMessage
+        -Wl,--wrap=IHS_SessionChannelDataLost -Wl,--wrap=IHS_TimerNow -Wl,--wrap=pthread_cond_wait)
     add_executable(ihs-frame-reuse-oracle frame_reuse_oracle.c)
     target_include_directories(ihs-frame-reuse-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-frame-reuse-oracle PRIVATE ihslib)
