@@ -8,14 +8,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef IHS_VIDEO_FLOW_CAPACITY
+#define IHS_VIDEO_FLOW_CAPACITY 96
+#endif
+#ifndef IHS_VIDEO_HELD_CAPACITY
+#define IHS_VIDEO_HELD_CAPACITY 32
+#endif
 static bool initialBackend, ready, haveBackend, recording;
 static unsigned starts, action, flowCount, heldCount;
-static char *flow[96];
-static IHS_FrameTicket *held[32];
-static uint16_t pictures[32];
+static char *flow[IHS_VIDEO_FLOW_CAPACITY];
+static IHS_FrameTicket *held[IHS_VIDEO_HELD_CAPACITY];
+static uint16_t pictures[IHS_VIDEO_HELD_CAPACITY];
 static IHS_SessionChannelVideo *video;
 static FILE *event(void) {
-    assert(flowCount < 96);
+    assert(flowCount < IHS_VIDEO_FLOW_CAPACITY);
     size_t size;
     FILE *f = open_memstream(&flow[flowCount++], &size);
     assert(f);
@@ -97,7 +103,7 @@ static IHS_StreamVideoSubmitResult submit(IHS_Session *s, const IHS_VideoEpochIn
     IHS_FrameIdentity identity = IHS_FrameTicketIdentity(ticket);
     assert(identity.frameId == id && identity.epoch == e->video_epoch);
 #endif
-    assert(heldCount < 32 && IHS_FrameTicketRetain(ticket));
+    assert(heldCount < IHS_VIDEO_HELD_CAPACITY && IHS_FrameTicketRetain(ticket));
     held[heldCount] = ticket;
     pictures[heldCount++] = id;
     *taken = true;

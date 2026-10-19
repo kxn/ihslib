@@ -11,10 +11,13 @@
 #include <stdatomic.h>
 #include <unistd.h>
 
+#ifndef IHS_VIDEO_QUEUE_OBSERVATIONS
+#define IHS_VIDEO_QUEUE_OBSERVATIONS 100
+#endif
 static bool holdStartup = true;
 static atomic_bool idle, inThink, releaseThink;
 static bool wakeMode;
-static unsigned waits[100][2], waitCount, consumed[100][2], consumedCount;
+static unsigned waits[IHS_VIDEO_QUEUE_OBSERVATIONS][2], waitCount, consumed[IHS_VIDEO_QUEUE_OBSERVATIONS][2], consumedCount;
 
 IHS_Thread *__real_IHS_ThreadCreate(IHS_ThreadFunction *, const char *, void *);
 IHS_Thread *__wrap_IHS_ThreadCreate(IHS_ThreadFunction *fn, const char *name, void *ctx) {
@@ -25,7 +28,7 @@ IHS_Thread *__wrap_IHS_ThreadCreate(IHS_ThreadFunction *fn, const char *name, vo
 bool __real_IHS_CondWait(IHS_Cond *, IHS_Mutex *);
 bool __real_IHS_CondWaitTimeout(IHS_Cond *, IHS_Mutex *, uint32_t);
 static void recordWait(uint32_t ms) {
-    assert(waitCount < 100);
+    assert(waitCount < IHS_VIDEO_QUEUE_OBSERVATIONS);
     waits[waitCount][0] = action;
     waits[waitCount++][1] = ms;
     if (ms == UINT32_MAX)
@@ -46,7 +49,7 @@ void __wrap_IHS_SessionChannelDataReceiveFrame(IHS_SessionChannelData *ch, IHS_S
     uint16_t id;
     assert(f->body.size >= 13 && *IHS_BufferPointer(&f->body) == k_EStreamDataPacket);
     IHS_ReadUInt16LE(IHS_BufferPointerAt(&f->body, 1), &id);
-    assert(consumedCount < 100);
+    assert(consumedCount < IHS_VIDEO_QUEUE_OBSERVATIONS);
     consumed[consumedCount][0] = action;
     consumed[consumedCount++][1] = id;
     __real_IHS_SessionChannelDataReceiveFrame(ch, f);
@@ -84,7 +87,10 @@ static void enqueue(IHS_SessionChannel *ch, unsigned id, unsigned seq, unsigned 
     assert(IHS_SessionDeliverReliableFrame(ch->session, &f) == IHS_ReliableData);
     IHS_SessionFrameClear(&f, true);
 }
-static void reportQueue(void) {
+static void reportQueue(IHS_Session *session) {
+#ifndef IHS_VIDEO_PRESSURE_OBSERVER
+    (void)session;
+#endif
     printf("{\"strict\":%u,\"soft\":%u,\"request\":%u,\"body\":\"", video->states.waitingKeyFrame,
            video->states.syncingBacklog, atomic_load(&video->resetRequested));
     for (size_t n = 0; n < video->frame.buffer.size; ++n)
@@ -101,7 +107,13 @@ static void reportQueue(void) {
     printf("],\"dequeued\":[");
     for (unsigned n = 0; n < consumedCount; ++n)
         printf("%s[%u,%u]", n ? "," : "", consumed[n][0], consumed[n][1]);
+#ifdef IHS_VIDEO_PRESSURE_OBSERVER
+    printf("],\"closed\":%s,\"tracker_capacity\":%zu}\n",
+           session->base.interrupted ? "true" : "false",
+           IHS_FrameTrackerStorageCapacity(session->frameTracker));
+#else
     puts("]}");
+#endif
 }
 int main(int argc, char **argv) {
     assert(argc == 2 || (argc == 3 && !strcmp(argv[2], "--wake")));
@@ -145,9 +157,9 @@ int main(int argc, char **argv) {
         assert(atomic_load(&inThink));
         enqueue(ch, 2, 2, 8, primer, sizeof(primer));
         atomic_store(&releaseThink, true);
-        for (unsigned n = 0; n < 5000 && !atomic_load(&idle); ++n)
+        for (unsigned n = 0; n < 5000 && !atomic_load(&idle) && !s->base.interrupted; ++n)
             usleep(1000);
-        assert(atomic_load(&idle));
+        assert(atomic_load(&idle) || s->base.interrupted);
         IHS_SessionChannelDataJoinAndPurge(&video->base, true);
         assert(consumedCount == 2 && heldCount == 3 && pictures[1] == 1 && pictures[2] == 2);
         puts("Decoder input during OnThink: no lost wake, worker joined");
@@ -171,12 +183,13 @@ int main(int argc, char **argv) {
             atomic_store(&idle, false);
             IHS_SessionChannelDataRestartWorker(&video->base);
             assert(video->base.worker);
-            for (unsigned n = 0; n < 5000 && !atomic_load(&idle); ++n)
+            for (unsigned n = 0; n < 5000 && !atomic_load(&idle) && !s->base.interrupted; ++n)
                 usleep(1000);
-            assert(atomic_load(&idle));
+            assert(atomic_load(&idle) || s->base.interrupted);
             IHS_SessionChannelDataJoinAndPurge(&video->base, true);
             assert(!video->base.worker && !video->base.fecQueuedCount);
-            reportQueue();
+            reportQueue(s);
+            if (s->base.interrupted) break;
             ++action;
             /* Resume input admission at the same explicit Source loop boundary. */
             atomic_store(&video->base.interrupted, false);

@@ -18,10 +18,15 @@ struct IHS_FrameTicket {
     uint64_t completionSerial;
     uint32_t completionTimestamp;
     bool statsConsumed; /* owner lock */
+    bool statsReusable; /* completed snapshot observed with no external refs */
     bool hasVideoTimestamp; /* owner lock, independent of receive statistics */
     uint32_t videoTimestamp;
     bool videoDecodeActive, videoDecodeEnded; /* owner lock */
 };
+typedef struct IHS_FrameTicketBlock {
+    struct IHS_FrameTicketBlock *next;
+    IHS_FrameTicket records[IHS_FRAME_TRACKER_CAPACITY];
+} IHS_FrameTicketBlock;
 struct IHS_FrameTracker {
     IHS_Mutex *lock;
     atomic_uint refs;
@@ -30,8 +35,29 @@ struct IHS_FrameTracker {
     bool accepting, haveSequence, statsTracking;
     uint64_t seen[IHS_FRAME_TRACKER_CAPACITY];
     bool seenValid[IHS_FRAME_TRACKER_CAPACITY];
-    IHS_FrameTicket records[IHS_FRAME_TRACKER_CAPACITY];
+    IHS_FrameTicketBlock first, *last;
+    size_t storageCapacity;
 };
+typedef struct {
+    IHS_FrameTicketBlock *block;
+    size_t index;
+} RecordIterator;
+static IHS_FrameTicket *next_record(RecordIterator *it) {
+    if (!it->block) return NULL;
+    IHS_FrameTicket *r = &it->block->records[it->index++];
+    if (it->index == IHS_FRAME_TRACKER_CAPACITY) {
+        it->block = it->block->next;
+        it->index = 0;
+    }
+    return r;
+}
+static void init_block(IHS_FrameTracker *t, IHS_FrameTicketBlock *block) {
+    for (size_t i = 0; i < IHS_FRAME_TRACKER_CAPACITY; ++i) {
+        block->records[i].owner = t;
+        atomic_init(&block->records[i].refs, 0);
+        atomic_init(&block->records[i].publication, CLOSED);
+    }
+}
 static bool retain_ref(atomic_uint *ref) {
     unsigned n = atomic_load_explicit(ref, memory_order_relaxed);
     while (n && n != UINT_MAX) {
@@ -43,6 +69,12 @@ static bool retain_ref(atomic_uint *ref) {
 }
 static void release_endpoint(IHS_FrameTracker *t) {
     if (atomic_fetch_sub_explicit(&t->refs, 1, memory_order_acq_rel) == 1) {
+        IHS_FrameTicketBlock *block = t->first.next;
+        while (block) {
+            IHS_FrameTicketBlock *next = block->next;
+            free(block);
+            block = next;
+        }
         IHS_MutexDestroy(t->lock);
         free(t);
     }
@@ -61,17 +93,16 @@ IHS_FrameTracker *IHS_FrameTrackerCreate(uint64_t sessionId) {
     atomic_init(&t->refs, 1);
     atomic_init(&t->completions, 0);
     t->sessionId = sessionId;
-    for (size_t i = 0; i < IHS_FRAME_TRACKER_CAPACITY; ++i) {
-        t->records[i].owner = t;
-        atomic_init(&t->records[i].refs, 0);
-        atomic_init(&t->records[i].publication, CLOSED);
-    }
+    init_block(t, &t->first);
+    t->last = &t->first;
+    t->storageCapacity = IHS_FRAME_TRACKER_CAPACITY;
     return t;
 }
 static void close_epoch(IHS_FrameTracker *t) {
     t->accepting = false;
-    for (size_t i = 0; i < IHS_FRAME_TRACKER_CAPACITY; ++i) {
-        IHS_FrameTicket *r = &t->records[i];
+    RecordIterator it = {.block = &t->first};
+    IHS_FrameTicket *r;
+    while ((r = next_record(&it))) {
         if (!r->occupied)
             continue;
         int state = OPEN;
@@ -184,9 +215,10 @@ IHS_FrameBeginResult IHS_FrameTrackerBegin(IHS_FrameTracker *t, uint64_t epoch, 
             seq = t->highestSequence - back;
         }
     }
-    IHS_FrameTicket *freeRecord = NULL;
-    for (size_t i = 0; i < IHS_FRAME_TRACKER_CAPACITY; ++i) {
-        IHS_FrameTicket *r = &t->records[i];
+    IHS_FrameTicket *freeRecord = NULL, *collectedRecord = NULL;
+    RecordIterator it = {.block = &t->first};
+    IHS_FrameTicket *r;
+    while ((r = next_record(&it))) {
         if (r->occupied && r->frame.identity.epoch == epoch &&
             r->frame.identity.wireSequence == seq) {
             if (r->settled || atomic_load_explicit(&r->publication, memory_order_acquire) != OPEN) {
@@ -218,15 +250,38 @@ IHS_FrameBeginResult IHS_FrameTrackerBegin(IHS_FrameTracker *t, uint64_t epoch, 
             atomic_load_explicit(&r->refs, memory_order_acquire) == 0 &&
             r->frame.identity.slotVersion != UINT64_MAX)
             freeRecord = r;
+        /* CopyStats may only grant reuse when READY and refs==0 together:
+         * no producer can then append a late stage to that copied snapshot.
+         * Prefer unused/settled records so ordinary observer history remains
+         * available until actual pressure, as before. */
+        if (!collectedRecord && r->occupied && !r->settled &&
+            r->frame.identity.slotVersion != UINT64_MAX &&
+            atomic_load_explicit(&r->refs, memory_order_acquire) == 0 &&
+            atomic_load_explicit(&r->publication, memory_order_acquire) == READY &&
+            (!t->statsTracking || (r->statsConsumed && r->statsReusable)))
+            collectedRecord = r;
     }
     size_t seenIndex = seq % IHS_FRAME_TRACKER_CAPACITY;
     if (t->seenValid[seenIndex] && t->seen[seenIndex] == seq) {
         result = IHS_FrameBeginStale;
         goto done;
     }
+    if (!freeRecord) freeRecord = collectedRecord;
     if (!freeRecord) {
-        result = IHS_FrameBeginCapacity;
-        goto done;
+        if (t->storageCapacity > SIZE_MAX - IHS_FRAME_TRACKER_CAPACITY) {
+            result = IHS_FrameBeginExhausted;
+            goto done;
+        }
+        IHS_FrameTicketBlock *block = calloc(1, sizeof(*block));
+        if (!block) {
+            result = IHS_FrameBeginCapacity; /* Actual allocation failure. */
+            goto done;
+        }
+        init_block(t, block);
+        t->last->next = block;
+        t->last = block;
+        t->storageCapacity += IHS_FRAME_TRACKER_CAPACITY;
+        freeRecord = &block->records[0];
     }
     if (t->serial == UINT64_MAX || !retain_ref(&t->refs)) {
         result = IHS_FrameBeginExhausted;
@@ -241,6 +296,7 @@ IHS_FrameBeginResult IHS_FrameTrackerBegin(IHS_FrameTracker *t, uint64_t epoch, 
     freeRecord->occupied = true;
     freeRecord->settled = false;
     freeRecord->statsConsumed = false;
+    freeRecord->statsReusable = false;
     atomic_store_explicit(&freeRecord->refs, 1, memory_order_relaxed);
     atomic_store_explicit(&freeRecord->publication, OPEN, memory_order_release);
     t->seenValid[seenIndex] = true;
@@ -290,8 +346,9 @@ size_t IHS_FrameTrackerCopyStats(IHS_FrameTracker *t, IHS_TrackedFrame *out, siz
     IHS_MutexLock(t->lock);
     t->statsTracking = true;
     if (t->accepting) {
-        for (size_t i = 0; i < IHS_FRAME_TRACKER_CAPACITY && count < capacity; ++i) {
-            IHS_FrameTicket *r = &t->records[i];
+        RecordIterator it = {.block = &t->first};
+        IHS_FrameTicket *r;
+        while (count < capacity && (r = next_record(&it))) {
             if (!r->occupied || r->settled || r->frame.identity.epoch != t->epoch)
                 continue;
             out[count] = r->frame;
@@ -302,18 +359,28 @@ size_t IHS_FrameTrackerCopyStats(IHS_FrameTracker *t, IHS_TrackedFrame *out, siz
                 out[count].completionTimestamp = r->completionTimestamp;
                 r->statsConsumed = true;
             }
+            if (atomic_load_explicit(&r->publication, memory_order_acquire) == READY &&
+                atomic_load_explicit(&r->refs, memory_order_acquire) == 0)
+                r->statsReusable = true;
             ++count;
         }
     }
     IHS_MutexUnlock(t->lock);
     return count;
 }
+size_t IHS_FrameTrackerStorageCapacity(IHS_FrameTracker *t) {
+    IHS_MutexLock(t->lock);
+    size_t capacity = t->storageCapacity;
+    IHS_MutexUnlock(t->lock);
+    return capacity;
+}
 size_t IHS_FrameTrackerSettle(IHS_FrameTracker *t, uint64_t nowUs, uint64_t timeoutUs,
                               IHS_TrackedFrame *out, size_t capacity) {
     size_t count = 0;
     IHS_MutexLock(t->lock);
-    for (size_t i = 0; i < IHS_FRAME_TRACKER_CAPACITY && count < capacity; ++i) {
-        IHS_FrameTicket *r = &t->records[i];
+    RecordIterator it = {.block = &t->first};
+    IHS_FrameTicket *r;
+    while (count < capacity && (r = next_record(&it))) {
         if (!r->occupied || r->settled)
             continue;
         int state = atomic_load_explicit(&r->publication, memory_order_acquire);

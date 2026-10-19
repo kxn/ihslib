@@ -113,6 +113,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         -Wl,--wrap=IHS_SessionSendControlMessage -Wl,--wrap=IHS_SessionChannelDataLost)
     add_test(NAME video_content_mode_capacity COMMAND ihs-video-content-mode-oracle --capacity)
     set_tests_properties(video_content_mode_capacity PROPERTIES TIMEOUT 10)
+    add_executable(ihs-video-pressure-oracle video_pressure_oracle.c)
+    target_include_directories(ihs-video-pressure-oracle PRIVATE ${TEST_INCLUDES})
+    target_link_libraries(ihs-video-pressure-oracle PRIVATE ihs-test-session ihslib)
+    target_compile_options(ihs-video-pressure-oracle PRIVATE -UNDEBUG -Wall -Wextra -Werror=format)
+    target_link_options(ihs-video-pressure-oracle PRIVATE -Wl,--wrap=IHS_SessionChannelDataThink
+        -Wl,--wrap=IHS_SessionChannelDataReceiveFrame -Wl,--wrap=IHS_ThreadCreate
+        -Wl,--wrap=IHS_CondWait -Wl,--wrap=IHS_CondWaitTimeout
+        -Wl,--wrap=IHS_SessionPacketTimestamp -Wl,--wrap=IHS_SessionSendControlMessage
+        -Wl,--wrap=IHS_SessionChannelDataLost)
     add_executable(ihs-video-queue-oracle video_queue_oracle.c)
     target_include_directories(ihs-video-queue-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-video-queue-oracle PRIVATE ihs-test-session ihslib)
@@ -331,6 +340,11 @@ target_link_libraries(ihstest_game_activity PRIVATE ihs-test-session)
 ihs_add_test(launch_transactions test_launch_transactions.c)
 target_link_libraries(ihstest_launch_transactions PRIVATE ihs-test-session)
 target_link_options(ihstest_launch_transactions PRIVATE -Wl,--wrap=clock_gettime -Wl,--wrap=time)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    ihs_add_test(frame_stats_growth test_frame_stats_growth.c)
+    target_link_options(ihstest_frame_stats_growth PRIVATE -Wl,--wrap=realloc)
+endif()
 
 ihs_add_test(frame_tracker test_frame_tracker.c)
 set_tests_properties(frame_tracker PROPERTIES TIMEOUT 20)

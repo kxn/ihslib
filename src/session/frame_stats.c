@@ -79,6 +79,7 @@ IHS_FrameStatsAggregator *IHS_FrameStatsAggregatorCreate(void) {
     agg->lock = IHS_MutexCreate();
     agg->collectorLock = IHS_MutexCreate();
     agg->trackedScratch = calloc(IHS_FRAME_TRACKER_CAPACITY, sizeof(IHS_TrackedFrame));
+    agg->trackedCapacity = IHS_FRAME_TRACKER_CAPACITY;
     if (!agg->lock || !agg->collectorLock || !agg->trackedScratch) {
         if (agg->lock) IHS_MutexDestroy(agg->lock);
         if (agg->collectorLock) IHS_MutexDestroy(agg->collectorLock);
@@ -538,13 +539,34 @@ size_t IHS_FrameStatsAggregatorDrainSlots(IHS_FrameStatsAggregator *agg, IHS_Fra
 static uint32_t us_to_ticks(uint64_t us) {
     return (uint32_t)(us / 1000000) * 65536u + (uint32_t)((us % 1000000) * 65536u / 1000000);
 }
+static int compare_completions(const void *left, const void *right) {
+    const IHS_TrackedFrame *a = left, *b = right;
+    return (a->completionSerial > b->completionSerial) -
+           (a->completionSerial < b->completionSerial);
+}
+
 void IHS_FrameStatsCollectTracked(IHS_FrameStatsAggregator *agg, IHS_FrameTracker *tracker) {
     /* Reservation and application must remain ordered across RX/report callers.
      * Never wait on tracker while holding the protocol stats lock. */
     IHS_MutexLock(agg->collectorLock);
+    size_t capacity = IHS_FrameTrackerStorageCapacity(tracker);
+    if (capacity > agg->trackedCapacity) {
+        /* Snapshot all allocated blocks. On OOM preserve both old scratch and
+         * unpublished completions so a later collection can retry. */
+        if (capacity > SIZE_MAX / sizeof(IHS_TrackedFrame)) {
+            IHS_MutexUnlock(agg->collectorLock);
+            return;
+        }
+        IHS_TrackedFrame *grown = realloc(agg->trackedScratch, capacity * sizeof(*grown));
+        if (!grown) {
+            IHS_MutexUnlock(agg->collectorLock);
+            return;
+        }
+        agg->trackedScratch = grown;
+        agg->trackedCapacity = capacity;
+    }
     IHS_TrackedFrame *frames = agg->trackedScratch;
-    size_t count = IHS_FrameTrackerCopyStats(tracker, frames, IHS_FRAME_TRACKER_CAPACITY);
-    IHS_TrackedFrame *completed[IHS_FRAME_TRACKER_CAPACITY];
+    size_t count = IHS_FrameTrackerCopyStats(tracker, frames, agg->trackedCapacity);
     size_t pending = 0;
     for (size_t i = 0; i < count; ++i) {
         IHS_TrackedFrame *f = &frames[i];
@@ -576,16 +598,13 @@ void IHS_FrameStatsCollectTracked(IHS_FrameStatsAggregator *agg, IHS_FrameTracke
             uint32_t tick = us_to_ticks(f->outcome.uploadEndUs);
             IHS_FrameStatsRecordStage(agg, id, IHS_VideoFrameStageUploadEnd, tick ? tick : 1);
         }
-        size_t at = pending;
-        while (at && completed[at - 1]->completionSerial > f->completionSerial) {
-            completed[at] = completed[at - 1];
-            --at;
-        }
-        completed[at] = f;
-        ++pending;
+        /* Completed rows compact toward the beginning, never over an unread
+         * row. Avoid a second fixed-size array of pointers to snapshot rows. */
+        frames[pending++] = *f;
     }
+    if (pending > 1) qsort(frames, pending, sizeof(*frames), compare_completions);
     for (size_t i = 0; i < pending; ++i) {
-        IHS_TrackedFrame *f = completed[i];
+        IHS_TrackedFrame *f = &frames[i];
         IHS_FrameStatsRecordCompleteAt(agg, f->identity.frameId, f->outcome.result, f->completionTimestamp);
     }
     IHS_MutexUnlock(agg->collectorLock);
@@ -597,7 +616,8 @@ void IHS_FrameStatsSettleTracked(IHS_FrameStatsAggregator *agg, IHS_FrameTracker
     /* Resource retirement never fabricates a protocol Complete. Protocol
      * cancellation is controlled solely by the 240-slot report window. */
     IHS_TrackedFrame frames[8];
-    for (unsigned batch = 0; batch < IHS_FRAME_TRACKER_CAPACITY / 8; ++batch) {
+    size_t capacity = IHS_FrameTrackerStorageCapacity(tracker);
+    for (size_t batch = 0; batch < capacity / 8; ++batch) {
         size_t count = IHS_FrameTrackerSettle(tracker, nowUs, 2000000, frames, 8);
         if (count < 8)
             break;

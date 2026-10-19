@@ -67,7 +67,7 @@ typedef struct IHS_SessionChannelVideo {
         bool contentMode;
         bool hasPacketBuffers; /* Source raw owning references, including zero-size packets. */
         /* Pending-reset complete frames retain their ownership until the actor
-         * or a key mark purges them. Capacity is a local tracker bound. */
+         * or a key mark purges them. This is a local deferred-buffer bound. */
         IHS_FrameTicket *deferred[IHS_FRAME_TRACKER_CAPACITY];
         size_t deferredCount;
     } frame;

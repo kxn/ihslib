@@ -111,6 +111,7 @@ typedef struct IHS_FrameStatsAggregator {
     IHS_Mutex *lock;
     IHS_Mutex *collectorLock;
     struct IHS_TrackedFrame *trackedScratch;
+    size_t trackedCapacity; /* collectorLock; includes overflow ticket blocks */
     /* Session/RX-owned consumer scratch; allocated with the aggregator before
      * workers start, released only after all workers have joined. */
     IHS_FrameStatsMessage messageScratch;
