@@ -423,7 +423,7 @@ int main(int argc, char **argv) {
     char line[8192];
     while (fgets(line, sizeof(line), stdin)) {
         unsigned type, ch, crc, source, dest, size, bad;
-        if (networkMode && line[0] == 'D') {
+        if (networkMode && line[0] == 'D' && line[1] == ' ') {
             unsigned deadline;
             assert(sscanf(line, "D %u", &deadline) == 1);
             session->outgoing.deadline[0] = session->outgoing.deadline[1] = deadline;
