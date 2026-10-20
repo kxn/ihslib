@@ -201,6 +201,9 @@ static int provider_receive(void *ctx, uint8_t *p, size_t capacity, size_t *rece
     *received = rx.buffer.size;
     return result;
 }
+static size_t provider_size(void *ctx) {
+    assert(ctx == s); return 4096;
+}
 static bool provider_send(void *ctx, const uint8_t *p, size_t size) {
     (void)ctx; (void)p; (void)size;
     /* Network output is observed by the shared BaseSend wrapper above. */
@@ -239,7 +242,8 @@ int main(void) {
         s=IHS_TestSessionCreate();s->outgoing.rate[0]=s->outgoing.rate[1]=0;
         if (external) {
             const IHS_DatagramTransport transport = {.send=provider_send,
-                .receive=provider_receive,.wait=provider_wait,.receiveCapacity=4096};
+                .receive=provider_receive,.wait=provider_wait,.receiveCapacity=512*1024,
+                .nextMessageSize=provider_size};
             assert(IHS_SessionSetDatagramTransport(s,&transport,s));
         }
         if (ordinary) {

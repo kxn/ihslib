@@ -9,7 +9,7 @@
 typedef struct Fixture {
     atomic_int sends, receives, waits, goodbyes;
     atomic_bool finalized, fail;
-    bool oversize, reply, terminalAfterAck;
+    bool oversize, reply, terminalAfterAck, hint;
     uint8_t localId;
     unsigned stage;
 } Fixture;
@@ -42,7 +42,8 @@ static int Wait(void *context, uint32_t timeoutUs) {
 }
 static int Receive(void *context, uint8_t *data, size_t capacity, size_t *received, uint32_t timeoutUs) {
     Fixture *f = context;
-    assert(capacity == 4096 && timeoutUs == 0);
+    assert(timeoutUs == 0);
+    assert(capacity == (f->hint ? (f->stage ? 64 : 1) : 4096));
     atomic_fetch_add(&f->receives, 1);
     if (atomic_load(&f->fail))
         {
@@ -80,12 +81,16 @@ static int Receive(void *context, uint8_t *data, size_t capacity, size_t *receiv
     usleep(timeoutUs);
     return 0;
 }
+static size_t NextSize(void *context) {
+    Fixture *f = context;
+    return f->stage ? 64 : 0;
+}
 static void Finalized(IHS_Session *session, void *context) {
     (void)session;
     atomic_store(&((Fixture *)context)->finalized, true);
 }
 static void Run(bool reply, bool oversize, bool terminalAfterAck) {
-    Fixture f = {.reply = reply, .oversize = oversize, .terminalAfterAck = terminalAfterAck};
+    Fixture f = {.reply = reply, .oversize = oversize, .terminalAfterAck = terminalAfterAck, .hint = reply};
     atomic_init(&f.sends, 0);
     atomic_init(&f.goodbyes, 0);
     atomic_init(&f.receives, 0);
@@ -94,7 +99,8 @@ static void Run(bool reply, bool oversize, bool terminalAfterAck) {
     atomic_init(&f.fail, false);
     IHS_Session *session = IHS_TestSessionCreate();
     IHS_DatagramTransport transport = {.send = Send, .receive = Receive, .wait = Wait,
-        .receiveCapacity = 4096};
+        .receiveCapacity = reply ? 512 * 1024 : 4096,
+        .nextMessageSize = reply ? NextSize : NULL};
     assert(!IHS_SessionSetDatagramTransport(session, &(IHS_DatagramTransport){0}, &f));
     assert(IHS_SessionSetDatagramTransport(session, &transport, &f));
     memset(&transport, 0, sizeof(transport)); /* vtable must have been copied */

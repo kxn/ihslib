@@ -29,4 +29,9 @@ typedef struct IHS_DatagramTransport {
     /** Provider's maximum whole message, independent of ordinary UDP's
      * receive buffer and of negotiated MTU. Zero uses the stream default. */
     size_t receiveCapacity;
+    /** Optional nonconsuming size hint for the next queued message. Lets an
+     * SDK provider retain full-size messages without allocating its maximum
+     * for every small packet; must not exceed receiveCapacity. A zero-length
+     * message is valid. receive still reports empty/terminal races. */
+    size_t (*nextMessageSize)(void *context);
 } IHS_DatagramTransport;

@@ -773,7 +773,14 @@ static bool SessionReceiveCycle(IHS_Base *base, void *context, IHS_UDPPacket *pa
             if (external) {
                 /* PacketParse may transfer ownership out of this buffer.
                  * Re-establish provider capacity before every queue read. */
-                IHS_BufferEnsureMaxSizeExact(&packet->buffer, packet->buffer.maxCapacity);
+                size_t wanted = base->transport.nextMessageSize
+                    ? base->transport.nextMessageSize(base->transportContext)
+                    : packet->buffer.maxCapacity;
+                if (wanted > packet->buffer.maxCapacity) {
+                    IHS_SessionInterrupt(session);
+                    return false;
+                }
+                IHS_BufferEnsureMaxSizeExact(&packet->buffer, wanted ? wanted : 1);
                 size_t capacity = IHS_BufferMaxSize(&packet->buffer);
                 size_t received = 0;
                 result = base->transport.receive(base->transportContext,
