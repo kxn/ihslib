@@ -223,8 +223,11 @@ bool IHS_ClientStopDiscovery(IHS_Client *client);
  * fresh round; Disable balances one owner. The manager continues its wall-clock
  * rounds (including saved targets) until client destruction/StopDiscovery.
  * A full round is followed by at most two same-sequence fast sends. Accepted
- * refreshes execute after complete receive/callback cycles: independent calls
- * are retained; reentry from this client's dispatched callback coalesces.
+ * operations are ordered: apply one Enable/Trigger, complete its receive and
+ * callback phase, then choose its due send before applying later operations.
+ * Reentry from this client's dispatched callback applies in that current phase.
+ * Success means accepted, not synchronous completion or delivery. Local backlog
+ * exhaustion rejects atomically; Disable also rejects unbalanced references.
  * These APIs cannot share a task with the explicit-interval StartDiscovery API. */
 bool IHS_ClientEnableDiscovery(IHS_Client *client);
 bool IHS_ClientDisableDiscovery(IHS_Client *client);
@@ -238,7 +241,9 @@ typedef struct IHS_DiscoveryTarget {
 /** Replace the owned local discovery snapshot. Requests use port 27036 and the
  * current round sequence for all saved addresses and broadcast. When no broad
  * subscription exists, the broadcast carries the unique nonzero client IDs.
- * Failure retains the previous complete snapshot. No authentication change. */
+ * Success transfers an owned copy into the operation order; it may not yet be
+ * the committed snapshot while prior operations remain. Failure retains all
+ * committed and accepted snapshots. No authentication change. */
 bool IHS_ClientSetDiscoveryTargets(IHS_Client *client,
     const IHS_DiscoveryTarget *targets, size_t count);
 

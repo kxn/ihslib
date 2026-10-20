@@ -187,6 +187,13 @@ bool IHS_TimerTaskVisitOwned(IHS_Timer *timer, IHS_TimerTask **owner,
     return present;
 }
 
+void IHS_TimerTaskVisitSlot(IHS_Timer *timer, IHS_TimerTask **owner,
+    void (*visit)(IHS_TimerTask *task, void *context), void *context) {
+    IHS_MutexLock(timer->mutex);
+    visit(*owner, context);
+    IHS_MutexUnlock(timer->mutex);
+}
+
 void IHS_TimerTaskStop(IHS_TimerTask *task) {
     assert(task != NULL);
     IHS_Timer *timer = task->timer;

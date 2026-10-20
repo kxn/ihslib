@@ -190,6 +190,7 @@ size_t IHS_ClientPumpAuthorization(IHS_Client *client, size_t budget) {
      * pump which leaves queued work must not retry an already-obsolete phase. */
     if (budget && drained && atomic_load_explicit(&client->deferAuthorization, memory_order_acquire))
         IHS_ClientStreamingUpdate(client);
+    if (budget && drained) IHS_ClientDiscoveryEndCycle(client);
     return dispatched;
 }
 
@@ -424,6 +425,13 @@ static void ClientInitialized(IHS_Base *base, void *context) {
 static bool ClientReceiveCycle(IHS_Base *base, void *context, IHS_UDPPacket *packet) {
     (void)context;
     IHS_Client *client = (IHS_Client *)base;
+    if (!IHS_ClientDiscoveryBeginCycle(client)) {
+        IHS_BaseLock(base);
+        if (!base->interrupted) IHS_CondWaitTimeout(client->receiveWake, base->lock, 100);
+        bool running = !base->interrupted;
+        IHS_BaseUnlock(base);
+        return running;
+    }
     IHS_BaseLock(base);
     if (base->interrupted) {
         IHS_BaseUnlock(base);
@@ -457,6 +465,7 @@ static bool ClientReceiveCycle(IHS_Base *base, void *context, IHS_UDPPacket *pac
     /* Original manager Update drains input before checking due sends. Deferred
      * owners do this after draining their published callback queue instead. */
     if (update) IHS_ClientStreamingUpdate(client);
+    IHS_ClientDiscoveryEndCycle(client);
     IHS_BaseLock(base);
     while (!base->interrupted) {
         uint64_t now = IHS_TimerNow();

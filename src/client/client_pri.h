@@ -138,3 +138,5 @@ static inline bool IHS_ClientMatchesHost(const IHS_HostInfo *host,
 bool IHS_ClientStreamingAuthorizationCallback(IHS_Client *, const IHS_SocketAddress *,
         CMsgRemoteClientBroadcastHeader *, ProtobufCMessage *);
 void IHS_ClientStreamingUpdate(IHS_Client *);
+bool IHS_ClientDiscoveryBeginCycle(IHS_Client *);
+void IHS_ClientDiscoveryEndCycle(IHS_Client *);
