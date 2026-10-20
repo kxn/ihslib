@@ -45,6 +45,8 @@ static bool ClientReceiveCycle(IHS_Base *base, void *context, IHS_UDPPacket *pac
 static const unsigned char PACKET_MAGIC[8] = {0xff, 0xff, 0xff, 0xff, 0x21, 0x4c, 0x5f, 0xa0};
 
 static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data);
+static void ClientProcessPacket(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data,
+                                bool deferred);
 
 static const ProtobufCMessageDescriptor
     *MessageDescriptors[k_ERemoteClientBroadcastMsgPairingExclusivity + 1] = {
@@ -275,7 +277,20 @@ void IHS_ClientReceiveRemotePacket(IHS_Client *client, const uint8_t *wire, size
         return;
     IHS_SocketAddress source = {0};
     IHS_Buffer buffer = IHS_BUFFER_WRAP(wire, size);
-    ClientRecvCallback(&client->base, &source, &buffer);
+    /* CM dispatch already runs on the application's handshake owner. Original
+     * HandleWebSocketPackets finishes each BProcess before the next service
+     * response. Do not defer CM again or run discovery/retry Update here. The
+     * per-call choice leaves the concurrent UDP RX's deferred policy intact. */
+    IHS_Client *previousDispatch = IHS_ClientDispatchOwner;
+    IHS_ClientDispatchOwner = client;
+    IHS_BaseLock(&client->base);
+    ++client->authorizationDispatching;
+    IHS_BaseUnlock(&client->base);
+    ClientProcessPacket(&client->base, &source, &buffer, false);
+    IHS_BaseLock(&client->base);
+    --client->authorizationDispatching;
+    IHS_BaseUnlock(&client->base);
+    IHS_ClientDispatchOwner = previousDispatch;
 }
 
 const char *IHS_ClientError(IHS_Client *client) {
@@ -418,6 +433,13 @@ bool IHS_ClientBroadcast(IHS_Client *client, ERemoteClientBroadcastMsg type,
 }
 
 static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data) {
+    IHS_Client *client = (IHS_Client *)base;
+    ClientProcessPacket(base, address, data,
+                        atomic_load_explicit(&client->deferAuthorization, memory_order_acquire));
+}
+
+static void ClientProcessPacket(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data,
+                                bool deferred) {
     // Any host on the LAN can send a UDP datagram here. Validate every byte before
     // dereferencing — the audit found four crash vectors at this entry point.
     // Minimum well-formed packet: PACKET_MAGIC + 4-byte header_size + 4-byte payload_size.
@@ -488,7 +510,7 @@ static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
     case k_ERemoteDeviceStreamingCancelRequest:
     case k_ERemoteDeviceProofRequest:
     case k_ERemoteDeviceProofResponse:
-        if (atomic_load_explicit(&client->deferAuthorization, memory_order_acquire)) {
+        if (deferred) {
             IHS_BaseLock(base);
             if (client->authorizationCount < 32) {
                 unsigned index = (client->authorizationHead + client->authorizationCount++) % 32;

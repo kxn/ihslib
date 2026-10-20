@@ -258,9 +258,12 @@ void IHS_ClientSetStreamingCallbacks(IHS_Client *client,
                                      const IHS_ClientStreamingCallbacks *callbacks, void *context);
 
 void IHS_ClientSetRoutingCallbacks(IHS_Client *, const IHS_ClientRoutingCallbacks *, void *);
-/** Feed a complete manager discovery/control frame from CM into the same parser
- * and deferred handshake queue as UDP. Invalid frames are discarded. Cloud
- * presence and independent type12 transport signaling remain the caller's job. */
+/** Synchronously process a complete manager discovery/control frame from CM
+ * using the same parser and handshake owner as UDP. Call only on the application
+ * actor that pumps deferred UDP callbacks, and keep the client alive until this
+ * returns. This does not pump queued UDP frames or advance discovery/retry
+ * timers. Invalid frames are discarded. Cloud presence and independent type12
+ * transport signaling remain the caller's job. */
 void IHS_ClientReceiveRemotePacket(IHS_Client *, const uint8_t *, size_t);
 
 const char *IHS_ClientError(IHS_Client *client);
