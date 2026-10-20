@@ -391,11 +391,12 @@ void IHS_ClientAuthorizationCallback(IHS_Client *client, const IHS_SocketAddress
 static uint64_t AuthorizationRequestTimer(int runCount, void *data) {
     IHS_AuthorizationState *state = data;
     IHS_Client *client = state->client;
+    if (client->polled && IHS_ClientDispatchOwner != client) return 100;
     if (state->service)
         return 1; /* Service owns publication; never retry as host cancel/request. */
-    int64_t now = (int64_t)time(NULL);
+    int64_t now = client->updateClockActive ? client->updateClock : (int64_t)time(NULL);
     /* Original manager Update compares whole wall seconds, including clock
-     * changes. The existing 1ms timer worker supplies our update cadence. */
+     * changes. Polled clients advance only inside the actor's Update. */
     if (runCount && now < state->nextSendWallSecond) return 1;
     if (!IHS_ClientSendAuthorizationRequest(client, &state->host, &state->flow, state->requestId)) {
         state->terminal = state->timerFailed = true;
@@ -405,6 +406,14 @@ static uint64_t AuthorizationRequestTimer(int runCount, void *data) {
     int64_t sentAt = (int64_t)time(NULL);
     state->nextSendWallSecond = (int64_t)((uint64_t)sentAt + 3);
     return 1;
+}
+static void AuthorizationUpdateVisit(IHS_TimerTask *task, void *unused) {
+    (void)unused;
+    if (!AuthorizationRequestTimer(1, IHS_TimerTaskGetContext(task))) IHS_TimerTaskStop(task);
+}
+void IHS_ClientAuthorizationUpdate(IHS_Client *client) {
+    IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.authorization,
+                            AuthorizationUpdateVisit, NULL);
 }
 
 bool IHS_ClientAuthorizationFlowInit(IHS_AuthorizationFlow *flow, const char *pin) {

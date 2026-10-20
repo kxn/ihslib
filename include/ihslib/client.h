@@ -225,6 +225,14 @@ typedef struct IHS_ClientStreamingCallbacks {
 } IHS_ClientStreamingCallbacks;
 
 IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config);
+/** Nonblocking control socket owned by the caller, without an RX thread.
+ * Call Update on the same actor as requests/CM; never on the rendering thread.
+ * Stop, join (a no-op for this mode), then Destroy still own all cleanup. */
+IHS_Client *IHS_ClientCreatePolled(const IHS_ClientConfig *config);
+/** One original manager update: session callback, drain UDP to nonpositive
+ * receive, discovery, expire callback, request retry. No receive/timer phase may
+ * run concurrently with it. Recursion is ignored. Both callbacks are optional. */
+bool IHS_ClientUpdate(IHS_Client *, void (*session)(void *), void (*expire)(void *), void *);
 
 void IHS_ClientSetLogFunction(IHS_Client *client, IHS_LogFunction *logFunction);
 

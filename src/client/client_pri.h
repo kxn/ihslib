@@ -53,6 +53,10 @@ typedef struct IHS_AuthorizationCache {
 
 struct IHS_Client {
     IHS_Base base;
+    bool polled, updating;
+    bool updateClockActive;
+    int64_t updateClock;
+    IHS_UDPPacket pollPacket;
     struct {
         IHS_HostInfo host;
         uint32_t requestId;

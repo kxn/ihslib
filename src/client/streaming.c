@@ -52,6 +52,10 @@ static uint64_t StreamingRequestTimer(int runCount, void *context);
 static void StreamingRequestCleanup(void *context);
 static IHS_ClientRequestFailure SendStreamingRequest(IHS_StreamingState *state);
 static bool SendCurrentRequest(IHS_StreamingState *state);
+static void InitialRequestVisit(IHS_TimerTask *task, void *unused) {
+    (void)unused;
+    if (!SendCurrentRequest(IHS_TimerTaskGetContext(task))) IHS_TimerTaskStop(task);
+}
 
 static void SetAuthorizing(IHS_StreamingState *state, bool value) {
     state->authorizing = value;
@@ -244,6 +248,8 @@ bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
         free(state);
         return false;
     }
+    if (client->polled)
+        IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.streaming, InitialRequestVisit, NULL);
     return true;
 }
 
@@ -670,7 +676,8 @@ static bool StreamingAdvance(IHS_StreamingState *state, bool initialOnly) {
     bool ok = true;
     if (ready && (!state->hasSent || fresh)) {
         state->receiveGeneration = client->receiveGeneration;
-        if ((int64_t)time(NULL) >= state->nextSendWallSecond)
+        int64_t now = client->updateClockActive ? client->updateClock : (int64_t)time(NULL);
+        if (now >= state->nextSendWallSecond)
             ok = SendCurrentRequest(state);
     }
     IHS_BaseUnlock(&client->base);
@@ -680,6 +687,7 @@ static uint64_t StreamingRequestTimer(int runCount, void *context) {
     (void)runCount;
     IHS_StreamingState *state = context;
     if (state->terminal) return 0;
+    if (state->client->polled) return 100;
     if (atomic_load_explicit(&state->client->deferAuthorization, memory_order_acquire)) return 1;
     /* First send may precede a poll; retries belong to completed RX updates. */
     return StreamingAdvance(state, true) ? 1 : 0;
@@ -697,6 +705,13 @@ static void StopAuthorization(IHS_TimerTask *task, IHS_AuthorizationResult resul
     state->terminal = true;
     IHS_TimerTaskStop(task);
     NotifyAuthorizationFailure(state->client, &state->host, result);
+    if (state->client->callbacks.routing) {
+        /* Original Stop queries the current visible record/hint before type9
+         * and always clears ID/target. A later packet in this same Update must
+         * observe Idle with no retained target (control-update reference). */
+        IHS_ClientStreamingCancel(state->client);
+        return;
+    }
     IHS_ClientAuthorizationSendCancel(state->client, &state->host);
     ClearLaunch(state);
 }

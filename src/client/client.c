@@ -28,10 +28,12 @@
 #include <memory.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include "base.h"
 #include "client_pri.h"
 #include "crypto.h"
+#include "authorization_flow.h"
 #include "endianness.h"
 #include "ihs_buffer.h"
 #include "ihs_buffer_ext.h"
@@ -77,14 +79,15 @@ static IHS_BaseRunCallbacks ClientRunCallbacks = {
 
 _Thread_local IHS_Client *IHS_ClientDispatchOwner;
 
-IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config) {
+static IHS_Client *ClientCreate(const IHS_ClientConfig *config, bool polled) {
     IHS_Client *client = malloc(sizeof(IHS_Client));
     if (!client) return NULL;
     memset(client, 0, sizeof(IHS_Client));
     client->authorizationCache.result = k_ERemoteDeviceAuthorizationFailed;
     /* BStart's initial no-subscriber Update has advanced the discovery round. */
     client->discoverySeq = 1;
-    atomic_init(&client->deferAuthorization, false);
+    client->polled = polled;
+    atomic_init(&client->deferAuthorization, polled);
     IHS_BaseInit(&client->base, config, ClientRecvCallback, true);
     if (!client->base.lock) {
         free(client);
@@ -109,7 +112,25 @@ IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config) {
     client->privCallbacks.authorization = IHS_ClientAuthorizationCallback;
     client->privCallbacks.streaming = IHS_ClientStreamingCallback;
 
-    if (!IHS_BaseStartWorker(&client->base, "IHSClient")) {
+    bool started;
+    if (polled) {
+        client->base.socket = IHS_UDPSocketOpen(true);
+        started = client->base.socket && IHS_UDPSocketSetBlocking(client->base.socket, false);
+        if (started) {
+            IHS_BufferInit(&client->pollPacket.buffer, 2048, 2048);
+            client->pollPacket.buffer.data = malloc(2048);
+            client->pollPacket.buffer.capacity = client->pollPacket.buffer.data ? 2048 : 0;
+            started = client->pollPacket.buffer.data != NULL;
+        }
+        client->base.started = started;
+        if (!started && client->base.socket) {
+            IHS_UDPSocketClose(client->base.socket);
+            client->base.socket = NULL;
+        }
+    } else {
+        started = IHS_BaseStartWorker(&client->base, "IHSClient");
+    }
+    if (!started) {
         IHS_TimerDestroy(client->timers);
         IHS_CondDestroy(client->receiveWake);
         IHS_BaseDestroy(&client->base);
@@ -118,6 +139,9 @@ IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config) {
     }
     return client;
 }
+
+IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config) { return ClientCreate(config, false); }
+IHS_Client *IHS_ClientCreatePolled(const IHS_ClientConfig *config) { return ClientCreate(config, true); }
 
 void IHS_ClientSetLogFunction(IHS_Client *client, IHS_LogFunction *logFunction) {
     IHS_BaseSetLogFunction(&client->base, logFunction);
@@ -139,7 +163,7 @@ void IHS_ClientStop(IHS_Client *client) {
 }
 
 void IHS_ClientThreadedJoin(IHS_Client *client) {
-    IHS_BaseWaitWorker(&client->base);
+    if (!client->polled) IHS_BaseWaitWorker(&client->base);
 }
 
 static void FreeAuthorizationFrame(CMsgRemoteClientBroadcastHeader *header, ProtobufCMessage *message) {
@@ -154,9 +178,15 @@ void IHS_ClientSetAuthorizationDeferred(IHS_Client *client, bool deferred) {
 /* Original manager Update sends RequestStatus (@798ab0) before a due
  * SendStartStreamingRequest (@798c74). Hold one timer owner across both stages
  * so the standalone timer cannot finish a discovery cycle between them. */
+typedef struct {
+    IHS_Client *client;
+    void (*expire)(void *);
+    void *context;
+} ClientUpdate;
 static void ClientUpdateVisit(IHS_TimerTask *unused, void *opaque) {
     (void)unused;
-    IHS_Client *client = opaque;
+    ClientUpdate *update = opaque;
+    IHS_Client *client = update->client;
     IHS_BaseLock(&client->base);
     bool ready = !client->base.interrupted && !client->receiveBatchActive &&
                  !client->authorizationCount && !client->authorizationDispatching;
@@ -174,18 +204,53 @@ static void ClientUpdateVisit(IHS_TimerTask *unused, void *opaque) {
     IHS_Client *previousDispatch = IHS_ClientDispatchOwner;
     IHS_ClientDispatchOwner = client;
     IHS_ClientDiscoveryUpdate(client);
+    if (update->expire) update->expire(update->context);
     IHS_ClientStreamingUpdate(client);
+    if (client->polled) IHS_ClientAuthorizationUpdate(client);
     /* A late nested refresh applies to the next Update, since discovery has
      * already run. Resolve the current slot again: a callback may Stop it. */
     IHS_ClientDiscoveryEndCycle(client);
     IHS_ClientDispatchOwner = previousDispatch;
 }
 static void ClientUpdateAfterReceive(IHS_Client *client) {
-    IHS_TimerTaskVisitSlot(client->timers, &client->discoveryTimer, ClientUpdateVisit, client);
+    ClientUpdate update = {.client = client};
+    IHS_TimerTaskVisitSlot(client->timers, &client->discoveryTimer, ClientUpdateVisit, &update);
+}
+
+bool IHS_ClientUpdate(IHS_Client *client, void (*session)(void *), void (*expire)(void *), void *context) {
+    if (!client || !client->polled || client->updating || client->base.interrupted)
+        return false;
+    if (!IHS_ClientDiscoveryBeginCycle(client)) return false;
+    client->updating = true;
+    IHS_Client *previous = IHS_ClientDispatchOwner;
+    IHS_ClientDispatchOwner = client;
+    if (session) session(context);
+    while (!client->base.interrupted) {
+        IHS_BaseLock(&client->base);
+        int result = IHS_UDPSocketReceive(client->base.socket, &client->pollPacket);
+        IHS_BaseUnlock(&client->base);
+        if (result <= 0) break;
+        ClientProcessPacket(&client->base, &client->pollPacket.address,
+                             &client->pollPacket.buffer, false);
+        IHS_BufferClear(&client->pollPacket.buffer, false);
+    }
+    IHS_BufferClear(&client->pollPacket.buffer, false);
+    IHS_BaseLock(&client->base);
+    client->receiveBatchActive = false;
+    ++client->receiveGeneration;
+    client->updateClock = (int64_t)time(NULL);
+    client->updateClockActive = true;
+    IHS_BaseUnlock(&client->base);
+    ClientUpdate update = {.client = client, .expire = expire, .context = context};
+    IHS_TimerTaskVisitSlot(client->timers, &client->discoveryTimer, ClientUpdateVisit, &update);
+    IHS_ClientDispatchOwner = previous;
+    client->updateClockActive = false;
+    client->updating = false;
+    return true;
 }
 
 size_t IHS_ClientPumpAuthorization(IHS_Client *client, size_t budget) {
-    if (!client) return 0;
+    if (!client || client->polled) return 0;
     size_t dispatched = 0;
     while (dispatched < budget) {
         IHS_BaseLock(&client->base);
@@ -236,6 +301,14 @@ void IHS_ClientDestroy(IHS_Client *client) {
                                client->authorizationQueue[index].message);
     }
     IHS_TimerDestroy(client->timers);
+    if (client->polled) {
+        IHS_BufferClear(&client->pollPacket.buffer, true);
+        IHS_BaseLock(&client->base);
+        IHS_UDPSocket *socket = client->base.socket;
+        client->base.socket = NULL;
+        IHS_BaseUnlock(&client->base);
+        if (socket) IHS_UDPSocketClose(socket);
+    }
     free(client->discoveryTargets);
     free(client->authorizationCache.key);
     IHS_ClientLog(client, IHS_LogLevelInfo, "Client", "Destroying client, bye!");
@@ -435,7 +508,7 @@ bool IHS_ClientBroadcast(IHS_Client *client, ERemoteClientBroadcastMsg type,
 static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data) {
     IHS_Client *client = (IHS_Client *)base;
     ClientProcessPacket(base, address, data,
-                        atomic_load_explicit(&client->deferAuthorization, memory_order_acquire));
+                        !client->polled && atomic_load_explicit(&client->deferAuthorization, memory_order_acquire));
 }
 
 static void ClientProcessPacket(IHS_Base *base, const IHS_SocketAddress *address, IHS_Buffer *data,

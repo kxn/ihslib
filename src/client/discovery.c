@@ -345,6 +345,7 @@ static void UpdateDiscovery(IHS_TimerTask *task, void *opaque) {
     (void)opaque;
     DiscoveryContext *context = IHS_TimerTaskGetContext(task);
     if (context->rounds) DiscoveryRoundUpdate(context);
+    else if (context->client->polled && !DiscoveryTimerRun(0, context)) IHS_TimerTaskStop(task);
 }
 void IHS_ClientDiscoveryUpdate(IHS_Client *client) {
     IHS_TimerTaskVisitOwned(client->timers, &client->discoveryTimer, UpdateDiscovery, NULL);
@@ -451,7 +452,7 @@ static void DiscoveryRoundUpdate(DiscoveryContext *context) {
             context->full = 0;
             client->discoveryTargetsChanged = false;
         }
-        int64_t now = (int64_t)time(NULL);
+        int64_t now = client->updateClockActive ? client->updateClock : (int64_t)time(NULL);
         bool send = false;
         if (now >= context->full) {
             context->full = now + 12 + IHS_DiscoveryRandomInt(&context->random, 1, 5);
@@ -472,6 +473,7 @@ static void DiscoveryRoundUpdate(DiscoveryContext *context) {
 static uint64_t DiscoveryTimerRun(int runCount, DiscoveryContext *context) {
     (void)runCount;
     IHS_Client *client = context->client;
+    if (client->polled && IHS_ClientDispatchOwner != client) return 100;
     IHS_BaseLock(&client->base);
     if (client->base.interrupted) {
         IHS_BaseUnlock(&client->base);

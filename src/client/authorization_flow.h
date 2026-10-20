@@ -19,6 +19,7 @@ typedef enum IHS_AuthorizationExchangeOutcome {
 } IHS_AuthorizationExchangeOutcome;
 
 bool IHS_ClientAuthorizationFlowInit(IHS_AuthorizationFlow *, const char *pin);
+void IHS_ClientAuthorizationUpdate(IHS_Client *);
 bool IHS_ClientSendAuthorizationRequest(IHS_Client *, const IHS_HostInfo *, IHS_AuthorizationFlow *,
                                         uint32_t requestId);
 IHS_ClientRequestFailure IHS_ClientTryAuthorizationRequest(IHS_Client *, const IHS_HostInfo *,
