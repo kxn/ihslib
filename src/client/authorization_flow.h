@@ -23,7 +23,8 @@ bool IHS_ClientSendAuthorizationRequest(IHS_Client *, const IHS_HostInfo *, IHS_
                                         uint32_t requestId);
 IHS_AuthorizationExchangeOutcome
 IHS_ClientAuthorizationExchange(IHS_Client *, const IHS_HostInfo *, IHS_AuthorizationFlow *,
-                                const CMsgRemoteDeviceAuthorizationResponse *);
+                                const CMsgRemoteDeviceAuthorizationResponse *,
+                                const IHS_SocketAddress *replySource);
 void IHS_ClientAuthorizationSendCancel(IHS_Client *, const IHS_HostInfo *);
-void IHS_ClientAuthorizationConfirm(IHS_Client *, IHS_SocketAddress,
+void IHS_ClientAuthorizationConfirm(IHS_Client *, IHS_SocketAddress, uint64_t clientId,
                                     ERemoteDeviceAuthorizationResult);

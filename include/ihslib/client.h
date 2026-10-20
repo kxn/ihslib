@@ -111,7 +111,39 @@ typedef struct IHS_StreamingRequest {
     /** Selected host identity for caller-side key lookup and Proof writes. Captured
      * at creation, never serialized or replaced by AuthorizationResponse.steamid. */
     uint64_t keySteamId;
+    /** Advertise UDP and SDR when a caller provides the rich connection
+     * callback and an SNS backend. False retains the legacy UDP-only API. */
+    bool allowSDR;
 } IHS_StreamingRequest;
+
+/** Borrowed for connection(). Address is the actual reply source, with the
+ * negotiated port substituted only when that source is a complete endpoint.
+ * An address-less cloud reply is not a physical UDP destination. */
+typedef struct IHS_StreamingConnection {
+    uint64_t clientId;  /* Reply header identity; the transaction matches request_id. */
+    unsigned transport; /* discovery EStreamTransport: UDP=1, SDR=4 */
+    uint32_t port;
+    IHS_SocketAddress address;
+    const uint8_t *sessionKey;
+    size_t sessionKeyLen;
+    const char *certificate, *relayServer;
+} IHS_StreamingConnection;
+
+/** Configure before requests; context remains alive until RX/timers are joined.
+ * resolve() must initialize its output, including the no-qualified-address case.
+ * addresses() returns a malloc-owned snapshot (freed by IHS); its IDs come from
+ * the discovery owner's committed watch list, with ID zero for an explicit hint.
+ * sendRemote() may run on a timer thread. Copy before return and serialize real
+ * CM operations on the connection owner. No immediate cloud fallback follows
+ * a UDP send failure. Callbacks must not destroy/reenter this client. */
+typedef struct IHS_ClientRoutingCallbacks {
+    /** Visible server metadata/explicit hint, independent of cached address
+     * qualification. Requests require it; an explicit reply does not. */
+    bool (*host)(IHS_Client *, uint64_t clientId, IHS_HostInfo *, void *);
+    void (*resolve)(IHS_Client *, uint64_t clientId, IHS_SocketAddress *, void *);
+    size_t (*addresses)(IHS_Client *, uint64_t clientId, IHS_IPAddress **owned, void *);
+    bool (*sendRemote)(IHS_Client *, uint64_t clientId, const uint8_t *, size_t, void *);
+} IHS_ClientRoutingCallbacks;
 
 /** Borrowed only during status(). Candidates are announcements, not verified
  * destinations. Preserve publicAddress and input order for the caller's cache. */
@@ -169,6 +201,8 @@ typedef struct IHS_ClientStreamingCallbacks {
      * the owner or change its secret from this observer. */
     void (*persistProof)(IHS_Client *, const IHS_HostInfo *, uint64_t keySteamId,
                          const uint8_t secret[32], void *context);
+    /** Rich alternative to success; exactly one success callback runs. */
+    void (*connection)(IHS_Client *, const IHS_HostInfo *, const IHS_StreamingConnection *, void *);
 } IHS_ClientStreamingCallbacks;
 
 IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config);
@@ -213,6 +247,12 @@ size_t IHS_ClientPumpAuthorization(IHS_Client *client, size_t budget);
 
 void IHS_ClientSetStreamingCallbacks(IHS_Client *client,
                                      const IHS_ClientStreamingCallbacks *callbacks, void *context);
+
+void IHS_ClientSetRoutingCallbacks(IHS_Client *, const IHS_ClientRoutingCallbacks *, void *);
+/** Feed a complete manager discovery/control frame from CM into the same parser
+ * and deferred handshake queue as UDP. Invalid frames are discarded. Cloud
+ * presence and independent type12 transport signaling remain the caller's job. */
+void IHS_ClientReceiveRemotePacket(IHS_Client *, const uint8_t *, size_t);
 
 const char *IHS_ClientError(IHS_Client *client);
 

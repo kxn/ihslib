@@ -55,7 +55,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(ihs-auto-authorization-oracle PRIVATE -Wl,--wrap=time
         -Wl,--wrap=IHS_CryptoRandomBytes -Wl,--wrap=IHS_CryptoRandomUInt32
         -Wl,--wrap=IHS_CryptoKeyExchange -Wl,--wrap=IHS_CryptoSymmetricEncrypt
-        -Wl,--wrap=IHS_CryptoRSAEncrypt -Wl,--wrap=IHS_ClientSend
+        -Wl,--wrap=IHS_CryptoRSAEncrypt -Wl,--wrap=IHS_ClientSend -Wl,--wrap=IHS_ClientSendControl
         -Wl,--wrap=IHS_CryptoSHA256 -Wl,--wrap=IHS_ClientStreamingCallback -Wl,--wrap=IHS_BaseInit
         -Wl,--wrap=IHS_CondWaitTimeout)
 
@@ -79,7 +79,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(ihs-authorization-exchange-oracle PRIVATE -Wl,--wrap=IHS_CryptoRandomBytes
         -Wl,--wrap=IHS_CryptoRandomUInt32 -Wl,--wrap=IHS_CryptoKeyExchange
         -Wl,--wrap=IHS_CryptoRSAEncrypt -Wl,--wrap=IHS_ClientAuthorizationCallback
-        -Wl,--wrap=clock_gettime -Wl,--wrap=time -Wl,--wrap=IHS_ClientSend)
+        -Wl,--wrap=clock_gettime -Wl,--wrap=time -Wl,--wrap=IHS_ClientSend
+        -Wl,--wrap=IHS_ClientSendControl)
     add_executable(ihs-session-key-oracle session_key_oracle.c)
     target_include_directories(ihs-session-key-oracle PRIVATE ${TEST_INCLUDES})
     target_link_libraries(ihs-session-key-oracle PRIVATE ihs-test-session ihslib)

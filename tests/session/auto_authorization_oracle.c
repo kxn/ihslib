@@ -139,10 +139,7 @@ int __wrap_IHS_CryptoRSAEncrypt(const uint8_t *p, size_t n, const uint8_t *key, 
     protobuf_c_message_free_unpacked((void *)t, NULL);
     return __real_IHS_CryptoRSAEncrypt(p, n, key, k, out, size);
 }
-bool __real_IHS_ClientSend(IHS_Client *, IHS_SocketAddress, ERemoteClientBroadcastMsg,
-                           ProtobufCMessage *);
-bool __wrap_IHS_ClientSend(IHS_Client *c, IHS_SocketAddress address, ERemoteClientBroadcastMsg tag,
-                           ProtobufCMessage *m) {
+static void observe_send(ERemoteClientBroadcastMsg tag) {
     if (in_proof) {
         assert(proof_count < 128);
         proof_ops[proof_count].op = "send";
@@ -151,7 +148,21 @@ bool __wrap_IHS_ClientSend(IHS_Client *c, IHS_SocketAddress address, ERemoteClie
     assert(observed_count < 64);
     observed_tags[observed_count] = tag;
     observed_saves[observed_count++] = saves;
+}
+bool __real_IHS_ClientSend(IHS_Client *, IHS_SocketAddress, ERemoteClientBroadcastMsg,
+                           ProtobufCMessage *);
+bool __wrap_IHS_ClientSend(IHS_Client *c, IHS_SocketAddress address, ERemoteClientBroadcastMsg tag,
+                           ProtobufCMessage *m) {
+    observe_send(tag);
     return __real_IHS_ClientSend(c, address, tag, m);
+}
+bool __real_IHS_ClientSendControl(IHS_Client *, const IHS_HostInfo *, const IHS_SocketAddress *,
+                                  ERemoteClientBroadcastMsg, ProtobufCMessage *);
+bool __wrap_IHS_ClientSendControl(IHS_Client *c, const IHS_HostInfo *host,
+                                  const IHS_SocketAddress *source, ERemoteClientBroadcastMsg tag,
+                                  ProtobufCMessage *m) {
+    observe_send(tag);
+    return __real_IHS_ClientSendControl(c, host, source, tag, m);
 }
 static void persist(IHS_Client *c, const IHS_HostInfo *h, uint64_t id, const uint8_t s[32],
                     void *ctx) {

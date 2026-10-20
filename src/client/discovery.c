@@ -368,10 +368,28 @@ static void RequestStatus(DiscoveryContext *context) {
     IHS_Client *client = context->client;
     CMsgRemoteClientBroadcastDiscovery discovery = CMSG_REMOTE_CLIENT_BROADCAST_DISCOVERY__INIT;
     PROTOBUF_C_SET_VALUE(discovery, seq_num, client->discoverySeq);
-    for (size_t i = 0; i < client->discoveryTargetCount; ++i) {
-        IHS_SocketAddress address = {.ip = client->discoveryTargets[i].ip, .port = 27036};
-        IHS_ClientSend(client, address, k_ERemoteClientBroadcastMsgDiscovery, (ProtobufCMessage *)&discovery);
-    }
+    const IHS_ClientRoutingCallbacks *routing = client->callbacks.routing;
+    if (routing && routing->addresses) {
+        /* Read current address values after this cycle's input. Identity and
+         * round operations retain their existing serialized queue order. */
+        for (size_t n = 0; n <= client->discoveryClientIdCount; ++n) {
+            uint64_t id = n ? client->discoveryClientIds[n - 1] : 0;
+            IHS_IPAddress *ips = NULL;
+            size_t count = routing->addresses(client, id, &ips, client->callbackContexts.routing);
+            if (ips)
+                for (size_t i = 0; i < count; ++i) {
+                    IHS_SocketAddress address = {.ip = ips[i], .port = 27036};
+                    IHS_ClientSend(client, address, k_ERemoteClientBroadcastMsgDiscovery,
+                                   &discovery.base);
+                }
+            free(ips);
+        }
+    } else
+        for (size_t i = 0; i < client->discoveryTargetCount; ++i) {
+            IHS_SocketAddress address = {.ip = client->discoveryTargets[i].ip, .port = 27036};
+            IHS_ClientSend(client, address, k_ERemoteClientBroadcastMsgDiscovery,
+                           (ProtobufCMessage *)&discovery);
+        }
     if (!context->broadcastOwners) {
         discovery.n_client_ids = client->discoveryClientIdCount;
         discovery.client_ids = client->discoveryClientIds;

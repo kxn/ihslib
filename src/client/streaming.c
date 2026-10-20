@@ -87,7 +87,8 @@ static void NotifyAuthorizationFailure(IHS_Client *client, const IHS_HostInfo *h
 static void SendCancel(IHS_Client *client, const IHS_HostInfo *host, uint32_t id) {
     CMsgRemoteDeviceStreamingCancelRequest msg = CMSG_REMOTE_DEVICE_STREAMING_CANCEL_REQUEST__INIT;
     msg.request_id = id;
-    IHS_ClientSend(client, host->address, k_ERemoteDeviceStreamingCancelRequest, (ProtobufCMessage *)&msg);
+    IHS_ClientSendControl(client, host, NULL, k_ERemoteDeviceStreamingCancelRequest,
+                          (ProtobufCMessage *)&msg);
 }
 static void CancelVisit(IHS_TimerTask *task, void *context) {
     IHS_UNUSED(task);
@@ -225,7 +226,15 @@ static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
     CMsgRemoteClientBroadcastHeader *header = responseContext->header;
     ProtobufCMessage *message = responseContext->message;
     IHS_StreamingState *state = IHS_TimerTaskGetContext(timer);
-    if (state->terminal || !IHS_ClientMatchesHost(&state->host, responseContext->address, header)) return;
+    if (state->terminal)
+        return;
+    if (client->callbacks.routing) {
+        /* BProcess already requires nonzero identity. Original response and
+         * progress handlers match request_id, not source IP/instance/target ID. */
+        if (!header->client_id)
+            return;
+    } else if (!IHS_ClientMatchesHost(client, &state->host, responseContext->address, header))
+        return;
     if (state->ticket && header->msg_type != k_ERemoteDeviceProofRequest) return;
     uint32_t id;
     switch (header->msg_type) {
@@ -293,8 +302,21 @@ static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
             if (wasAuthorizing) NotifyAuthorization(state, NULL, 0);
             /* Authorization notification may enqueue work but must not replace
              * this owner synchronously; see the callback contract. */
-            if (client->callbacks.streaming && client->callbacks.streaming->success) {
-                IHS_SocketAddress streamingAddress = {state->host.address.ip, response->port};
+            if (client->callbacks.streaming && client->callbacks.streaming->connection) {
+                IHS_StreamingConnection connection = {.clientId = header->client_id,
+                                                      .transport = response->transport,
+                                                      .port = response->port,
+                                                      .address = *responseContext->address,
+                                                      .sessionKey = key,
+                                                      .sessionKeyLen = keyLen,
+                                                      .certificate = response->cert,
+                                                      .relayServer = response->relay_server};
+                if (IHS_ClientAddressHasIP(&connection.address.ip) && connection.address.port)
+                    connection.address.port = (uint16_t)response->port;
+                client->callbacks.streaming->connection(client, &state->host, &connection,
+                                                        client->callbackContexts.streaming);
+            } else if (client->callbacks.streaming && client->callbacks.streaming->success) {
+                IHS_SocketAddress streamingAddress = {responseContext->address->ip, response->port};
                 client->callbacks.streaming->success(client, &state->host, &streamingAddress,
                                                      key, keyLen, client->callbackContexts.streaming);
             }
@@ -318,9 +340,10 @@ static void StreamingResponseVisit(IHS_TimerTask *timer, void *context) {
     }
 }
 
-static void SendEmptyProof(IHS_Client *client, IHS_SocketAddress address) {
+static void SendEmptyProof(IHS_Client *client, IHS_SocketAddress address, uint64_t clientId) {
     CMsgRemoteDeviceProofResponse response = CMSG_REMOTE_DEVICE_PROOF_RESPONSE__INIT;
-    IHS_ClientSend(client, address, k_ERemoteDeviceProofResponse, (ProtobufCMessage *)&response);
+    IHS_HostInfo peer = {.clientId = clientId};
+    IHS_ClientSendControl(client, &peer, &address, k_ERemoteDeviceProofResponse, &response.base);
 }
 static void ProofVisit(IHS_TimerTask *task, void *context) {
     StreamingResponseContext *incoming = context;
@@ -331,7 +354,7 @@ static void ProofVisit(IHS_TimerTask *task, void *context) {
      * instance are not a substitute for the current target (RE §133). */
     if (state->terminal || !incoming->header->client_id ||
         incoming->header->client_id != state->host.clientId) {
-        SendEmptyProof(client, *incoming->address);
+        SendEmptyProof(client, *incoming->address, incoming->header->client_id);
         return;
     }
     if (request->has_request_id && request->request_id != state->requestId)
@@ -389,8 +412,8 @@ static void ProofVisit(IHS_TimerTask *task, void *context) {
         response.request_id = state->requestId;
         response.updated_secret = request->update_secret;
         response.response = (ProtobufCBinaryData){length, encrypted};
-        IHS_ClientSend(client, *incoming->address, k_ERemoteDeviceProofResponse,
-                       (ProtobufCMessage *)&response);
+        IHS_ClientSendControl(client, &state->host, incoming->address, k_ERemoteDeviceProofResponse,
+                              (ProtobufCMessage *)&response);
     }
     free(encrypted);
 }
@@ -404,7 +427,7 @@ void IHS_ClientStreamingCallback(IHS_Client *client, const IHS_SocketAddress *ad
     if (header->msg_type == k_ERemoteDeviceProofRequest) {
         StreamingResponseContext context = {client, header, message, address};
         if (!IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.streaming, ProofVisit, &context))
-            SendEmptyProof(client, *address);
+            SendEmptyProof(client, *address, header->client_id);
         return;
     }
     if (header->msg_type == k_ERemoteDeviceStreamingResponse) {
@@ -413,19 +436,30 @@ void IHS_ClientStreamingCallback(IHS_Client *client, const IHS_SocketAddress *ad
         bool known = false, stale;
         IHS_BaseLock(&client->base);
         stale = !resp->request_id || resp->request_id != client->lastLaunchId;
-        if (IHS_ClientMatchesHost(&client->lastLaunchHost, address, header)) {
+        if (IHS_ClientMatchesHost(client, &client->lastLaunchHost, address, header)) {
             knownHost = client->lastLaunchHost;
             known = true;
         }
         for (unsigned i = 0; !known && i < 8; ++i) {
             if (client->canceled[i].requestId &&
-                IHS_ClientMatchesHost(&client->canceled[i].host, address, header)) {
+                IHS_ClientMatchesHost(client, &client->canceled[i].host, address, header)) {
                 knownHost = client->canceled[i].host;
                 known = true;
             }
         }
         IHS_BaseUnlock(&client->base);
         if (stale) {
+            if (client->callbacks.routing && resp->result == k_ERemoteDeviceStreamingInProgress) {
+                /* This inline original cancellation is an explicit reply to
+                 * the packet source, unlike StopStreaming's implicit cancel. */
+                IHS_HostInfo peer = {.clientId = header->client_id};
+                CMsgRemoteDeviceStreamingCancelRequest cancel =
+                    CMSG_REMOTE_DEVICE_STREAMING_CANCEL_REQUEST__INIT;
+                cancel.request_id = resp->request_id;
+                IHS_ClientSendControl(client, &peer, address, k_ERemoteDeviceStreamingCancelRequest,
+                                      &cancel.base);
+                return;
+            }
             /* Official handler cancels every mismatched InProgress, including
              * zero/unknown IDs, without a time or cancelled-ID-cache guard.
              * Only a previously selected, verified host can reach this send. */
@@ -442,6 +476,10 @@ void IHS_ClientStreamingCallback(IHS_Client *client, const IHS_SocketAddress *ad
 static bool SendStreamingRequest(IHS_StreamingState *state) {
     IHS_Client *client = state->client;
     IHS_HostInfo host = state->host;
+    if (client->callbacks.routing && client->callbacks.routing->host &&
+        !client->callbacks.routing->host(client, host.clientId, &host,
+                                         client->callbackContexts.routing))
+        return false;
     IHS_StreamingRequest request = state->request;
 
     CMsgRemoteDeviceStreamingRequest message = CMSG_REMOTE_DEVICE_STREAMING_REQUEST__INIT;
@@ -493,7 +531,7 @@ static bool SendStreamingRequest(IHS_StreamingState *state) {
      * at its own capture size. It does NOT gate the advertised codec list on this,
      * nor on anything else in this message: CMsgRemoteDeviceStreamingRequest has no
      * codec field at all. The host offers what its encoder can produce. */
-    message.device_version = "1.1.0";
+    message.device_version = request.allowSDR ? "1.3.32" : "1.1.0";
 
     uint8_t secret[32], token[32];
     IHS_BaseGetSecretKey(&client->base, secret);
@@ -504,8 +542,8 @@ static bool SendStreamingRequest(IHS_StreamingState *state) {
     message.device_token.data = token;
     message.device_token.len = sizeof(token);
 
-    message.n_supported_transport = 1;
-    EStreamTransport transports[] = {k_EStreamTransportUDP};
+    message.n_supported_transport = request.allowSDR ? 2 : 1;
+    EStreamTransport transports[] = {k_EStreamTransportUDP, k_EStreamTransportSDR};
     message.supported_transport = transports;
 
     /* Reserve gamepad slots the way Steam does: the host sets them up from the
@@ -530,9 +568,8 @@ static bool SendStreamingRequest(IHS_StreamingState *state) {
 
     IHS_ClientLog(client, IHS_LogLevelDebug, "Client",
                   "Sending streaming request packet to host %s", host.hostname);
-    IHS_ClientSend(client, host.address, k_ERemoteDeviceStreamingRequest,
-                   (ProtobufCMessage *)&message);
-    return true;
+    return IHS_ClientSendControl(client, &host, NULL, k_ERemoteDeviceStreamingRequest,
+                                 &message.base);
 }
 
 static void StreamingRequestCleanup(void *context) {
@@ -613,14 +650,18 @@ static void StreamingAuthorizationVisit(IHS_TimerTask *task, void *context) {
     IHS_StreamingState *state = IHS_TimerTaskGetContext(task);
     if (response->header->msg_type != k_ERemoteDeviceAuthorizationResponse || !response->message) return;
     CMsgRemoteDeviceAuthorizationResponse *resp = (void *)response->message;
-    if (!IHS_ClientMatchesHost(&state->host, response->address, response->header)) return;
+    if (!IHS_ClientMatchesHost(client, &state->host, response->address, response->header))
+        return;
     if (state->terminal || state->ticket || !state->authorizing) {
-        if (resp->has_auth_key) IHS_ClientAuthorizationConfirm(client, *response->address, k_ERemoteDeviceAuthorizationCanceled);
+        if (resp->has_auth_key)
+            IHS_ClientAuthorizationConfirm(client, *response->address, response->header->client_id,
+                                           k_ERemoteDeviceAuthorizationCanceled);
         return;
     }
     IHS_AuthorizationExchangeOutcome outcome = IHS_AuthorizationExchangeAccepted;
     if (resp->result == k_ERemoteDeviceAuthorizationSuccess && resp->has_auth_key) {
-        outcome = IHS_ClientAuthorizationExchange(client, &state->host, &state->authorization, resp);
+        outcome = IHS_ClientAuthorizationExchange(client, &state->host, &state->authorization, resp,
+                                                  response->address);
         if (outcome == IHS_AuthorizationExchangeWaiting) return;
     } else if (resp->result == k_ERemoteDeviceAuthorizationInProgress) return;
     if (resp->result != k_ERemoteDeviceAuthorizationSuccess ||

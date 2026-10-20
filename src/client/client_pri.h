@@ -86,11 +86,13 @@ struct IHS_Client {
         const IHS_ClientDiscoveryCallbacks *discovery;
         const IHS_ClientAuthorizationCallbacks *authorization;
         const IHS_ClientStreamingCallbacks *streaming;
+        const IHS_ClientRoutingCallbacks *routing;
     } callbacks;
     struct {
         void *discovery;
         void *authorization;
         void *streaming;
+        void *routing;
     } callbackContexts;
     struct {
         IHS_MessageCallback *discovery;
@@ -107,6 +109,20 @@ struct IHS_Client {
 
 bool IHS_ClientSend(IHS_Client *client, IHS_SocketAddress address, ERemoteClientBroadcastMsg type,
                     ProtobufCMessage *message);
+/* NULL source = implicit current-directory lookup; a complete source bypasses
+ * lookup. The legacy API falls back to host->address when no router is installed. */
+bool IHS_ClientSendControl(IHS_Client *, const IHS_HostInfo *, const IHS_SocketAddress *source,
+                           ERemoteClientBroadcastMsg, ProtobufCMessage *);
+static inline bool IHS_ClientAddressHasIP(const IHS_IPAddress *ip) {
+    const uint8_t *bytes = ip->family == IHS_IPAddressFamilyIPv4 ? ip->v4.data : ip->v6.data;
+    size_t count = ip->family == IHS_IPAddressFamilyIPv4   ? 4
+                   : ip->family == IHS_IPAddressFamilyIPv6 ? 16
+                                                           : 0;
+    for (size_t i = 0; i < count; ++i)
+        if (bytes[i])
+            return true;
+    return false;
+}
 
 /* Original BGetDeviceToken uses the producer's current secret and a fresh IV.
  * The caller supplies one snapshot shared with its authorization ticket. */
@@ -127,8 +143,11 @@ void IHS_ClientStreamingCallback(IHS_Client *client, const IHS_SocketAddress *ad
                                  CMsgRemoteClientBroadcastHeader *header, ProtobufCMessage *message);
 
 /* Caller validates transaction IDs separately; status/identity cannot replace them. */
-static inline bool IHS_ClientMatchesHost(const IHS_HostInfo *host,
-        const IHS_SocketAddress *address, const CMsgRemoteClientBroadcastHeader *header) {
+static inline bool IHS_ClientMatchesHost(IHS_Client *client, const IHS_HostInfo *host,
+                                         const IHS_SocketAddress *address,
+                                         const CMsgRemoteClientBroadcastHeader *header) {
+    if (client->callbacks.routing)
+        return header->has_client_id && header->client_id && header->client_id == host->clientId;
     return address->port == host->address.port &&
         IHS_IPAddressCompare(&address->ip, &host->address.ip) == 0 &&
         header->has_client_id && header->client_id == host->clientId &&

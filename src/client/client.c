@@ -262,6 +262,21 @@ void IHS_ClientSetStreamingCallbacks(IHS_Client *client,
     client->callbacks.streaming = callbacks;
     client->callbackContexts.streaming = context;
 }
+void IHS_ClientSetRoutingCallbacks(IHS_Client *client, const IHS_ClientRoutingCallbacks *callbacks,
+                                   void *context) {
+    IHS_BaseLock(&client->base);
+    client->callbacks.routing = callbacks;
+    client->callbackContexts.routing = context;
+    IHS_BaseUnlock(&client->base);
+}
+
+void IHS_ClientReceiveRemotePacket(IHS_Client *client, const uint8_t *wire, size_t size) {
+    if (!client || !wire || size > UINT32_MAX)
+        return;
+    IHS_SocketAddress source = {0};
+    IHS_Buffer buffer = IHS_BUFFER_WRAP(wire, size);
+    ClientRecvCallback(&client->base, &source, &buffer);
+}
 
 const char *IHS_ClientError(IHS_Client *client) {
     return "";
@@ -308,6 +323,71 @@ bool IHS_ClientSend(IHS_Client *client, IHS_SocketAddress address, ERemoteClient
     bool ret = IHS_BaseSend(&client->base, address, &buf);
     IHS_BufferClear(&buf, true);
     return ret;
+}
+
+bool IHS_ClientSendControl(IHS_Client *client, const IHS_HostInfo *host,
+                           const IHS_SocketAddress *source, ERemoteClientBroadcastMsg type,
+                           ProtobufCMessage *message) {
+    const IHS_ClientRoutingCallbacks *route = client->callbacks.routing;
+    if (!route) {
+        IHS_ClientSend(client, source ? *source : host->address, type, message);
+        return true; /* Original SendMessage does not check delivery success. */
+    }
+    uint64_t peer = host ? host->clientId : 0;
+    if (!source &&
+        (type == k_ERemoteDeviceAuthorizationCancelRequest ||
+         type == k_ERemoteDeviceStreamingCancelRequest) &&
+        route->host) {
+        IHS_HostInfo visible;
+        if (!route->host(client, peer, &visible, client->callbackContexts.routing))
+            return true;
+    }
+    IHS_SocketAddress address = source ? *source : (IHS_SocketAddress){0};
+    if (peer && (!IHS_ClientAddressHasIP(&address.ip) || !address.port) && route->resolve)
+        route->resolve(client, peer, &address, client->callbackContexts.routing);
+    bool direct = IHS_ClientAddressHasIP(&address.ip) && address.port;
+    uint8_t secret[32], token[32];
+    CMsgRemoteClientBroadcastHeader header = CMSG_REMOTE_CLIENT_BROADCAST_HEADER__INIT;
+    header.has_client_id = header.has_msg_type = true;
+    header.client_id = client->base.deviceId;
+    header.msg_type = type;
+    if (!direct) {
+        IHS_BaseGetSecretKey(&client->base, secret);
+        bool ok = IHS_ClientCreateDeviceToken(client, secret, token);
+        memset(secret, 0, sizeof(secret));
+        if (!ok)
+            return false;
+        header.has_device_token = true;
+        header.device_token = (ProtobufCBinaryData){sizeof(token), token};
+    }
+    size_t hs = protobuf_c_message_get_packed_size(&header.base);
+    size_t ms = message ? protobuf_c_message_get_packed_size(message) : 0;
+    if (hs > INT32_MAX || ms > INT32_MAX || ms > SIZE_MAX - hs - 16) {
+        memset(token, 0, sizeof(token));
+        return false;
+    }
+    size_t size = hs + ms + 16;
+    uint8_t *wire = malloc(size);
+    if (!wire) {
+        memset(token, 0, sizeof(token));
+        return false;
+    }
+    memcpy(wire, PACKET_MAGIC, 8);
+    IHS_WriteUInt32LE(wire + 8, (uint32_t)hs);
+    protobuf_c_message_pack(&header.base, wire + 12);
+    IHS_WriteUInt32LE(wire + 12 + hs, (uint32_t)ms);
+    if (message)
+        protobuf_c_message_pack(message, wire + 16 + hs);
+    if (direct) {
+        IHS_Buffer buffer = IHS_BUFFER_WRAP(wire, size);
+        IHS_BaseSend(&client->base, address, &buffer);
+    } else if (route->sendRemote) {
+        route->sendRemote(client, peer, wire, size, client->callbackContexts.routing);
+    }
+    memset(token, 0, sizeof(token));
+    memset(wire, 0, size);
+    free(wire);
+    return true;
 }
 
 bool IHS_ClientBroadcast(IHS_Client *client, ERemoteClientBroadcastMsg type,

@@ -88,6 +88,19 @@ bool __wrap_IHS_ClientSend(IHS_Client *c, IHS_SocketAddress a, ERemoteClientBroa
     }
     return __real_IHS_ClientSend(c, a, tag, m);
 }
+bool __real_IHS_ClientSendControl(IHS_Client *, const IHS_HostInfo *, const IHS_SocketAddress *,
+                                  ERemoteClientBroadcastMsg, ProtobufCMessage *);
+bool __wrap_IHS_ClientSendControl(IHS_Client *c, const IHS_HostInfo *host,
+                                  const IHS_SocketAddress *source, ERemoteClientBroadcastMsg tag,
+                                  ProtobufCMessage *m) {
+    if (tag == k_ERemoteDeviceAuthorizationConfirmed) {
+        unsigned n = atomic_load(&confirm_count);
+        assert(n < 64);
+        persist_at_confirm[n] = atomic_load(&persist_calls);
+        atomic_store_explicit(&confirm_count, n + 1, memory_order_release);
+    }
+    return __real_IHS_ClientSendControl(c, host, source, tag, m);
+}
 static void persisted(IHS_Client *c, const IHS_HostInfo *h, uint64_t id, const uint8_t secret[32],
                       void *ctx) {
     (void)h;
