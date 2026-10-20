@@ -39,7 +39,7 @@ static const uint8_t secretKey[32] = {
 
 static const char deviceName[] = "BABYLON STAGE34\0";
 
-static const IHS_ClientConfig clientConfig = {deviceId, secretKey, deviceName};
+static const IHS_ClientConfig clientConfig = {.deviceId = deviceId, .secretKey = secretKey, .deviceName = deviceName};
 
 static const IHS_SessionInfo sessionInfo = {
         .address = {

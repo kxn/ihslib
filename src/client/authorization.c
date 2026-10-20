@@ -39,6 +39,7 @@ typedef struct IHS_AuthorizationState {
     uint32_t requestId;
     bool terminal;
     bool timerFailed;
+    bool service;
     int64_t nextSendWallSecond;
 } IHS_AuthorizationState;
 
@@ -55,6 +56,39 @@ static void AuthorizationKeyExchange(IHS_Client *client, IHS_AuthorizationState 
                                      const CMsgRemoteDeviceAuthorizationResponse *resp,
                                      const IHS_SocketAddress *replySource, uint64_t replyClientId);
 
+static void ClearServicePairing(IHS_Client *client) {
+    /* Original state3 Stop still uses the old selected identity/request ID and
+     * attempts a streaming cancel when GetServerInfo (or its hint) is usable.
+     * In particular, a usable hint does not require a nonzero request ID. */
+    IHS_BaseLock(&client->base);
+    IHS_HostInfo host = client->lastLaunchHost;
+    uint32_t id = client->lastLaunchId;
+    bool active = client->servicePairing;
+    IHS_BaseUnlock(&client->base);
+    const IHS_ClientRoutingCallbacks *route = client->callbacks.routing;
+    IHS_HostInfo visible;
+    if (active && route && route->host &&
+        route->host(client, host.clientId, &visible, client->callbackContexts.routing)) {
+        CMsgRemoteDeviceStreamingCancelRequest cancel =
+            CMSG_REMOTE_DEVICE_STREAMING_CANCEL_REQUEST__INIT;
+        cancel.request_id = id;
+        IHS_ClientSendControl(client, &host, NULL, k_ERemoteDeviceStreamingCancelRequest,
+                              &cancel.base);
+    }
+    IHS_BaseLock(&client->base);
+    client->servicePairing = false;
+    client->lastLaunchId = 0;
+    memset(&client->lastLaunchHost, 0, sizeof(client->lastLaunchHost));
+    client->lastLaunchAuthorizing = client->lastLaunchHasTicket = false;
+    IHS_BaseUnlock(&client->base);
+}
+bool IHS_ClientAuthorizationServiceActive(IHS_Client *client) {
+    IHS_BaseLock(&client->base);
+    bool active = client->servicePairing;
+    IHS_BaseUnlock(&client->base);
+    return active;
+}
+
 void IHS_ClientAuthorizationSendCancel(IHS_Client *client, const IHS_HostInfo *host) {
     CMsgRemoteDeviceAuthorizationCancelRequest request = CMSG_REMOTE_DEVICE_AUTHORIZATION_CANCEL_REQUEST__INIT;
     IHS_ClientSendControl(client, host, NULL, k_ERemoteDeviceAuthorizationCancelRequest,
@@ -68,7 +102,10 @@ static void AuthorizationFail(IHS_Client *client, IHS_AuthorizationState *state,
     if (client->callbacks.authorization && client->callbacks.authorization->failed)
         client->callbacks.authorization->failed(client, &state->host, result,
                                                 client->callbackContexts.authorization);
-    IHS_ClientAuthorizationSendCancel(client, &state->host);
+    if (state->service)
+        ClearServicePairing(client);
+    else
+        IHS_ClientAuthorizationSendCancel(client, &state->host);
 }
 static void AuthorizationExhausted(void *opaque) {
     IHS_TimerTask *task = opaque;
@@ -95,6 +132,9 @@ bool IHS_ClientAuthorizationRequest(IHS_Client *client, const IHS_HostInfo *host
         free(state);
         return false;
     }
+    IHS_BaseLock(&client->base);
+    client->servicePairing = false;
+    IHS_BaseUnlock(&client->base);
     if (!IHS_TimerTaskStartOwned(client->timers, &client->taskHandles.authorization,
             AuthorizationRequestTimer, AuthorizationRequestCleanup, 0, state)) {
         IHS_AuthorizationKeyExchangeClear(&state->flow.keyExchange);
@@ -109,9 +149,15 @@ static void AuthorizationCancelVisit(IHS_TimerTask *task, void *context) {
     IHS_AuthorizationState *state = IHS_TimerTaskGetContext(task);
     CMsgRemoteDeviceAuthorizationCancelRequest request = CMSG_REMOTE_DEVICE_AUTHORIZATION_CANCEL_REQUEST__INIT;
     IHS_HostInfo host = state->host;
+    bool service = state->service;
+    /* Retire the owned slot synchronously so a replacement can start before
+     * the next timer tick. Only copied values may be used after cleanup. */
     IHS_TimerTaskStopOwned(client->timers, &client->taskHandles.authorization);
-    IHS_ClientSendControl(client, &host, NULL, k_ERemoteDeviceAuthorizationCancelRequest,
-                          &request.base);
+    if (service)
+        ClearServicePairing(client);
+    else
+        IHS_ClientSendControl(client, &host, NULL, k_ERemoteDeviceAuthorizationCancelRequest,
+                              &request.base);
 }
 
 bool IHS_ClientAuthorizationCancel(IHS_Client *client) {
@@ -132,7 +178,7 @@ static void AuthorizationResponseVisit(IHS_TimerTask *task, void *context) {
     CMsgRemoteClientBroadcastHeader *header = response->header;
     ProtobufCMessage *message = response->message;
     IHS_AuthorizationState *current = IHS_TimerTaskGetContext(task);
-    if (!client->callbacks.routing &&
+    if (!current->service && !client->callbacks.routing &&
         !IHS_ClientMatchesHost(client, &current->host, response->address, header))
         return;
     if (!header->client_id)
@@ -175,11 +221,22 @@ static void AuthorizationResponseVisit(IHS_TimerTask *task, void *context) {
         AuthorizationKeyExchange(client, state, task, resp, response->address, header->client_id);
         return;
     }
+    if (state->service && resp->result == k_ERemoteDeviceAuthorizationSuccess) {
+        /* State3's no-key compatibility branch persists the current temporary
+         * secret. State4's no-key branch deliberately does not (Core @79d7f8). */
+        uint8_t secret[32];
+        IHS_BaseGetSecretKey(&client->base, secret);
+        IHS_HostInfo peer = {.clientId = header->client_id, .address = *response->address};
+        if (client->callbacks.authorization && client->callbacks.authorization->persist)
+            client->callbacks.authorization->persist(client, &peer, resp->steamid, secret,
+                                                     client->callbackContexts.authorization);
+        memset(secret, 0, sizeof(secret));
+    }
     if (resp->result == k_ERemoteDeviceAuthorizationSuccess &&
         client->callbacks.authorization && client->callbacks.authorization->subscribe)
         client->callbacks.authorization->subscribe(client, resp->steamid,
                                                    client->callbackContexts.authorization);
-    if (client->callbacks.routing && header->client_id != state->host.clientId) {
+    if (!state->service && client->callbacks.routing && header->client_id != state->host.clientId) {
         if (resp->has_auth_key)
             IHS_ClientAuthorizationConfirm(client, *response->address, header->client_id,
                                            k_ERemoteDeviceAuthorizationCanceled);
@@ -187,6 +244,10 @@ static void AuthorizationResponseVisit(IHS_TimerTask *task, void *context) {
     }
     switch (resp->result) {
         case k_ERemoteDeviceAuthorizationInProgress:
+            if (state->service) {
+                AuthorizationFail(client, state, task, IHS_AuthorizationInProgress);
+                return;
+            }
             if (client->callbacks.authorization && client->callbacks.authorization->progress) {
                 client->callbacks.authorization->progress(client, &state->host, client->callbackContexts.authorization);
             }
@@ -195,9 +256,16 @@ static void AuthorizationResponseVisit(IHS_TimerTask *task, void *context) {
             state->terminal = true;
             IHS_TimerTaskStop(task);
             if (client->callbacks.authorization && client->callbacks.authorization->success) {
-                client->callbacks.authorization->success(client, &state->host, resp->steamid,
+                IHS_HostInfo peer = state->host;
+                if (state->service) {
+                    peer.clientId = header->client_id;
+                    peer.address = *response->address;
+                }
+                client->callbacks.authorization->success(client, &peer, resp->steamid,
                                                          client->callbackContexts.authorization);
             }
+            if (state->service)
+                ClearServicePairing(client);
             return;
         default:
             AuthorizationFail(client, state, task, (IHS_AuthorizationResult)resp->result);
@@ -248,6 +316,8 @@ void IHS_ClientAuthorizationCallback(IHS_Client *client, const IHS_SocketAddress
 static uint64_t AuthorizationRequestTimer(int runCount, void *data) {
     IHS_AuthorizationState *state = data;
     IHS_Client *client = state->client;
+    if (state->service)
+        return 1; /* Service owns publication; never retry as host cancel/request. */
     int64_t now = (int64_t)time(NULL);
     /* Original manager Update compares whole wall seconds, including clock
      * changes. The existing 1ms timer worker supplies our update cadence. */
@@ -270,6 +340,51 @@ bool IHS_ClientAuthorizationFlowInit(IHS_AuthorizationFlow *flow, const char *pi
     return false;
 }
 
+typedef struct AuthorizationRequestStorage {
+    CMsgRemoteDeviceAuthorizationRequest message;
+    uint8_t token[32], encrypted[2048], authKey[32];
+} AuthorizationRequestStorage;
+
+static bool CreateAuthorizationRequest(IHS_Client *client, IHS_SteamUniverse universe,
+                                       IHS_AuthorizationFlow *flow, uint32_t requestId,
+                                       AuthorizationRequestStorage *storage) {
+    uint8_t pubKey[384], secret[32], ticketBytes[2048];
+    size_t pubKeyLen = sizeof(pubKey), encryptedLen = sizeof(storage->encrypted);
+    if (!IHS_ClientAuthorizationPubKey(client, universe, pubKey, &pubKeyLen))
+        return false;
+    IHS_BaseGetSecretKey(&client->base, secret);
+    CMsgRemoteDeviceAuthorizationRequest__CKeyEscrowTicket ticket =
+        CMSG_REMOTE_DEVICE_AUTHORIZATION_REQUEST__CKEY_ESCROW__TICKET__INIT;
+    AuthorizationConfigureTicket(client, flow, secret, &ticket);
+    size_t ticketLen = protobuf_c_message_get_packed_size(&ticket.base);
+    if (ticketLen > sizeof(ticketBytes)) {
+        memset(secret, 0, sizeof(secret));
+        return false;
+    }
+    protobuf_c_message_pack(&ticket.base, ticketBytes);
+    bool tokenReady = IHS_ClientCreateDeviceToken(client, secret, storage->token);
+    memset(secret, 0, sizeof(secret));
+    if (!tokenReady) {
+        memset(ticketBytes, 0, sizeof(ticketBytes));
+        return false;
+    }
+    int crypto = IHS_CryptoRSAEncrypt(ticketBytes, ticketLen, pubKey, pubKeyLen, storage->encrypted,
+                                      &encryptedLen);
+    memset(ticketBytes, 0, sizeof(ticketBytes));
+    if (crypto)
+        return false;
+    IHS_AuthorizationKeyExchangeMaskedKey(&flow->keyExchange, storage->authKey);
+    CMsgRemoteDeviceAuthorizationRequest *request = &storage->message;
+    cmsg_remote_device_authorization_request__init(request);
+    request->device_name = client->base.deviceName;
+    request->device_token = (ProtobufCBinaryData){sizeof(storage->token), storage->token};
+    request->encrypted_request = (ProtobufCBinaryData){encryptedLen, storage->encrypted};
+    request->has_auth_key = request->has_request_id = true;
+    request->auth_key = (ProtobufCBinaryData){sizeof(storage->authKey), storage->authKey};
+    request->request_id = requestId;
+    return true;
+}
+
 bool IHS_ClientSendAuthorizationRequest(IHS_Client *client, const IHS_HostInfo *host,
                                        IHS_AuthorizationFlow *flow, uint32_t requestId) {
     IHS_HostInfo current = *host;
@@ -277,53 +392,77 @@ bool IHS_ClientSendAuthorizationRequest(IHS_Client *client, const IHS_HostInfo *
         !client->callbacks.routing->host(client, host->clientId, &current,
                                          client->callbackContexts.routing))
         return false;
-    host = &current;
-    uint8_t pubKey[384];
-    size_t pubKeyLen = sizeof(pubKey);
-    if (!IHS_ClientAuthorizationPubKey(client, host->universe, pubKey, &pubKeyLen)) {
+    AuthorizationRequestStorage storage;
+    bool ok = CreateAuthorizationRequest(client, current.universe, flow, requestId, &storage) &&
+              IHS_ClientSendControl(client, &current, NULL, k_ERemoteDeviceAuthorizationRequest,
+                                    &storage.message.base);
+    memset(&storage, 0, sizeof(storage));
+    return ok;
+}
+
+bool IHS_ClientAuthorizationPrepareService(IHS_Client *client, IHS_SteamUniverse universe,
+                                           const char *pin, uint8_t **body, size_t *size) {
+    *body = NULL;
+    *size = 0;
+    if (!pin || strlen(pin) != 4)
         return false;
-    }
-    uint8_t secret[32], token[32];
-    IHS_BaseGetSecretKey(&client->base, secret);
-    ProtobufCBinaryData deviceToken = {.data = token, .len = sizeof(token)};
-
-    /* Initialize and serialize ticket */
-    CMsgRemoteDeviceAuthorizationRequest__CKeyEscrowTicket ticket =
-            CMSG_REMOTE_DEVICE_AUTHORIZATION_REQUEST__CKEY_ESCROW__TICKET__INIT;
-    AuthorizationConfigureTicket(client, flow, secret, &ticket);
-    uint8_t serTicket[2048];
-    size_t serTicketLen = protobuf_c_message_pack(&ticket.base, serTicket);
-
-    /* RSA encrypt ticket data */
-    uint8_t encryptedTicket[2048];
-    ProtobufCBinaryData encryptedRequest = {.data = encryptedTicket, .len = sizeof(encryptedTicket)};
-    if (IHS_CryptoRSAEncrypt(serTicket, serTicketLen, pubKey, pubKeyLen, encryptedRequest.data,
-                              &encryptedRequest.len) != 0) {
-        memset(secret, 0, sizeof(secret));
+    IHS_BaseLock(&client->base);
+    uint32_t currentId = client->lastLaunchId;
+    IHS_HostInfo currentHost = client->lastLaunchHost;
+    IHS_BaseUnlock(&client->base);
+    /* Replacement does not erase the manager-lifetime public key/result cache. */
+    IHS_TimerTaskStopOwned(client->timers, &client->taskHandles.authorization);
+    IHS_TimerTaskStopOwned(client->timers, &client->taskHandles.streaming);
+    IHS_AuthorizationState *state = calloc(1, sizeof(*state));
+    if (!state)
         return false;
+    state->client = client;
+    state->service = true;
+    state->host.universe = universe;
+    state->requestId = currentId;
+    bool ok = IHS_ClientAuthorizationFlowInit(&state->flow, pin);
+    uint8_t secret[32] = {0};
+    while (ok) {
+        /* Official OnPairingStarted @79f054 retries the entire random block
+         * until byte zero is nonzero. A provider failure is a local guard. */
+        ok = IHS_CryptoRandomBytes(secret, sizeof(secret)) == 0;
+        if (!ok || secret[0])
+            break;
     }
-
-    bool tokenReady = IHS_ClientCreateDeviceToken(client, secret, token);
+    if (ok)
+        IHS_BaseSetSecretKey(&client->base, secret);
     memset(secret, 0, sizeof(secret));
-    if (!tokenReady) {
-        return false;
+    AuthorizationRequestStorage storage;
+    if (ok)
+        ok = CreateAuthorizationRequest(client, universe, &state->flow, currentId, &storage);
+    if (ok) {
+        *size = protobuf_c_message_get_packed_size(&storage.message.base);
+        *body = malloc(*size);
+        ok = *body != NULL;
+        if (ok)
+            protobuf_c_message_pack(&storage.message.base, *body);
     }
-
-    uint8_t authKey[IHS_CRYPTO_X25519_KEY_SIZE];
-    IHS_AuthorizationKeyExchangeMaskedKey(&flow->keyExchange, authKey);
-
-    CMsgRemoteDeviceAuthorizationRequest request = CMSG_REMOTE_DEVICE_AUTHORIZATION_REQUEST__INIT;
-    request.device_name = client->base.deviceName;
-    request.device_token = deviceToken;
-    request.encrypted_request = encryptedRequest;
-    request.has_auth_key = true;
-    request.auth_key.data = authKey;
-    request.auth_key.len = sizeof(authKey);
-    request.has_request_id = true;
-    request.request_id = requestId;
-
-    return IHS_ClientSendControl(client, host, NULL, k_ERemoteDeviceAuthorizationRequest,
-                                 &request.base);
+    memset(&storage, 0, sizeof(storage));
+    if (ok) {
+        IHS_BaseLock(&client->base);
+        client->lastLaunchId = currentId;
+        client->lastLaunchHost = currentHost;
+        client->lastLaunchHasTicket = client->lastLaunchAuthorizing = false;
+        client->servicePairing = true;
+        IHS_BaseUnlock(&client->base);
+        ok = IHS_TimerTaskStartOwned(client->timers, &client->taskHandles.authorization,
+                                     AuthorizationRequestTimer, AuthorizationRequestCleanup, 0,
+                                     state);
+    }
+    if (!ok) {
+        ClearServicePairing(client);
+        IHS_AuthorizationKeyExchangeClear(&state->flow.keyExchange);
+        free(state);
+        free(*body);
+        *body = NULL;
+        *size = 0;
+    }
+    return ok;
 }
 
 static void AuthorizationConfigureTicket(IHS_Client *client, IHS_AuthorizationFlow *flow,
@@ -344,6 +483,10 @@ static void AuthorizationConfigureTicket(IHS_Client *client, IHS_AuthorizationFl
     ticket->usage = k_EKeyEscrowUsageStreamingDevice;
 
     ticket->device_name = client->base.deviceName;
+    ticket->device_model = client->base.deviceModel;
+    ticket->device_serial = client->base.deviceSerial;
+    ticket->has_device_provisioning_id = true;
+    ticket->device_provisioning_id = client->base.deviceProvisioningId;
 }
 
 IHS_AuthorizationExchangeOutcome IHS_ClientAuthorizationExchange(
@@ -417,17 +560,24 @@ static void AuthorizationKeyExchange(IHS_Client *client, IHS_AuthorizationState 
     if (client->callbacks.authorization && client->callbacks.authorization->subscribe)
         client->callbacks.authorization->subscribe(client, resp->steamid,
                                                    client->callbackContexts.authorization);
-    if (outcome == IHS_AuthorizationExchangeAccepted && client->callbacks.routing &&
-        replyClientId != state->host.clientId) {
+    if (!state->service && outcome == IHS_AuthorizationExchangeAccepted &&
+        client->callbacks.routing && replyClientId != state->host.clientId) {
         IHS_ClientAuthorizationConfirm(client, *replySource, replyClientId,
                                        k_ERemoteDeviceAuthorizationCanceled);
         return;
     }
     state->terminal = true;
     IHS_TimerTaskStop(task);
+    IHS_HostInfo peer = state->host;
+    if (state->service) {
+        peer.clientId = replyClientId;
+        peer.address = *replySource;
+    }
     if (client->callbacks.authorization && client->callbacks.authorization->success)
-        client->callbacks.authorization->success(client, &state->host, resp->steamid,
+        client->callbacks.authorization->success(client, &peer, resp->steamid,
                                                  client->callbackContexts.authorization);
+    if (state->service)
+        ClearServicePairing(client);
 }
 
 static void AuthorizationRequestCleanup(void *data) {

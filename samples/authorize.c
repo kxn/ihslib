@@ -42,7 +42,7 @@ static bool AuthorizationStart = false;
 
 int main(int argc, char *argv[]) {
     IHS_Init();
-    IHS_ClientConfig config = {deviceId, secretKey, deviceName};
+    IHS_ClientConfig config = {.deviceId = deviceId, .secretKey = secretKey, .deviceName = deviceName};
     IHS_Client *client = IHS_ClientCreate(&config);
     IHS_ClientDiscoveryCallbacks dcallbacks = {
             .discovered = OnHostStatus,

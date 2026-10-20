@@ -62,6 +62,7 @@ struct IHS_Client {
     uint32_t lastLaunchId;
     bool lastLaunchAuthorizing;
     bool lastLaunchHasTicket; /* Successful reply retains explicit-cancel ownership. */
+    bool servicePairing;      /* State3; inspected under Base, private flow owned by auth task. */
     IHS_AuthorizationCache authorizationCache;
     atomic_bool deferAuthorization;
     struct {

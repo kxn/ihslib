@@ -72,6 +72,11 @@ void IHS_BaseInit(IHS_Base *base, const IHS_ClientConfig *config, IHS_BaseReceiv
     strncpy(base->deviceName, config->deviceName ? config->deviceName : "IHSLib",
             sizeof(base->deviceName) - 1);
     base->deviceName[sizeof(base->deviceName) - 1] = '\0';
+    snprintf(base->deviceModel, sizeof(base->deviceModel), "%s",
+             config->deviceModel ? config->deviceModel : "");
+    snprintf(base->deviceSerial, sizeof(base->deviceSerial), "%s",
+             config->deviceSerial ? config->deviceSerial : "");
+    base->deviceProvisioningId = config->deviceProvisioningId;
     memcpy(base->secretKey, config->secretKey, sizeof(base->secretKey));
 }
 

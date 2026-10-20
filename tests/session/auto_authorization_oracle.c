@@ -72,6 +72,24 @@ void __wrap_IHS_ClientStreamingCallback(IHS_Client *c, const IHS_SocketAddress *
     in_proof = false;
 }
 static unsigned keypairs, derives, saves, prompts, resumes, success_count, failures, iv_index;
+static bool service_preparing;
+static bool service_oracle, service_hint = true;
+static unsigned service_random_call, service_draw_count, publication_count,
+    service_notification_count;
+static uint8_t service_draws[64][32];
+static char publications[16][8192], ticket_wires[32][4096];
+static struct {
+    const char *kind;
+    uint64_t client;
+    unsigned error, state, rid;
+} service_notifications[32];
+static unsigned handshake_state(IHS_Client *c) {
+    return c->servicePairing          ? 3
+           : !c->lastLaunchId         ? 1
+           : c->lastLaunchHasTicket   ? 6
+           : c->lastLaunchAuthorizing ? 4
+                                      : 5;
+}
 static int failure_result;
 static uint8_t accepted_key[32];
 static size_t accepted_length;
@@ -107,6 +125,13 @@ static IHS_HostInfo route_host;
 static bool route_visible(IHS_Client *client, uint64_t id, IHS_HostInfo *out, void *ctx) {
     (void)client;
     (void)ctx;
+    if (service_oracle && IHS_ClientAuthorizationServiceActive(client)) {
+        if (!service_hint)
+            return false;
+        *out = route_host;
+        out->clientId = id;
+        return true; /* Explicit Source GetServerInfo/hint provider, not observed reachability. */
+    }
     if (id != route_host.clientId)
         return false;
     *out = route_host;
@@ -121,12 +146,12 @@ static const IHS_ClientRoutingCallbacks routing = {.host = route_visible, .resol
 static struct {
     unsigned tag, state, rid, failures;
     int result;
-    char cache[8192];
+    char cache[8192], secret[65];
 } send_states[64];
 static struct {
     unsigned state, rid, failures;
     int result;
-    char cache[8192];
+    char cache[8192], secret[65];
 } persist_states[64];
 time_t __wrap_time(time_t *out) {
     time_t n = atomic_load(&wall);
@@ -140,6 +165,13 @@ uint32_t __wrap_IHS_CryptoRandomUInt32(void) {
     return ids[random_id++];
 }
 int __wrap_IHS_CryptoRandomBytes(uint8_t *out, size_t n) {
+    if (service_preparing && n == 32 && service_random_call++ > 0) {
+        assert(service_draw_count < 64);
+        for (unsigned i = 0; i < 32; ++i)
+            out[i] = (uint8_t)(i + (service_random_call == 2 ? 0 : 64));
+        memcpy(service_draws[service_draw_count++], out, 32);
+        return 0;
+    }
     if (n == 4) {
         uint32_t r = 42;
         memcpy(out, &r, 4);
@@ -178,9 +210,10 @@ int __wrap_IHS_CryptoRSAEncrypt(const uint8_t *p, size_t n, const uint8_t *key, 
                                 uint8_t *out, size_t *size) {
     CMsgRemoteDeviceAuthorizationRequest__CKeyEscrowTicket *t = (void *)protobuf_c_message_unpack(
         &cmsg_remote_device_authorization_request__ckey_escrow__ticket__descriptor, NULL, n, p);
-    assert(t && t->has_payload && t->payload.len == 32 && t->password.len == 4 &&
-           !memcmp(t->password.data, "0042", 4));
+    assert(t && t->has_payload && t->payload.len == 32 && t->password.len == 4);
     assert(ticket_count < 32);
+    assert(n < sizeof(ticket_wires[0]) / 2);
+    text_hex(ticket_wires[ticket_count], p, n);
     memcpy(ticket_secrets[ticket_count++], t->payload.data, 32);
     protobuf_c_message_free_unpacked((void *)t, NULL);
     return __real_IHS_CryptoRSAEncrypt(p, n, key, k, out, size);
@@ -196,24 +229,37 @@ static void observe_send(IHS_Client *client, ERemoteClientBroadcastMsg tag) {
     IHS_BaseLock(&client->base);
     unsigned n = observed_count;
     send_states[n].tag = tag;
-    send_states[n].state = !client->lastLaunchId           ? 1
-                           : client->lastLaunchHasTicket   ? 6
-                           : client->lastLaunchAuthorizing ? 4
-                                                           : 5;
+    send_states[n].state = handshake_state(client);
     send_states[n].rid = client->lastLaunchId;
     send_states[n].failures = failures;
     send_states[n].result = client->authorizationCache.result;
     text_hex(send_states[n].cache, client->authorizationCache.key,
              client->authorizationCache.keyLen);
+    text_hex(send_states[n].secret, client->base.secretKey, 32);
     IHS_BaseUnlock(&client->base);
     observed_tags[observed_count] = tag;
     observed_saves[observed_count++] = saves;
 }
 bool __real_IHS_ClientSend(IHS_Client *, IHS_SocketAddress, ERemoteClientBroadcastMsg,
                            ProtobufCMessage *);
+static void observe_call(ERemoteClientBroadcastMsg tag, ProtobufCMessage *m) {
+    if (!service_oracle)
+        return;
+    assert(message_count < 64);
+    unsigned at = message_count++;
+    size_t size = m ? protobuf_c_message_get_packed_size(m) : 0;
+    assert(size < sizeof(bodies[0]) / 2);
+    uint8_t raw[2048];
+    if (m)
+        protobuf_c_message_pack(m, raw);
+    text_hex(bodies[at], raw, size);
+    tags[at] = tag;
+    saved_at_send[at] = saves;
+}
 bool __wrap_IHS_ClientSend(IHS_Client *c, IHS_SocketAddress address, ERemoteClientBroadcastMsg tag,
                            ProtobufCMessage *m) {
     observe_send(c, tag);
+    observe_call(tag, m);
     return __real_IHS_ClientSend(c, address, tag, m);
 }
 bool __real_IHS_ClientSendControl(IHS_Client *, const IHS_HostInfo *, const IHS_SocketAddress *,
@@ -222,6 +268,7 @@ bool __wrap_IHS_ClientSendControl(IHS_Client *c, const IHS_HostInfo *host,
                                   const IHS_SocketAddress *source, ERemoteClientBroadcastMsg tag,
                                   ProtobufCMessage *m) {
     observe_send(c, tag);
+    observe_call(tag, m);
     return __real_IHS_ClientSendControl(c, host, source, tag, m);
 }
 static void persist(IHS_Client *c, const IHS_HostInfo *h, uint64_t id, const uint8_t s[32],
@@ -233,14 +280,12 @@ static void persist(IHS_Client *c, const IHS_HostInfo *h, uint64_t id, const uin
     assert(!memcmp(s, selected, 32));
     assert(saves < 64);
     IHS_BaseLock(&c->base);
-    persist_states[saves].state = !c->lastLaunchId           ? 1
-                                  : c->lastLaunchHasTicket   ? 6
-                                  : c->lastLaunchAuthorizing ? 4
-                                                             : 5;
+    persist_states[saves].state = handshake_state(c);
     persist_states[saves].rid = c->lastLaunchId;
     persist_states[saves].failures = failures;
     persist_states[saves].result = c->authorizationCache.result;
     text_hex(persist_states[saves].cache, c->authorizationCache.key, c->authorizationCache.keyLen);
+    text_hex(persist_states[saves].secret, selected, 32);
     IHS_BaseUnlock(&c->base);
     saved_keys[saves].client = h->clientId;
     saved_keys[saves].steam = id;
@@ -275,6 +320,33 @@ static void authorized_fail(IHS_Client *c, const IHS_HostInfo *h, IHS_Authorizat
     (void)ctx;
     ++failures;
     failure_result = r;
+}
+static void service_notification(IHS_Client *c, const char *kind, uint64_t client, unsigned error) {
+    assert(service_notification_count < 32);
+    IHS_BaseLock(&c->base);
+    unsigned i = service_notification_count++;
+    service_notifications[i].kind = kind;
+    service_notifications[i].client = client;
+    service_notifications[i].error = error;
+    service_notifications[i].state = handshake_state(c);
+    service_notifications[i].rid = c->lastLaunchId;
+    IHS_BaseUnlock(&c->base);
+}
+static void service_authorized(IHS_Client *c, const IHS_HostInfo *h, uint64_t account, void *ctx) {
+    (void)account;
+    (void)ctx;
+    service_notification(c, "paired", h->clientId, 0);
+}
+static void service_failed(IHS_Client *c, const IHS_HostInfo *h, IHS_AuthorizationResult result,
+                           void *ctx) {
+    authorized_fail(c, h, result, ctx);
+    unsigned error = result == IHS_AuthorizationDenied        ? 2
+                     : result == IHS_AuthorizationNotLoggedIn ? 3
+                     : result == IHS_AuthorizationOffline     ? 4
+                     : result == IHS_AuthorizationBusy        ? 5
+                     : result == IHS_AuthorizationTimedOut    ? 6
+                                                              : 1;
+    service_notification(c, "failed", 0, error);
 }
 static void failed(IHS_Client *c, const IHS_HostInfo *h, IHS_StreamingResult r, void *ctx) {
     (void)c;
@@ -320,6 +392,10 @@ static void drain(void) {
         CMsgRemoteClientBroadcastHeader *h =
             cmsg_remote_client_broadcast_header__unpack(NULL, hs, wire + 12);
         assert(h);
+        if (service_oracle) {
+            cmsg_remote_client_broadcast_header__free_unpacked(h, NULL);
+            continue;
+        }
         unsigned at = message_count++;
         tags[at] = h->msg_type;
         assert(at < observed_count && observed_tags[at] == (unsigned)h->msg_type);
@@ -334,10 +410,7 @@ static void snapshot(IHS_Client *c) {
     uint8_t secret[32];
     IHS_ClientGetSecretKey(c, secret);
     IHS_BaseLock(&c->base);
-    unsigned state = c->lastLaunchId ? (c->lastLaunchHasTicket     ? 6
-                                        : c->lastLaunchAuthorizing ? 4
-                                                                   : 5)
-                                     : 1;
+    unsigned state = handshake_state(c);
     printf("{\"state\":%u,\"rid\":%u,\"secret\":\"", state, c->lastLaunchId);
     hex(secret, 32);
     printf("\",\"cache\":\"");
@@ -358,18 +431,44 @@ static void snapshot(IHS_Client *c) {
         hex(ticket_secrets[i], 32);
         printf("\"");
     }
+    printf("],\"ticket_wires\":[");
+    for (unsigned i = 0; i < ticket_count; ++i)
+        printf("%s\"%s\"", i ? "," : "", ticket_wires[i]);
+    printf("],\"publications\":[");
+    for (unsigned i = 0; i < publication_count; ++i)
+        printf("%s\"%s\"", i ? "," : "", publications[i]);
+    printf("],\"service_draws\":[");
+    for (unsigned i = 0; i < service_draw_count; ++i) {
+        printf("%s\"", i ? "," : "");
+        hex(service_draws[i], 32);
+        putchar('"');
+    }
+    printf("],\"service_notifications\":[");
+    for (unsigned i = 0; i < service_notification_count; ++i)
+        printf("%s{\"kind\":\"%s\",\"client\":%llu,\"error\":%u,\"state\":%u,\"rid\":%u}",
+               i ? "," : "", service_notifications[i].kind,
+               (unsigned long long)service_notifications[i].client, service_notifications[i].error,
+               service_notifications[i].state, service_notifications[i].rid);
     printf("],\"send_states\":[");
-    for (unsigned i = 0; i < observed_count; ++i)
+    for (unsigned i = 0; i < observed_count; ++i) {
         printf("%s{\"tag\":%u,\"state\":%u,\"rid\":%u,\"cache\":\"%s\","
-               "\"cached_result\":%d,\"failures\":%u}",
+               "\"cached_result\":%d,\"failures\":%u",
                i ? "," : "", send_states[i].tag, send_states[i].state, send_states[i].rid,
                send_states[i].cache, send_states[i].result, send_states[i].failures);
+        if (service_oracle)
+            printf(",\"secret\":\"%s\"", send_states[i].secret);
+        putchar('}');
+    }
     printf("],\"persist_states\":[");
-    for (unsigned i = 0; i < saves; ++i)
+    for (unsigned i = 0; i < saves; ++i) {
         printf("%s{\"state\":%u,\"rid\":%u,\"cache\":\"%s\","
-               "\"cached_result\":%d,\"failures\":%u}",
+               "\"cached_result\":%d,\"failures\":%u",
                i ? "," : "", persist_states[i].state, persist_states[i].rid,
                persist_states[i].cache, persist_states[i].result, persist_states[i].failures);
+        if (service_oracle)
+            printf(",\"secret\":\"%s\"", persist_states[i].secret);
+        putchar('}');
+    }
     printf("],\"saved_keys\":[");
     for (unsigned i = 0; i < saves; ++i)
         printf("%s{\"client\":%llu,\"steamid\":%llu,\"secret\":\"%s\"}", i ? "," : "",
@@ -436,14 +535,20 @@ int main(int argc, char **argv) {
     uint8_t secret[32];
     for (unsigned i = 0; i < 32; ++i)
         secret[i] = 32 + i;
-    IHS_ClientConfig cfg = {
-        .deviceId = 0x1122334455667788ULL, .secretKey = secret, .deviceName = "Switch fixture"};
+    IHS_ClientConfig cfg = {.deviceId = 0x1122334455667788ULL,
+                            .secretKey = secret,
+                            .deviceName = "Switch fixture",
+                            .deviceModel = "Switch model fixture",
+                            .deviceSerial = "serial fixture"};
     IHS_Client *c = IHS_ClientCreate(&cfg);
     assert(c);
     atomic_store(&receive_condition, c->receiveWake);
     IHS_ClientSetAuthorizationDeferred(c, true);
-    IHS_ClientAuthorizationCallbacks ac = {.persist = persist, .identity = identity,
-                                           .subscribe = subscribe};
+    IHS_ClientAuthorizationCallbacks ac = {.persist = persist,
+                                           .identity = identity,
+                                           .subscribe = subscribe,
+                                           .success = service_authorized,
+                                           .failed = service_failed};
     IHS_ClientStreamingCallbacks sc = {.authorization = authorization,
                                        .authorizationFailed = authorized_fail,
                                        .success = accepted,
@@ -463,22 +568,35 @@ int main(int argc, char **argv) {
     IHS_HostInfo host = {
         .clientId = 123, .universe = IHS_SteamUniversePublic, .address.port = ntohs(a.sin_port)};
     assert(IHS_IPAddressFromString(&host.address.ip, "127.0.0.1"));
+    bool service_mode = argc == 4 && !strcmp(argv[3], "service");
+    service_oracle =
+        service_mode; /* Service comparison observes caller sends, like its original fixture. */
     if (argc == 4) {
-        assert(!strcmp(argv[3], "routed"));
+        assert(service_mode || !strcmp(argv[3], "routed"));
         route_host = host;
         IHS_ClientSetRoutingCallbacks(c, &routing, NULL);
+    }
+    if (service_mode) {
+        /* Learn the real ephemeral UDP endpoint without starting an unrelated
+         * streaming transaction. This byte is a fixture socket bootstrap. */
+        uint8_t byte = 0;
+        IHS_Buffer bootstrap = IHS_BUFFER_WRAP(&byte, 1);
+        assert(IHS_BaseSend(&c->base, host.address, &bootstrap));
+        socklen_t length = sizeof(destination);
+        assert(recvfrom(peer, &byte, 1, 0, (void *)&destination, &length) == 1);
     }
     IHS_StreamingRequest request = {.networkTest = atoi(argv[1]) != 0,
                                     .keySteamId = argc == 3 ? strtoull(argv[2], NULL, 10) : 0};
     strcpy(request.pin, "9876");
-    assert(IHS_ClientStreamingRequest(c, &host, &request));
+    if (!service_mode)
+        assert(IHS_ClientStreamingRequest(c, &host, &request));
     /* Native has a separate RX owner; source's initial Start cannot interrupt
      * an in-progress manager Update. Let that real batch finish if needed. */
-    for (unsigned n = 0; n < 2000 && !observed_count; ++n) {
+    for (unsigned n = 0; !service_mode && n < 2000 && !observed_count; ++n) {
         IHS_ClientPumpAuthorization(c, 32);
         if (!observed_count) poll(NULL, 0, 1);
     }
-    assert(observed_count);
+    assert(service_mode || observed_count);
     snapshot(c);
     char line[8192];
     while (fgets(line, sizeof(line), stdin)) {
@@ -525,6 +643,38 @@ int main(int argc, char **argv) {
             unsigned failed;
             assert(sscanf(line, "%c %lld %u", &op, &time, &failed) == 3);
             fail_proof_encrypt = failed != 0;
+        } else if (op == 'a') {
+            char pin[16];
+            unsigned override;
+            int args = sscanf(line, "%c %lld %15s %u", &op, &time, pin, &override);
+            assert(args == 3 || args == 4);
+            if (args == 4) {
+                IHS_BaseLock(&c->base);
+                c->lastLaunchId = override;
+                IHS_BaseUnlock(&c->base);
+            }
+            uint8_t *body = NULL;
+            size_t size = 0;
+            service_preparing = true;
+            service_random_call = 0;
+            assert(IHS_ClientAuthorizationPrepareService(c, IHS_SteamUniversePublic, pin, &body,
+                                                         &size));
+            service_preparing = false;
+            assert(publication_count < 16 && size < sizeof(publications[0]) / 2);
+            text_hex(publications[publication_count++], body, size);
+            memset(body, 0, size);
+            free(body);
+            service_notification(c, "code", 0, 0);
+        } else if (op == 'z') {
+            IHS_ClientAuthorizationCancel(c);
+        } else if (op == 'h') {
+            unsigned enabled;
+            assert(sscanf(line, "%c %lld %u", &op, &time, &enabled) == 3 && enabled <= 1);
+            service_hint = enabled != 0;
+        } else if (op == 'k') {
+            strcpy(request.pin, "9876");
+            assert(IHS_ClientStreamingRequest(c, &host, &request));
+            IHS_ClientPumpAuthorization(c, 32);
         } else if (op == 's') {
             request.pin[0] = 0; /* §133 replacement Start receives empty PIN. */
             assert(IHS_ClientStreamingRequest(c, &host, &request));

@@ -39,7 +39,7 @@ static void Log(IHS_LogLevel level, const char *tag, const char *message);
 int main(int argc, char *argv[]) {
     signal(SIGINT, InterruptHandler);
     IHS_Init();
-    IHS_ClientConfig config = {deviceId, secretKey, deviceName};
+    IHS_ClientConfig config = {.deviceId = deviceId, .secretKey = secretKey, .deviceName = deviceName};
     IHS_Client *client = IHS_ClientCreate(&config);
     ActiveClient = client;
     IHS_ClientSetLogFunction(client, Log);

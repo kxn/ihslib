@@ -34,6 +34,10 @@ typedef struct IHS_ClientConfig {
     uint64_t deviceId;
     const uint8_t *secretKey;
     const char *deviceName;
+    /* Optional descriptive escrow-ticket metadata; zero-initialize unused
+     * fields. Strings are copied on client/session creation, not capabilities. */
+    const char *deviceModel, *deviceSerial;
+    uint32_t deviceProvisioningId;
 } IHS_ClientConfig;
 
 typedef enum IHS_SteamUniverse {

@@ -328,6 +328,16 @@ bool IHS_ClientSetDiscoveryDirectory(IHS_Client *client,
  */
 bool IHS_ClientAuthorizationRequest(IHS_Client *client, const IHS_HostInfo *host, const char *pin);
 
+/** Prepare an unknown-host service pairing using its server-assigned PIN.
+ * Publishes a state-3 owner sharing the client's current secret/key-result cache.
+ * The caller publishes the returned authorization BODY via SetPairingInfo and
+ * frees it with free(). No discovery envelope or random request ID is added.
+ * Failure leaves *body=NULL. All incoming auth frames use the ordinary receive
+ * and deferred pump APIs. Cancel retires this owner without a host cancel9. */
+bool IHS_ClientAuthorizationPrepareService(IHS_Client *, IHS_SteamUniverse, const char *pin,
+                                           uint8_t **body, size_t *size);
+bool IHS_ClientAuthorizationServiceActive(IHS_Client *);
+
 bool IHS_ClientAuthorizationCancel(IHS_Client *client);
 
 /* ----------------------------------------------------

@@ -65,6 +65,8 @@ struct IHS_Base {
     uint64_t deviceId;
     uint8_t secretKey[32];
     char deviceName[64];
+    char deviceModel[64], deviceSerial[64];
+    uint32_t deviceProvisioningId;
 
     struct {
         /* Logging may run under control/decoder locks. A callback snapshot

@@ -154,8 +154,15 @@ bool IHS_ClientStreamingCancel(IHS_Client *client) {
 
 bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
                                 const IHS_StreamingRequest *request) {
+    bool wasService = IHS_ClientAuthorizationServiceActive(client);
+    if (wasService) {
+        IHS_TimerTaskStopOwned(client->timers, &client->taskHandles.authorization);
+        IHS_BaseLock(&client->base);
+        client->servicePairing = false; /* Replacement, not CancelPairing/Stop. */
+        IHS_BaseUnlock(&client->base);
+    }
     IHS_BaseLock(&client->base);
-    bool sameWaitingHost = client->lastLaunchId && !client->lastLaunchHasTicket &&
+    bool sameWaitingHost = !wasService && client->lastLaunchId && !client->lastLaunchHasTicket &&
                            !client->lastLaunchAuthorizing &&
                            client->lastLaunchHost.clientId == host->clientId;
     IHS_BaseUnlock(&client->base);
