@@ -82,6 +82,35 @@ static unsigned tags[64], saved_at_send[64], message_count;
 static unsigned observed_tags[64], observed_saves[64], observed_count;
 static uint8_t ticket_secrets[32][32];
 static unsigned ticket_count;
+static struct {
+    uint64_t client, steam;
+    char secret[65];
+} saved_keys[64];
+static IHS_HostInfo route_host;
+static bool route_visible(IHS_Client *client, uint64_t id, IHS_HostInfo *out, void *ctx) {
+    (void)client;
+    (void)ctx;
+    if (id != route_host.clientId)
+        return false;
+    *out = route_host;
+    return true;
+}
+static void route_address(IHS_Client *client, uint64_t id, IHS_SocketAddress *out, void *ctx) {
+    (void)client;
+    (void)ctx;
+    *out = id == route_host.clientId ? route_host.address : (IHS_SocketAddress){0};
+}
+static const IHS_ClientRoutingCallbacks routing = {.host = route_visible, .resolve = route_address};
+static struct {
+    unsigned tag, state, rid, failures;
+    int result;
+    char cache[8192];
+} send_states[64];
+static struct {
+    unsigned state, rid, failures;
+    int result;
+    char cache[8192];
+} persist_states[64];
 time_t __wrap_time(time_t *out) {
     time_t n = atomic_load(&wall);
     if (out)
@@ -139,13 +168,26 @@ int __wrap_IHS_CryptoRSAEncrypt(const uint8_t *p, size_t n, const uint8_t *key, 
     protobuf_c_message_free_unpacked((void *)t, NULL);
     return __real_IHS_CryptoRSAEncrypt(p, n, key, k, out, size);
 }
-static void observe_send(ERemoteClientBroadcastMsg tag) {
+static void observe_send(IHS_Client *client, ERemoteClientBroadcastMsg tag) {
     if (in_proof) {
         assert(proof_count < 128);
         proof_ops[proof_count].op = "send";
         proof_ops[proof_count++].tag = tag;
     }
     assert(observed_count < 64);
+    IHS_BaseLock(&client->base);
+    unsigned n = observed_count;
+    send_states[n].tag = tag;
+    send_states[n].state = !client->lastLaunchId           ? 1
+                           : client->lastLaunchHasTicket   ? 6
+                           : client->lastLaunchAuthorizing ? 4
+                                                           : 5;
+    send_states[n].rid = client->lastLaunchId;
+    send_states[n].failures = failures;
+    send_states[n].result = client->authorizationCache.result;
+    text_hex(send_states[n].cache, client->authorizationCache.key,
+             client->authorizationCache.keyLen);
+    IHS_BaseUnlock(&client->base);
     observed_tags[observed_count] = tag;
     observed_saves[observed_count++] = saves;
 }
@@ -153,7 +195,7 @@ bool __real_IHS_ClientSend(IHS_Client *, IHS_SocketAddress, ERemoteClientBroadca
                            ProtobufCMessage *);
 bool __wrap_IHS_ClientSend(IHS_Client *c, IHS_SocketAddress address, ERemoteClientBroadcastMsg tag,
                            ProtobufCMessage *m) {
-    observe_send(tag);
+    observe_send(c, tag);
     return __real_IHS_ClientSend(c, address, tag, m);
 }
 bool __real_IHS_ClientSendControl(IHS_Client *, const IHS_HostInfo *, const IHS_SocketAddress *,
@@ -161,17 +203,29 @@ bool __real_IHS_ClientSendControl(IHS_Client *, const IHS_HostInfo *, const IHS_
 bool __wrap_IHS_ClientSendControl(IHS_Client *c, const IHS_HostInfo *host,
                                   const IHS_SocketAddress *source, ERemoteClientBroadcastMsg tag,
                                   ProtobufCMessage *m) {
-    observe_send(tag);
+    observe_send(c, tag);
     return __real_IHS_ClientSendControl(c, host, source, tag, m);
 }
 static void persist(IHS_Client *c, const IHS_HostInfo *h, uint64_t id, const uint8_t s[32],
                     void *ctx) {
-    (void)h;
-    (void)id;
     (void)ctx;
     uint8_t selected[32];
     IHS_ClientGetSecretKey(c, selected);
     assert(!memcmp(s, selected, 32));
+    assert(saves < 64);
+    IHS_BaseLock(&c->base);
+    persist_states[saves].state = !c->lastLaunchId           ? 1
+                                  : c->lastLaunchHasTicket   ? 6
+                                  : c->lastLaunchAuthorizing ? 4
+                                                             : 5;
+    persist_states[saves].rid = c->lastLaunchId;
+    persist_states[saves].failures = failures;
+    persist_states[saves].result = c->authorizationCache.result;
+    text_hex(persist_states[saves].cache, c->authorizationCache.key, c->authorizationCache.keyLen);
+    IHS_BaseUnlock(&c->base);
+    saved_keys[saves].client = h->clientId;
+    saved_keys[saves].steam = id;
+    text_hex(saved_keys[saves].secret, s, 32);
     ++saves;
 }
 static void persist_proof(IHS_Client *c, const IHS_HostInfo *h, uint64_t id, const uint8_t key[32],
@@ -285,6 +339,23 @@ static void snapshot(IHS_Client *c) {
         hex(ticket_secrets[i], 32);
         printf("\"");
     }
+    printf("],\"send_states\":[");
+    for (unsigned i = 0; i < observed_count; ++i)
+        printf("%s{\"tag\":%u,\"state\":%u,\"rid\":%u,\"cache\":\"%s\","
+               "\"cached_result\":%d,\"failures\":%u}",
+               i ? "," : "", send_states[i].tag, send_states[i].state, send_states[i].rid,
+               send_states[i].cache, send_states[i].result, send_states[i].failures);
+    printf("],\"persist_states\":[");
+    for (unsigned i = 0; i < saves; ++i)
+        printf("%s{\"state\":%u,\"rid\":%u,\"cache\":\"%s\","
+               "\"cached_result\":%d,\"failures\":%u}",
+               i ? "," : "", persist_states[i].state, persist_states[i].rid,
+               persist_states[i].cache, persist_states[i].result, persist_states[i].failures);
+    printf("],\"saved_keys\":[");
+    for (unsigned i = 0; i < saves; ++i)
+        printf("%s{\"client\":%llu,\"steamid\":%llu,\"secret\":\"%s\"}", i ? "," : "",
+               (unsigned long long)saved_keys[i].client, (unsigned long long)saved_keys[i].steam,
+               saved_keys[i].secret);
     printf("],\"proof_ops\":[");
     for (unsigned i = 0; i < proof_count; ++i) {
         printf("%s{\"op\":\"%s\",\"plain\":\"%s\",\"secret\":\"%s\",\"client\":%llu,\"steamid\":%"
@@ -329,7 +400,7 @@ static void packet(IHS_Client *c, unsigned tag, uint64_t host, const char *body,
         IHS_ClientPumpAuthorization(c, 32);
 }
 int main(int argc, char **argv) {
-    assert(argc == 2 || argc == 3);
+    assert(argc >= 2 && argc <= 4);
     atomic_store(&wall, 1000);
     IHS_Init();
     peer = socket(AF_INET, SOCK_DGRAM, 0);
@@ -367,6 +438,11 @@ int main(int argc, char **argv) {
     IHS_HostInfo host = {
         .clientId = 123, .universe = IHS_SteamUniversePublic, .address.port = ntohs(a.sin_port)};
     assert(IHS_IPAddressFromString(&host.address.ip, "127.0.0.1"));
+    if (argc == 4) {
+        assert(!strcmp(argv[3], "routed"));
+        route_host = host;
+        IHS_ClientSetRoutingCallbacks(c, &routing, NULL);
+    }
     IHS_StreamingRequest request = {.networkTest = atoi(argv[1]) != 0,
                                     .keySteamId = argc == 3 ? strtoull(argv[2], NULL, 10) : 0};
     strcpy(request.pin, "9876");

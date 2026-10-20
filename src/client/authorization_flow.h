@@ -21,10 +21,13 @@ typedef enum IHS_AuthorizationExchangeOutcome {
 bool IHS_ClientAuthorizationFlowInit(IHS_AuthorizationFlow *, const char *pin);
 bool IHS_ClientSendAuthorizationRequest(IHS_Client *, const IHS_HostInfo *, IHS_AuthorizationFlow *,
                                         uint32_t requestId);
+/* stopExhausted retires/notifies the selected owner without destroying this
+ * client/visited task. It runs before cache replacement and reply confirmation. */
 IHS_AuthorizationExchangeOutcome
 IHS_ClientAuthorizationExchange(IHS_Client *, const IHS_HostInfo *, IHS_AuthorizationFlow *,
                                 const CMsgRemoteDeviceAuthorizationResponse *,
-                                const IHS_SocketAddress *replySource);
+                                const IHS_SocketAddress *replySource, uint64_t replyClientId,
+                                void (*stopExhausted)(void *), void *stopContext);
 void IHS_ClientAuthorizationSendCancel(IHS_Client *, const IHS_HostInfo *);
 void IHS_ClientAuthorizationConfirm(IHS_Client *, IHS_SocketAddress, uint64_t clientId,
                                     ERemoteDeviceAuthorizationResult);

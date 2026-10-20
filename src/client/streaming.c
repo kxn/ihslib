@@ -109,13 +109,32 @@ static void RetireForReplacement(IHS_Client *client) {
     client->lastLaunchHasTicket = client->lastLaunchAuthorizing = false;
     IHS_BaseUnlock(&client->base);
 }
-bool IHS_ClientStreamingCancel(IHS_Client *client) {
-    /* Visit locks out callbacks/retries before retiring the transaction. */
-    IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.streaming, CancelVisit, client);
+typedef struct {
+    IHS_Client *client;
+    bool canceled;
+} StreamingCancelContext;
+static void CancelCurrentLaunch(IHS_TimerTask *task, void *context) {
+    StreamingCancelContext *cancel = context;
+    IHS_Client *client = cancel->client;
+    if (task) {
+        IHS_StreamingState *state = IHS_TimerTaskGetContext(task);
+        state->terminal = true;
+        IHS_TimerTaskStop(task); /* Defer destruction until this visitor returns. */
+    }
     IHS_BaseLock(&client->base);
     uint32_t id = client->lastLaunchId;
     bool authorizing = client->lastLaunchAuthorizing;
     IHS_HostInfo host = client->lastLaunchHost;
+    IHS_BaseUnlock(&client->base);
+    /* Original Stop sends with its current identity/state, then clears it.
+     * Keep the timer owner across both stages, including an already-empty slot. */
+    if (id) {
+        if (authorizing)
+            IHS_ClientAuthorizationSendCancel(client, &host);
+        else
+            SendCancel(client, &host, id);
+    }
+    IHS_BaseLock(&client->base);
     if (id) {
         unsigned i = client->canceledNext++ % 8;
         client->canceled[i].host = host;
@@ -124,11 +143,13 @@ bool IHS_ClientStreamingCancel(IHS_Client *client) {
     }
     client->lastLaunchHasTicket = client->lastLaunchAuthorizing = false;
     IHS_BaseUnlock(&client->base);
-    if (id) {
-        if (authorizing) IHS_ClientAuthorizationSendCancel(client, &host);
-        else SendCancel(client, &host, id);
-    }
-    return id != 0;
+    cancel->canceled = id != 0;
+}
+bool IHS_ClientStreamingCancel(IHS_Client *client) {
+    StreamingCancelContext context = {.client = client};
+    IHS_TimerTaskVisitSlot(client->timers, &client->taskHandles.streaming, CancelCurrentLaunch,
+                           &context);
+    return context.canceled;
 }
 
 bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
@@ -644,13 +665,27 @@ void IHS_ClientStreamingUpdate(IHS_Client *client) {
     IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.streaming, StreamingUpdateVisit, NULL);
 }
 
+static void StopAuthorization(IHS_TimerTask *task, IHS_AuthorizationResult result) {
+    IHS_StreamingState *state = IHS_TimerTaskGetContext(task);
+    state->terminal = true;
+    IHS_TimerTaskStop(task);
+    NotifyAuthorizationFailure(state->client, &state->host, result);
+    IHS_ClientAuthorizationSendCancel(state->client, &state->host);
+    ClearLaunch(state);
+}
+static void StreamingAuthorizationExhausted(void *task) {
+    StopAuthorization(task, IHS_AuthorizationDenied);
+}
 static void StreamingAuthorizationVisit(IHS_TimerTask *task, void *context) {
     StreamingResponseContext *response = context;
     IHS_Client *client = response->client;
     IHS_StreamingState *state = IHS_TimerTaskGetContext(task);
     if (response->header->msg_type != k_ERemoteDeviceAuthorizationResponse || !response->message) return;
     CMsgRemoteDeviceAuthorizationResponse *resp = (void *)response->message;
-    if (!IHS_ClientMatchesHost(client, &state->host, response->address, response->header))
+    if (!client->callbacks.routing &&
+        !IHS_ClientMatchesHost(client, &state->host, response->address, response->header))
+        return;
+    if (!response->header->client_id)
         return;
     if (state->terminal || state->ticket || !state->authorizing) {
         if (resp->has_auth_key)
@@ -661,18 +696,28 @@ static void StreamingAuthorizationVisit(IHS_TimerTask *task, void *context) {
     IHS_AuthorizationExchangeOutcome outcome = IHS_AuthorizationExchangeAccepted;
     if (resp->result == k_ERemoteDeviceAuthorizationSuccess && resp->has_auth_key) {
         outcome = IHS_ClientAuthorizationExchange(client, &state->host, &state->authorization, resp,
-                                                  response->address);
-        if (outcome == IHS_AuthorizationExchangeWaiting) return;
-    } else if (resp->result == k_ERemoteDeviceAuthorizationInProgress) return;
-    if (resp->result != k_ERemoteDeviceAuthorizationSuccess ||
-        outcome == IHS_AuthorizationExchangeExhausted || outcome == IHS_AuthorizationExchangeResourceFailure) {
-        state->terminal = true;
-        IHS_TimerTaskStop(task);
-        if (outcome != IHS_AuthorizationExchangeExhausted) IHS_ClientAuthorizationSendCancel(client, &state->host);
-        ClearLaunch(state);
-        IHS_AuthorizationResult result = outcome == IHS_AuthorizationExchangeExhausted ? IHS_AuthorizationDenied :
-            outcome == IHS_AuthorizationExchangeResourceFailure ? IHS_AuthorizationFailed : (IHS_AuthorizationResult)resp->result;
-        NotifyAuthorizationFailure(client, &state->host, result);
+                                                  response->address, response->header->client_id,
+                                                  StreamingAuthorizationExhausted, task);
+        if (outcome == IHS_AuthorizationExchangeWaiting ||
+            outcome == IHS_AuthorizationExchangeExhausted)
+            return;
+    }
+    /* Exhaustion stops the selected transaction before confirming the actual
+     * reply. A foreign accepted key instead leaves that transaction waiting. */
+    bool exchangeFailed = outcome == IHS_AuthorizationExchangeResourceFailure;
+    if (!exchangeFailed && client->callbacks.routing &&
+        response->header->client_id != state->host.clientId) {
+        if (resp->has_auth_key)
+            IHS_ClientAuthorizationConfirm(client, *response->address, response->header->client_id,
+                                           k_ERemoteDeviceAuthorizationCanceled);
+        return;
+    }
+    if (!exchangeFailed && resp->result == k_ERemoteDeviceAuthorizationInProgress)
+        return;
+    if (resp->result != k_ERemoteDeviceAuthorizationSuccess || exchangeFailed) {
+        IHS_AuthorizationResult result =
+            exchangeFailed ? IHS_AuthorizationFailed : (IHS_AuthorizationResult)resp->result;
+        StopAuthorization(task, result);
         return;
     }
     SetAuthorizing(state, false);
