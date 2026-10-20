@@ -21,6 +21,8 @@ typedef enum IHS_AuthorizationExchangeOutcome {
 bool IHS_ClientAuthorizationFlowInit(IHS_AuthorizationFlow *, const char *pin);
 bool IHS_ClientSendAuthorizationRequest(IHS_Client *, const IHS_HostInfo *, IHS_AuthorizationFlow *,
                                         uint32_t requestId);
+IHS_ClientRequestFailure IHS_ClientTryAuthorizationRequest(IHS_Client *, const IHS_HostInfo *,
+                                                          IHS_AuthorizationFlow *, uint32_t requestId);
 /* stopExhausted retires/notifies the selected owner without destroying this
  * client/visited task. It runs before cache replacement and reply confirmation. */
 IHS_AuthorizationExchangeOutcome

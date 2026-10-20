@@ -50,7 +50,7 @@ typedef struct IHS_StreamingState {
 static uint64_t StreamingRequestTimer(int runCount, void *context);
 
 static void StreamingRequestCleanup(void *context);
-static bool SendStreamingRequest(IHS_StreamingState *state);
+static IHS_ClientRequestFailure SendStreamingRequest(IHS_StreamingState *state);
 static bool SendCurrentRequest(IHS_StreamingState *state);
 
 static void SetAuthorizing(IHS_StreamingState *state, bool value) {
@@ -507,13 +507,13 @@ void IHS_ClientStreamingCallback(IHS_Client *client, const IHS_SocketAddress *ad
                             &context);
 }
 
-static bool SendStreamingRequest(IHS_StreamingState *state) {
+static IHS_ClientRequestFailure SendStreamingRequest(IHS_StreamingState *state) {
     IHS_Client *client = state->client;
     IHS_HostInfo host = state->host;
     if (client->callbacks.routing && client->callbacks.routing->host &&
         !client->callbacks.routing->host(client, host.clientId, &host,
                                          client->callbackContexts.routing))
-        return false;
+        return IHS_ClientRequestFailureUnavailable;
     IHS_StreamingRequest request = state->request;
 
     CMsgRemoteDeviceStreamingRequest message = CMSG_REMOTE_DEVICE_STREAMING_REQUEST__INIT;
@@ -571,7 +571,7 @@ static bool SendStreamingRequest(IHS_StreamingState *state) {
     IHS_BaseGetSecretKey(&client->base, secret);
     bool tokenReady = IHS_ClientCreateDeviceToken(client, secret, token);
     memset(secret, 0, sizeof(secret));
-    if (!tokenReady) return false;
+    if (!tokenReady) return IHS_ClientRequestFailureGeneric;
     message.has_device_token = true;
     message.device_token.data = token;
     message.device_token.len = sizeof(token);
@@ -602,8 +602,12 @@ static bool SendStreamingRequest(IHS_StreamingState *state) {
 
     IHS_ClientLog(client, IHS_LogLevelDebug, "Client",
                   "Sending streaming request packet to host %s", host.hostname);
-    return IHS_ClientSendControl(client, &host, NULL, k_ERemoteDeviceStreamingRequest,
-                                 &message.base);
+    bool sent = IHS_ClientSendControl(client, &host, NULL, k_ERemoteDeviceStreamingRequest,
+                                      &message.base);
+    /* Routed producers call the original void SendMessage boundary. A lower
+     * sender rejection does not clear the request or synthesize a new error. */
+    return sent || client->callbacks.routing
+        ? IHS_ClientRequestFailureNone : IHS_ClientRequestFailureGeneric;
 }
 
 static void StreamingRequestCleanup(void *context) {
@@ -626,13 +630,23 @@ void IHS_ClientStreamingEstablished(IHS_Client *client) {
 }
 
 /* Sender failure policy is shared by immediate responses and due Updates.
- * No failure callback runs on the timer hot path: cleanup observes retirement. */
+ * Routed observers see the old phase before Stop; legacy cleanup is separate. */
 static bool SendCurrentRequest(IHS_StreamingState *state) {
     IHS_Client *client = state->client;
-    bool ok = state->authorizing
-        ? IHS_ClientSendAuthorizationRequest(client, &state->host, &state->authorization, state->requestId)
+    IHS_ClientRequestFailure failure = state->authorizing
+        ? IHS_ClientTryAuthorizationRequest(client, &state->host, &state->authorization, state->requestId)
         : SendStreamingRequest(state);
-    if (!ok) {
+    if (failure != IHS_ClientRequestFailureNone) {
+        const IHS_ClientRoutingCallbacks *route = client->callbacks.routing;
+        if (route && route->requestFailed) {
+            state->terminal = true;
+            /* Original Stop notifies with the old phase/ID/target, then
+             * conditionally cancels and clears them. Do not notify again from
+             * cleanup; Stop marks the visited task for deferred retirement. */
+            route->requestFailed(client, failure, client->callbackContexts.routing);
+            IHS_ClientStreamingCancel(client);
+            return false;
+        }
         state->terminal = state->timerFailed = true;
         if (state->authorizing) IHS_ClientAuthorizationSendCancel(client, &state->host);
         else SendCancel(client, &state->host, state->requestId);

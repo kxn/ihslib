@@ -194,8 +194,22 @@ bool IHS_ClientAuthorizationRequest(IHS_Client *client, const IHS_HostInfo *host
     return true;
 }
 
+typedef struct {
+    IHS_Client *client;
+    bool canceled;
+} AuthorizationCancelContext;
 static void AuthorizationCancelVisit(IHS_TimerTask *task, void *context) {
-    IHS_Client *client = context;
+    AuthorizationCancelContext *cancel = context;
+    IHS_Client *client = cancel->client;
+    if (!task) {
+        /* A failed service producer has retired its private task while state2
+         * still owns notification/Stop. An empty slot does not mean Idle. */
+        cancel->canceled = IHS_ClientAuthorizationServiceActive(client);
+        if (cancel->canceled)
+            ClearServicePairing(client);
+        return;
+    }
+    cancel->canceled = true;
     IHS_AuthorizationState *state = IHS_TimerTaskGetContext(task);
     CMsgRemoteDeviceAuthorizationCancelRequest request = CMSG_REMOTE_DEVICE_AUTHORIZATION_CANCEL_REQUEST__INIT;
     IHS_HostInfo host = state->host;
@@ -211,8 +225,10 @@ static void AuthorizationCancelVisit(IHS_TimerTask *task, void *context) {
 }
 
 bool IHS_ClientAuthorizationCancel(IHS_Client *client) {
-    return IHS_TimerTaskVisitOwned(client->timers, &client->taskHandles.authorization,
-                                    AuthorizationCancelVisit, client);
+    AuthorizationCancelContext context = {.client = client};
+    IHS_TimerTaskVisitSlot(client->timers, &client->taskHandles.authorization,
+                           AuthorizationCancelVisit, &context);
+    return context.canceled;
 }
 
 typedef struct {
@@ -448,17 +464,29 @@ static bool CreateAuthorizationRequest(IHS_Client *client, IHS_SteamUniverse uni
 
 bool IHS_ClientSendAuthorizationRequest(IHS_Client *client, const IHS_HostInfo *host,
                                        IHS_AuthorizationFlow *flow, uint32_t requestId) {
+    return IHS_ClientTryAuthorizationRequest(client, host, flow, requestId) ==
+           IHS_ClientRequestFailureNone;
+}
+
+IHS_ClientRequestFailure IHS_ClientTryAuthorizationRequest(IHS_Client *client,
+        const IHS_HostInfo *host, IHS_AuthorizationFlow *flow, uint32_t requestId) {
     IHS_HostInfo current = *host;
     if (client->callbacks.routing && client->callbacks.routing->host &&
         !client->callbacks.routing->host(client, host->clientId, &current,
                                          client->callbackContexts.routing))
-        return false;
+        return IHS_ClientRequestFailureUnavailable;
     AuthorizationRequestStorage storage;
-    bool ok = CreateAuthorizationRequest(client, current.universe, flow, requestId, &storage) &&
-              IHS_ClientSendControl(client, &current, NULL, k_ERemoteDeviceAuthorizationRequest,
-                                    &storage.message.base);
+    bool ok = CreateAuthorizationRequest(client, current.universe, flow, requestId, &storage);
+    if (ok) {
+        bool sent = IHS_ClientSendControl(client, &current, NULL, k_ERemoteDeviceAuthorizationRequest,
+                                          &storage.message.base);
+        /* Official producer calls void SendMessage; only body construction
+         * failure stops it. Retain the legacy un-routed API's bool contract. */
+        if (!client->callbacks.routing)
+            ok = sent;
+    }
     memset(&storage, 0, sizeof(storage));
-    return ok;
+    return ok ? IHS_ClientRequestFailureNone : IHS_ClientRequestFailureGeneric;
 }
 
 bool IHS_ClientAuthorizationPrepareService(IHS_Client *client, IHS_SteamUniverse universe,
@@ -470,6 +498,10 @@ bool IHS_ClientAuthorizationPrepareService(IHS_Client *client, IHS_SteamUniverse
     IHS_BaseLock(&client->base);
     uint32_t currentId = client->lastLaunchId;
     IHS_HostInfo currentHost = client->lastLaunchHost;
+    bool previousService = client->servicePairing;
+    bool previousAwaitingPin = client->serviceAwaitingPin;
+    bool previousAuthorizing = client->lastLaunchAuthorizing;
+    bool previousTicket = client->lastLaunchHasTicket;
     IHS_BaseUnlock(&client->base);
     /* Replacement does not erase the manager-lifetime public key/result cache. */
     IHS_TimerTaskStopOwned(client->timers, &client->taskHandles.authorization);
@@ -517,7 +549,17 @@ bool IHS_ClientAuthorizationPrepareService(IHS_Client *client, IHS_SteamUniverse
                                      state);
     }
     if (!ok) {
-        ClearServicePairing(client);
+        /* OnPairingStarted commits state3 only after a complete body. Keep the
+         * old phase2/ID/target for the caller's failure notification and Stop;
+         * clearing here would turn that Stop into an idle no-op. */
+        IHS_BaseLock(&client->base);
+        client->lastLaunchId = currentId;
+        client->lastLaunchHost = currentHost;
+        client->servicePairing = previousService;
+        client->serviceAwaitingPin = previousAwaitingPin;
+        client->lastLaunchAuthorizing = previousAuthorizing;
+        client->lastLaunchHasTicket = previousTicket;
+        IHS_BaseUnlock(&client->base);
         IHS_AuthorizationKeyExchangeClear(&state->flow.keyExchange);
         free(state);
         free(*body);

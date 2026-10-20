@@ -129,6 +129,13 @@ typedef struct IHS_StreamingConnection {
     const char *certificate, *relayServer;
 } IHS_StreamingConnection;
 
+/** Local manager failure, distinct from authorization/streaming wire results. */
+typedef enum IHS_ClientRequestFailure {
+    IHS_ClientRequestFailureNone = 0,
+    IHS_ClientRequestFailureGeneric = 1,
+    IHS_ClientRequestFailureUnavailable = 18,
+} IHS_ClientRequestFailure;
+
 /** Configure before requests; context remains alive until RX/timers are joined.
  * resolve() must initialize its output, including the no-qualified-address case.
  * addresses() returns a malloc-owned snapshot (freed by IHS); its IDs come from
@@ -143,6 +150,9 @@ typedef struct IHS_ClientRoutingCallbacks {
     void (*resolve)(IHS_Client *, uint64_t clientId, IHS_SocketAddress *, void *);
     size_t (*addresses)(IHS_Client *, uint64_t clientId, IHS_IPAddress **owned, void *);
     bool (*sendRemote)(IHS_Client *, uint64_t clientId, const uint8_t *, size_t, void *);
+    /** Optional local sender failure, before cancellation and ID/target clear.
+     * An observer only: do not destroy, stop or replace the client/request. */
+    void (*requestFailed)(IHS_Client *, IHS_ClientRequestFailure, void *);
 } IHS_ClientRoutingCallbacks;
 
 /** Borrowed only during status(). Candidates are announcements, not verified
@@ -335,8 +345,10 @@ bool IHS_ClientAuthorizationRequest(IHS_Client *client, const IHS_HostInfo *host
  * Publishes a state-3 owner sharing the client's current secret/key-result cache.
  * The caller publishes the returned authorization BODY via SetPairingInfo and
  * frees it with free(). No discovery envelope or random request ID is added.
- * Failure leaves *body=NULL. All incoming auth frames use the ordinary receive
- * and deferred pump APIs. Cancel retires this owner without a host cancel9. */
+ * Failure leaves *body=NULL and preserves the entering manager phase/ID/target;
+ * the caller must report failure and Stop (e.g. HandshakeFail). All incoming
+ * auth frames use the ordinary receive/actor APIs. Cancel retires this owner
+ * without a host cancel9, including failed preparation with no private task. */
 bool IHS_ClientAuthorizationPrepareService(IHS_Client *, IHS_SteamUniverse, const char *pin,
                                            uint8_t **body, size_t *size);
 bool IHS_ClientAuthorizationServiceActive(IHS_Client *);
