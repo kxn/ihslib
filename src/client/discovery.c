@@ -422,13 +422,19 @@ void IHS_ClientDiscoveryCallback(IHS_Client *client, const IHS_SocketAddress *ad
         info.timestamp = status->timestamp;
         strncpy(info.hostname, status->hostname ? status->hostname : "", sizeof(info.hostname) - 1);
         info.hostname[sizeof(info.hostname) - 1] = '\0';
+        if (status->n_users > SIZE_MAX / sizeof(uint64_t)) return;
+        uint64_t *accounts = status->n_users ? malloc(status->n_users * sizeof(*accounts)) : NULL;
+        if (status->n_users && !accounts) return;
+        for (size_t i = 0; i < status->n_users; ++i) accounts[i] = status->users[i]->steamid;
         IHS_DiscoveryAddressHints hints = {.publicAddress = status->public_ip_address,
             .addresses = (const char *const *)status->ip_addresses,
-            .addressCount = status->n_ip_addresses};
+            .addressCount = status->n_ip_addresses, .steamIds = accounts,
+            .steamIdCount = status->n_users};
         if (callbacks && callbacks->status)
             callbacks->status(client, &info, &hints, context);
         else if (callbacks && callbacks->discovered)
             callbacks->discovered(client, &info, context);
+        free(accounts);
     }
 }
 

@@ -80,6 +80,23 @@ static int peer;
 static char bodies[64][4096];
 static unsigned tags[64], saved_at_send[64], message_count;
 static unsigned observed_tags[64], observed_saves[64], observed_count;
+static struct { const char *op; uint64_t client, steam; unsigned tag; } metadata_ops[192];
+static unsigned metadata_count;
+static void metadata_op(const char *op, uint64_t client, uint64_t steam, unsigned tag) {
+    assert(metadata_count < 192);
+    metadata_ops[metadata_count].op = op;
+    metadata_ops[metadata_count].client = client;
+    metadata_ops[metadata_count].steam = steam;
+    metadata_ops[metadata_count++].tag = tag;
+}
+static void identity(IHS_Client *c, uint64_t client, uint64_t steam, void *ctx) {
+    (void)c; (void)ctx;
+    metadata_op("identity", client, steam, 0);
+}
+static void subscribe(IHS_Client *c, uint64_t steam, void *ctx) {
+    (void)c; (void)ctx;
+    metadata_op("subscribe", 0, steam, 0);
+}
 static uint8_t ticket_secrets[32][32];
 static unsigned ticket_count;
 static struct {
@@ -169,6 +186,7 @@ int __wrap_IHS_CryptoRSAEncrypt(const uint8_t *p, size_t n, const uint8_t *key, 
     return __real_IHS_CryptoRSAEncrypt(p, n, key, k, out, size);
 }
 static void observe_send(IHS_Client *client, ERemoteClientBroadcastMsg tag) {
+    metadata_op("send", 0, 0, tag);
     if (in_proof) {
         assert(proof_count < 128);
         proof_ops[proof_count].op = "send";
@@ -210,6 +228,7 @@ static void persist(IHS_Client *c, const IHS_HostInfo *h, uint64_t id, const uin
                     void *ctx) {
     (void)ctx;
     uint8_t selected[32];
+    metadata_op("key", h->clientId, id, 0);
     IHS_ClientGetSecretKey(c, selected);
     assert(!memcmp(s, selected, 32));
     assert(saves < 64);
@@ -356,6 +375,11 @@ static void snapshot(IHS_Client *c) {
         printf("%s{\"client\":%llu,\"steamid\":%llu,\"secret\":\"%s\"}", i ? "," : "",
                (unsigned long long)saved_keys[i].client, (unsigned long long)saved_keys[i].steam,
                saved_keys[i].secret);
+    printf("],\"metadata_ops\":[");
+    for (unsigned i = 0; i < metadata_count; ++i)
+        printf("%s{\"op\":\"%s\",\"client\":%llu,\"steam\":%llu,\"tag\":%u}", i ? "," : "",
+               metadata_ops[i].op, (unsigned long long)metadata_ops[i].client,
+               (unsigned long long)metadata_ops[i].steam, metadata_ops[i].tag);
     printf("],\"proof_ops\":[");
     for (unsigned i = 0; i < proof_count; ++i) {
         printf("%s{\"op\":\"%s\",\"plain\":\"%s\",\"secret\":\"%s\",\"client\":%llu,\"steamid\":%"
@@ -418,7 +442,8 @@ int main(int argc, char **argv) {
     assert(c);
     atomic_store(&receive_condition, c->receiveWake);
     IHS_ClientSetAuthorizationDeferred(c, true);
-    IHS_ClientAuthorizationCallbacks ac = {.persist = persist};
+    IHS_ClientAuthorizationCallbacks ac = {.persist = persist, .identity = identity,
+                                           .subscribe = subscribe};
     IHS_ClientStreamingCallbacks sc = {.authorization = authorization,
                                        .authorizationFailed = authorized_fail,
                                        .success = accepted,

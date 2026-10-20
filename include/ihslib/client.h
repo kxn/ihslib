@@ -151,6 +151,8 @@ typedef struct IHS_DiscoveryAddressHints {
     const char *publicAddress;
     const char *const *addresses;
     size_t addressCount;
+    const uint64_t *steamIds; /* Borrowed, original users order; zero defaults retained. */
+    size_t steamIdCount;
 } IHS_DiscoveryAddressHints;
 typedef struct IHS_ClientDiscoveryCallbacks {
     void (*discovered)(IHS_Client *client, const IHS_HostInfo *host, void *context);
@@ -177,6 +179,13 @@ typedef struct IHS_ClientAuthorizationCallbacks {
      * different protocol result. Do not destroy/cancel/replace a request from this observer; enqueue actions. */
     void (*persist)(IHS_Client *client, const IHS_HostInfo *host, uint64_t steamId,
                     const uint8_t secretKey[32], void *context);
+    /** Success with steamid present, before exchange/cache/key validation.
+     * This is metadata admission, not proof of pairing. Do not reenter the owner. */
+    void (*identity)(IHS_Client *, uint64_t replyClientId, uint64_t steamId, void *context);
+    /** Accepted Success (including no-key), after confirmation but before target
+     * identity admission. Cached/invalid/exhausted keys do not reach this stage.
+     * The application session applies connected/universe guards. */
+    void (*subscribe)(IHS_Client *, uint64_t steamId, void *context);
 } IHS_ClientAuthorizationCallbacks;
 
 typedef struct IHS_ClientStreamingCallbacks {

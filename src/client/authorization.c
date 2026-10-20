@@ -167,10 +167,18 @@ static void AuthorizationResponseVisit(IHS_TimerTask *task, void *context) {
     }
     /* Official Android checks result before auth_key (protocol RE §128).
      * Failed key calculations are confirmed but keep the transaction alive. */
+    if (resp->result == k_ERemoteDeviceAuthorizationSuccess && resp->has_steamid &&
+        client->callbacks.authorization && client->callbacks.authorization->identity)
+        client->callbacks.authorization->identity(client, header->client_id, resp->steamid,
+                                                  client->callbackContexts.authorization);
     if (resp->result == k_ERemoteDeviceAuthorizationSuccess && resp->has_auth_key) {
         AuthorizationKeyExchange(client, state, task, resp, response->address, header->client_id);
         return;
     }
+    if (resp->result == k_ERemoteDeviceAuthorizationSuccess &&
+        client->callbacks.authorization && client->callbacks.authorization->subscribe)
+        client->callbacks.authorization->subscribe(client, resp->steamid,
+                                                   client->callbackContexts.authorization);
     if (client->callbacks.routing && header->client_id != state->host.clientId) {
         if (resp->has_auth_key)
             IHS_ClientAuthorizationConfirm(client, *response->address, header->client_id,
@@ -406,6 +414,9 @@ static void AuthorizationKeyExchange(IHS_Client *client, IHS_AuthorizationState 
         AuthorizationFail(client, state, task, IHS_AuthorizationFailed);
         return;
     }
+    if (client->callbacks.authorization && client->callbacks.authorization->subscribe)
+        client->callbacks.authorization->subscribe(client, resp->steamid,
+                                                   client->callbackContexts.authorization);
     if (outcome == IHS_AuthorizationExchangeAccepted && client->callbacks.routing &&
         replyClientId != state->host.clientId) {
         IHS_ClientAuthorizationConfirm(client, *replySource, replyClientId,

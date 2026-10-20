@@ -693,6 +693,10 @@ static void StreamingAuthorizationVisit(IHS_TimerTask *task, void *context) {
                                            k_ERemoteDeviceAuthorizationCanceled);
         return;
     }
+    if (resp->result == k_ERemoteDeviceAuthorizationSuccess && resp->has_steamid &&
+        client->callbacks.authorization && client->callbacks.authorization->identity)
+        client->callbacks.authorization->identity(client, response->header->client_id, resp->steamid,
+                                                  client->callbackContexts.authorization);
     IHS_AuthorizationExchangeOutcome outcome = IHS_AuthorizationExchangeAccepted;
     if (resp->result == k_ERemoteDeviceAuthorizationSuccess && resp->has_auth_key) {
         outcome = IHS_ClientAuthorizationExchange(client, &state->host, &state->authorization, resp,
@@ -705,6 +709,10 @@ static void StreamingAuthorizationVisit(IHS_TimerTask *task, void *context) {
     /* Exhaustion stops the selected transaction before confirming the actual
      * reply. A foreign accepted key instead leaves that transaction waiting. */
     bool exchangeFailed = outcome == IHS_AuthorizationExchangeResourceFailure;
+    if (!exchangeFailed && resp->result == k_ERemoteDeviceAuthorizationSuccess &&
+        client->callbacks.authorization && client->callbacks.authorization->subscribe)
+        client->callbacks.authorization->subscribe(client, resp->steamid,
+                                                   client->callbackContexts.authorization);
     if (!exchangeFailed && client->callbacks.routing &&
         response->header->client_id != state->host.clientId) {
         if (resp->has_auth_key)
