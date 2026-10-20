@@ -83,18 +83,46 @@ static bool SameTargets(const IHS_DiscoveryTarget *a, size_t na,
             return false;
     return true;
 }
+static uint64_t NextClientId(const IHS_DiscoveryTarget *targets, size_t count, size_t *at) {
+    while (*at < count) {
+        size_t i = (*at)++;
+        uint64_t id = targets[i].clientId;
+        bool seen = !id;
+        for (size_t j = 0; j < i && !seen; ++j) seen = targets[j].clientId == id;
+        if (!seen) return id;
+    }
+    return 0;
+}
+static bool SameIds(const uint64_t *a, size_t na, const uint64_t *b, size_t nb) {
+    return na == nb && (!na || !memcmp(a, b, na*sizeof(*a)));
+}
+static bool DerivedIdsEqual(const IHS_DiscoveryTarget *targets, size_t count,
+                             const uint64_t *ids, size_t idCount) {
+    size_t at = 0;
+    for (size_t i = 0; i < idCount; ++i)
+        if (NextClientId(targets, count, &at) != ids[i]) return false;
+    return !NextClientId(targets, count, &at);
+}
 static bool CopyTargets(const IHS_DiscoveryTarget *targets, size_t count,
+                        const uint64_t *explicitIds, size_t explicitCount, bool explicit,
                         IHS_DiscoveryCommand *command) {
-    IHS_DiscoveryTarget *copy = count ? malloc(count * (sizeof(*copy) + sizeof(uint64_t))) : NULL;
-    if (count && !copy) return false;
-    uint64_t *ids = count ? (uint64_t *)(copy + count) : NULL;
+    size_t bytes = explicit ? count*sizeof(*targets)+explicitCount*sizeof(uint64_t)
+                            : count*(sizeof(*targets)+sizeof(uint64_t));
+    IHS_DiscoveryTarget *copy = bytes ? malloc(bytes) : NULL;
+    if (bytes && !copy) return false;
+    uint64_t *ids = bytes ? (uint64_t *)(copy + count) : NULL;
     size_t idCount = 0;
     for (size_t i = 0; i < count; ++i) {
         copy[i] = targets[i];
+        if (explicit) continue;
         uint64_t id = targets[i].clientId;
         bool duplicate = !id;
         for (size_t j = 0; j < idCount; ++j) if (ids[j] == id) duplicate = true;
         if (!duplicate) ids[idCount++] = id;
+    }
+    if (explicit) {
+        if (explicitCount) memcpy(ids, explicitIds, explicitCount*sizeof(*ids));
+        idCount = explicitCount;
     }
     *command = (IHS_DiscoveryCommand){.operation=IHS_DiscoveryTargets,
         .targets=copy, .count=count, .idCount=idCount};
@@ -104,15 +132,17 @@ static void PublishTargets(IHS_Client *client, IHS_DiscoveryCommand *command) {
     free(client->discoveryTargets);
     client->discoveryTargets = command->targets;
     client->discoveryTargetCount = command->count;
-    client->discoveryClientIds = command->count ? (uint64_t *)(command->targets + command->count) : NULL;
+    client->discoveryClientIds = command->idCount ? (uint64_t *)(command->targets + command->count) : NULL;
     client->discoveryClientIdCount = command->idCount;
-    client->discoveryTargetsChanged = true;
+    client->discoveryTargetsChanged |= command->rediscover;
     command->targets = NULL; /* Ownership transferred to the client. */
 }
 static void RefreshDesired(DiscoveryContext *context) {
     if (!context->queuedTargets) {
         context->desiredTargets = context->client->discoveryTargets;
         context->desiredCount = context->client->discoveryTargetCount;
+        context->desiredIds = context->client->discoveryClientIds;
+        context->desiredIdCount = context->client->discoveryClientIdCount;
     }
 }
 static void PushCommand(DiscoveryContext *context, IHS_DiscoveryCommand command) {
@@ -132,7 +162,9 @@ typedef struct DiscoveryChange {
     IHS_DiscoveryOperation operation;
     const IHS_DiscoveryTarget *targets;
     size_t count;
-    bool accepted;
+    const uint64_t *ids;
+    size_t idCount;
+    bool accepted, preserveSchedule, explicitIds;
 } DiscoveryChange;
 static void ChangeDiscovery(IHS_TimerTask *task, void *opaque) {
     DiscoveryChange *change = opaque;
@@ -145,23 +177,33 @@ static void ChangeDiscovery(IHS_TimerTask *task, void *opaque) {
     if (change->operation == IHS_DiscoveryTargets) {
         const IHS_DiscoveryTarget *desired = rounds && !nested ? context->desiredTargets : client->discoveryTargets;
         size_t desiredCount = rounds && !nested ? context->desiredCount : client->discoveryTargetCount;
-        if (SameTargets(change->targets, change->count, desired, desiredCount)) {
+        const uint64_t *desiredIds = rounds && !nested ? context->desiredIds : client->discoveryClientIds;
+        size_t desiredIdCount = rounds && !nested ? context->desiredIdCount : client->discoveryClientIdCount;
+        bool sameIds = change->explicitIds
+            ? SameIds(change->ids, change->idCount, desiredIds, desiredIdCount)
+            : DerivedIdsEqual(change->targets, change->count, desiredIds, desiredIdCount);
+        if (sameIds && SameTargets(change->targets, change->count, desired, desiredCount)) {
             change->accepted = true;
             goto done;
         }
         bool queue = rounds && !nested && (context->cycleActive || context->commandCount);
         if (queue && context->commandCount == IHS_DISCOVERY_COMMAND_CAPACITY) goto done;
         IHS_DiscoveryCommand command;
-        if (!CopyTargets(change->targets, change->count, &command)) goto done;
+        bool rediscover = !change->preserveSchedule || !sameIds;
+        if (!CopyTargets(change->targets, change->count, change->ids, change->idCount,
+                           change->explicitIds, &command)) goto done;
+        command.rediscover = rediscover;
         if (queue) {
             PushCommand(context, command);
             ++context->queuedTargets;
             context->desiredTargets = command.targets;
             context->desiredCount = command.count;
+            context->desiredIds = command.idCount ? (uint64_t *)(command.targets+command.count) : NULL;
+            context->desiredIdCount = command.idCount;
         } else {
             PublishTargets(client, &command);
             if (rounds) {
-                context->full = 0;
+                if (rediscover) context->full = 0;
                 RefreshDesired(context);
                 if (nested) AdoptCycle(context);
             }
@@ -226,14 +268,37 @@ static bool SubmitDiscovery(IHS_Client *client, IHS_DiscoveryOperation operation
 bool IHS_ClientEnableDiscovery(IHS_Client *client) { return SubmitDiscovery(client, IHS_DiscoveryEnable); }
 bool IHS_ClientDisableDiscovery(IHS_Client *client) { return SubmitDiscovery(client, IHS_DiscoveryDisable); }
 bool IHS_ClientTriggerDiscovery(IHS_Client *client) { return SubmitDiscovery(client, IHS_DiscoveryTrigger); }
-bool IHS_ClientSetDiscoveryTargets(IHS_Client *client, const IHS_DiscoveryTarget *targets, size_t count) {
-    if ((count && !targets) || count > SIZE_MAX / (sizeof(*targets) + sizeof(uint64_t))) return false;
+static bool SetTargets(IHS_Client *client, const IHS_DiscoveryTarget *targets, size_t count,
+                        const uint64_t *ids, size_t idCount, bool explicitIds) {
+    if ((count && !targets) || count > SIZE_MAX/sizeof(*targets) ||
+        (!explicitIds && count > SIZE_MAX/(sizeof(*targets)+sizeof(uint64_t)))) return false;
     for (size_t i = 0; i < count; ++i)
         if (targets[i].ip.family != IHS_IPAddressFamilyIPv4 && targets[i].ip.family != IHS_IPAddressFamilyIPv6)
             return false;
-    DiscoveryChange change = {.client=client, .operation=IHS_DiscoveryTargets, .targets=targets, .count=count};
+    if (explicitIds) {
+        if ((idCount && !ids) || idCount > (SIZE_MAX-count*sizeof(*targets))/sizeof(*ids)) return false;
+        for (size_t i = 0; i < idCount; ++i) {
+            if (!ids[i]) return false;
+            for (size_t j = 0; j < i; ++j) if (ids[i] == ids[j]) return false;
+        }
+        for (size_t i = 0; i < count; ++i) {
+            bool known = !targets[i].clientId;
+            for (size_t j = 0; j < idCount && !known; ++j) known = ids[j] == targets[i].clientId;
+            if (!known) return false;
+        }
+    }
+    DiscoveryChange change = {.client=client, .operation=IHS_DiscoveryTargets,
+        .targets=targets, .count=count, .ids=ids, .idCount=idCount,
+        .preserveSchedule=explicitIds, .explicitIds=explicitIds};
     IHS_TimerTaskVisitSlot(client->timers, &client->discoveryTimer, ChangeDiscovery, &change);
     return change.accepted;
+}
+bool IHS_ClientSetDiscoveryTargets(IHS_Client *client, const IHS_DiscoveryTarget *targets, size_t count) {
+    return SetTargets(client, targets, count, NULL, 0, false);
+}
+bool IHS_ClientSetDiscoveryDirectory(IHS_Client *client, const IHS_DiscoveryTarget *targets, size_t count,
+                                      const uint64_t *ids, size_t idCount) {
+    return SetTargets(client, targets, count, ids, idCount, true);
 }
 
 typedef struct DiscoveryBegin { IHS_Client *client; bool allowed; } DiscoveryBegin;
@@ -253,7 +318,7 @@ static void BeginDiscovery(IHS_TimerTask *task, void *opaque) {
             if (command.operation == IHS_DiscoveryTargets) {
                 --context->queuedTargets;
                 PublishTargets(client, &command);
-                context->full = 0;
+                if (command.rediscover) context->full = 0;
                 RefreshDesired(context);
             } else if (command.operation == IHS_DiscoveryDisable) {
                 if (context->broadcastOwners) --context->broadcastOwners;
@@ -318,7 +383,14 @@ static void RequestStatus(DiscoveryContext *context) {
 void IHS_ClientDiscoveryCallback(IHS_Client *client, const IHS_SocketAddress *address,
                                  CMsgRemoteClientBroadcastHeader *header,
                                  ProtobufCMessage *message) {
-    if (header->msg_type == k_ERemoteClientBroadcastMsgStatus) {
+    IHS_BaseLock(&client->base);
+    const IHS_ClientDiscoveryCallbacks *callbacks = client->callbacks.discovery;
+    void *context = client->callbackContexts.discovery;
+    IHS_BaseUnlock(&client->base);
+    if (header->msg_type == k_ERemoteClientBroadcastMsgOffline) {
+        if (callbacks && callbacks->offline)
+            callbacks->offline(client, header->client_id, context);
+    } else if (header->msg_type == k_ERemoteClientBroadcastMsgStatus && message) {
         CMsgRemoteClientBroadcastStatus *status = (CMsgRemoteClientBroadcastStatus *)message;
         IHS_HostInfo info = {0};
         info.clientId = header->client_id;
@@ -330,13 +402,14 @@ void IHS_ClientDiscoveryCallback(IHS_Client *client, const IHS_SocketAddress *ad
         info.hasGamesRunning = status->has_games_running;
         info.hasTimestamp = status->has_timestamp;
         info.timestamp = status->timestamp;
-        strncpy(info.hostname, status->hostname, sizeof(info.hostname) - 1);
+        strncpy(info.hostname, status->hostname ? status->hostname : "", sizeof(info.hostname) - 1);
         info.hostname[sizeof(info.hostname) - 1] = '\0';
-        IHS_BaseLock(&client->base);
-        const IHS_ClientDiscoveryCallbacks *callbacks = client->callbacks.discovery;
-        void *context = client->callbackContexts.discovery;
-        IHS_BaseUnlock(&client->base);
-        if (callbacks && callbacks->discovered)
+        IHS_DiscoveryAddressHints hints = {.publicAddress = status->public_ip_address,
+            .addresses = (const char *const *)status->ip_addresses,
+            .addressCount = status->n_ip_addresses};
+        if (callbacks && callbacks->status)
+            callbacks->status(client, &info, &hints, context);
+        else if (callbacks && callbacks->discovered)
             callbacks->discovered(client, &info, context);
     }
 }

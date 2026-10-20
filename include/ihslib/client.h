@@ -113,8 +113,19 @@ typedef struct IHS_StreamingRequest {
     uint64_t keySteamId;
 } IHS_StreamingRequest;
 
+/** Borrowed only during status(). Candidates are announcements, not verified
+ * destinations. Preserve publicAddress and input order for the caller's cache. */
+typedef struct IHS_DiscoveryAddressHints {
+    const char *publicAddress;
+    const char *const *addresses;
+    size_t addressCount;
+} IHS_DiscoveryAddressHints;
 typedef struct IHS_ClientDiscoveryCallbacks {
     void (*discovered)(IHS_Client *client, const IHS_HostInfo *host, void *context);
+    /** Optional richer alternative to discovered; exactly one is dispatched. */
+    void (*status)(IHS_Client *, const IHS_HostInfo *, const IHS_DiscoveryAddressHints *, void *);
+    /** Parsed type2, independent of the availability of a status body. */
+    void (*offline)(IHS_Client *, uint64_t clientId, void *context);
 } IHS_ClientDiscoveryCallbacks;
 
 typedef struct IHS_ClientAuthorizationCallbacks {
@@ -246,6 +257,15 @@ typedef struct IHS_DiscoveryTarget {
  * committed and accepted snapshots. No authentication change. */
 bool IHS_ClientSetDiscoveryTargets(IHS_Client *client,
     const IHS_DiscoveryTarget *targets, size_t count);
+/** Address-cache replacement in the same operation order. Changing addresses
+ * for the same directed-client list preserves the current round/deadlines;
+ * changing that list requests a new round. The unique nonzero watched IDs
+ * remain independent of address count (including a host with no known IP).
+ * Every nonzero target identity must belong to that list. Unlike adding/removing a watched
+ * client, receiving a new/reordered address is not a rediscovery trigger. */
+bool IHS_ClientSetDiscoveryDirectory(IHS_Client *client,
+    const IHS_DiscoveryTarget *targets, size_t count,
+    const uint64_t *clientIds, size_t clientIdCount);
 
 /* ----------------------------------------------------
  * - Authorization functions

@@ -19,6 +19,7 @@ typedef struct IHS_DiscoveryCommand {
     IHS_DiscoveryOperation operation;
     IHS_DiscoveryTarget *targets;
     size_t count, idCount;
+    bool rediscover;
 } IHS_DiscoveryCommand;
 
 /* A local API backlog budget, not a wire/protocol limit. Rejection is atomic. */
@@ -36,6 +37,7 @@ typedef struct IHS_DiscoveryContext {
     IHS_DiscoveryCommand commands[IHS_DISCOVERY_COMMAND_CAPACITY];
     unsigned commandHead, commandCount, queuedTargets;
     const IHS_DiscoveryTarget *desiredTargets;
-    size_t desiredCount;
+    const uint64_t *desiredIds;
+    size_t desiredCount, desiredIdCount;
     IHS_DiscoveryRandom random;
 } IHS_DiscoveryContext;

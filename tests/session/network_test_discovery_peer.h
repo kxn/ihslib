@@ -6,6 +6,19 @@
 #include <assert.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <ihslib/client.h>
+/* The session/network-test fixtures control a known observed peer. This
+ * callback provider is not proof of discovery wire admission; the dedicated
+ * discovery/directory tests cover that separate boundary. */
+static inline void test_discovery_observed(IHS_Client *client,
+    const IHS_ClientDiscoveryCallbacks *callbacks, void *context, uint16_t port) {
+    IHS_HostInfo info = {.clientId = 123, .instanceId = 1,
+                         .universe = IHS_SteamUniversePublic};
+    assert(IHS_IPAddressFromString(&info.address.ip, "127.0.0.1"));
+    info.address.port = port;
+    if (callbacks->status) callbacks->status(client, &info, NULL, context);
+    else if (callbacks->discovered) callbacks->discovered(client, &info, context);
+}
 static const uint8_t test_discovery_magic[8] = {255, 255, 255, 255, 0x21, 0x4c, 0x5f, 0xa0};
 static uint32_t test_discovery_u32(const uint8_t *p) {
     return p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
