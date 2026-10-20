@@ -10,15 +10,23 @@
  * The vtable is copied. context remains caller-owned until the session has
  * been interrupted AND joined (or destroyed). No callback destroys context.
  * send may run on multiple IHS threads concurrently with receive; providers
- * must synchronize their own queues. Neither callback may call session APIs.
+ * must synchronize their own queues. No callback may call session APIs.
  */
 typedef struct IHS_DatagramTransport {
     /** Copy/submit exactly one whole message before returning. Nonblocking;
      * false means not accepted, so existing IHS retry policy remains in force. */
     bool (*send)(void *context, const uint8_t *data, size_t size);
-    /** Return one whole message's size, 0 for no message, -1 for terminal
-     * failure. Wait at most timeoutUs, including during shutdown. Never
-     * truncate a message: reject oversize messages with -1. The receive buffer
-     * is valid only during this callback. Capacity is currently 2048 bytes. */
-    int (*receive)(void *context, uint8_t *data, size_t capacity, uint32_t timeoutUs);
+    /** Receive one whole message: 1 success (including an empty message),
+     * 0 empty queue, -1 terminal failure. On success set *received. Wait at
+     * most timeoutUs, including during shutdown; the session drains with
+     * timeoutUs=0 after wait reports readability. Never truncate: oversize
+     * messages must fail. The buffer is valid only during this callback. */
+    int (*receive)(void *context, uint8_t *data, size_t capacity, size_t *received,
+                   uint32_t timeoutUs);
+    /** Wait without consuming a message: 1 readable, 0 empty, -1 terminal.
+     * This separates waiting from the captured receive-batch timestamp. */
+    int (*wait)(void *context, uint32_t timeoutUs);
+    /** Provider's maximum whole message, independent of ordinary UDP's
+     * receive buffer and of negotiated MTU. Zero uses the stream default. */
+    size_t receiveCapacity;
 } IHS_DatagramTransport;

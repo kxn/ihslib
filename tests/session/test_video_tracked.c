@@ -8,6 +8,7 @@
 #include "session/channels/video/ch_data_video.h"
 #include "session/session_pri.h"
 #include "test_session.h"
+#include "decoder_direct_consumer.h"
 #include <assert.h>
 #include <pthread.h>
 #include <string.h>
@@ -52,9 +53,11 @@ static IHS_StreamVideoSubmitResult submit(IHS_Session *s, const IHS_VideoEpochIn
     assert(identity.frameId == id && identity.epoch == epoch->video_epoch);
     if (!submits)
         assert(id == 65535 && b->size == 3 && !memcmp(IHS_BufferPointer(b), "abc", 3));
+    else if (submits == 1)
+        assert(id == 1 && b->size == 2 && !memcmp(IHS_BufferPointer(b), "xy", 2));
     else
         assert(b->size == 1 && *IHS_BufferPointer(b) == 'z');
-    static const uint16_t expectedIds[] = {65535, 1, 2, 4, 1};
+    static const uint16_t expectedIds[] = {65535, 1, 2, 3, 4, 5, 1};
     assert(submits < sizeof(expectedIds) / sizeof(expectedIds[0]) && id == expectedIds[submits]);
     assert(submits < 8 && IHS_FrameTicketRetain(ticket));
     held[submits++] = ticket;
@@ -80,6 +83,7 @@ static void fragment(IHS_SessionChannel *ch, uint16_t id, uint16_t seq, uint8_t 
     IHS_BufferAppendUInt8(&b, payload);
     IHS_SessionDataFrameHeader h = {.id = id};
     ((const IHS_SessionChannelDataClass *)ch->cls)->dataFrame(ch, &h, &b);
+    while (((const IHS_SessionChannelDataClass *)ch->cls)->think(ch) == 1) {}
     IHS_BufferClear(&b, true);
 }
 static IHS_SessionChannel *create(IHS_Session *session) {
@@ -110,19 +114,20 @@ int main(void) {
     fragment(ch, 65535, 1, 0, 'b');
     fragment(ch, 65535, 2, VideoFrameFlagFrameFinish, 'c');
     assert(submits == 1);
-    /* A newer incoming id must never relabel the incomplete older assembly. */
+    /* Original OnThink uses the finishing ID. Both bytes survive an ID
+     * change; the callback's ticket must belong to that finishing fragment. */
     fragment(ch, 0, 3, 0, 'x');
     fragment(ch, 1, 4, VideoFrameFlagFrameFinish, 'y');
-    assert(submits == 1);
-    fragment(ch, 1, 5, VideoFrameFlagKeyFrame | VideoFrameFlagFrameFinish, 'z');
-    assert(submits == 2);
-    nextResult = IHS_StreamVideoSubmitReportLost;
-    fragment(ch, 2, 6, VideoFrameFlagFrameFinish, 'z');
+    assert(submits == 2 && IHS_FrameTicketIdentity(held[1]).frameId == 1);
+    fragment(ch, 2, 5, VideoFrameFlagKeyFrame | VideoFrameFlagFrameFinish, 'z');
     assert(submits == 3);
-    fragment(ch, 3, 7, VideoFrameFlagFrameFinish, 'z');
-    assert(submits == 3); /* intact sequence still waits for a keyframe */
-    fragment(ch, 4, 8, VideoFrameFlagKeyFrame | VideoFrameFlagFrameFinish, 'z');
-    assert(submits == 4 && IHS_FrameTicketIdentity(held[3]).frameId == 4);
+    nextResult = IHS_StreamVideoSubmitReportLost;
+    fragment(ch, 3, 6, VideoFrameFlagFrameFinish, 'z');
+    assert(submits == 4);
+    fragment(ch, 4, 7, VideoFrameFlagFrameFinish, 'z');
+    assert(submits == 5); /* backend loss alone does not force reset */
+    fragment(ch, 5, 8, VideoFrameFlagKeyFrame | VideoFrameFlagFrameFinish, 'z');
+    assert(submits == 6 && IHS_FrameTicketIdentity(held[5]).frameId == 5);
     IHS_SessionChannelStop(ch);
     IHS_SessionChannelDestroy(ch);
     ch = create(session);
@@ -130,7 +135,7 @@ int main(void) {
     fragment(ch, 1, 0, VideoFrameFlagKeyFrame | VideoFrameFlagFrameFinish, 'z');
     IHS_SessionChannelStop(ch);
     IHS_SessionChannelDestroy(ch);
-    assert(starts == 2 && stops == 2 && submits == 5);
+    assert(starts == 2 && stops == 2 && submits == 7);
     IHS_SessionDestroy(session);
     IHS_Quit();
     /* Late GPU-style completion is independent of the destroyed session. */

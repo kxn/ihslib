@@ -23,38 +23,20 @@
  *
  */
 
-#include <stdio.h>
 #include "ch_control.h"
-#include "base.h"
-#include "session/session_pri.h"
 
-static uint64_t SendKeepAlive(int runCount, void *data);
-
-void IHS_SessionChannelControlStartHeartbeat(IHS_SessionChannel *channel) {
-    IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
-    if (control->keepAliveTimer) return;
-    /* Official sends the first KeepAlive immediately upon entering the
-     * streaming state (HandleStreaming 0x7a7140: last==0 → send now), then
-     * every 10.0 s (0xA0000 in 16.16 fixed-point seconds). */
-    CKeepAliveMsg first = CKEEP_ALIVE_MSG__INIT;
-    IHS_SessionChannelControlSend(channel, k_EStreamControlKeepAlive,
-                                  (const ProtobufCMessage *) &first, IHS_PACKET_ID_NEXT);
-    control->keepAliveTimer = IHS_TimerTaskStart(channel->session->timers, SendKeepAlive, NULL,
-                                                 10000, control);
-}
-
-void IHS_SessionChannelControlStopHeartbeat(IHS_SessionChannel *channel) {
-    IHS_SessionChannelControl *control = (IHS_SessionChannelControl *) channel;
-    if (!control->keepAliveTimer) return;
-    IHS_TimerTaskStopImmediate(control->keepAliveTimer);
-    control->keepAliveTimer = NULL;
-}
-
-static uint64_t SendKeepAlive(int runCount, void *data) {
-    (void) runCount;
-    IHS_SessionChannel *channel = data;
+/* Original HandleStreaming 0x7a7140; normal Start seeds the timestamp.
+ * A zero timestamp is a sentinel, and the 10-second comparison is strict.
+ * See protocol §49–50: no independent timer or immediate normal first send. */
+void IHS_SessionChannelControlUpdateHeartbeat(IHS_SessionChannel *channel, uint32_t now) {
+    IHS_SessionChannelControl *control = (void *)channel;
+    uint32_t last = control->keepAliveTimestamp;
+    /* Match ARM64 sub/cmn/b.pl, including its 32-bit half-range edges. */
+    if (last && (int32_t)(last - now + 0xa0000u) >= 0)
+        return;
     CKeepAliveMsg message = CKEEP_ALIVE_MSG__INIT;
-    IHS_SessionChannelControlSend(channel, k_EStreamControlKeepAlive, (const ProtobufCMessage *) &message,
-                                  IHS_PACKET_ID_NEXT);
-    return 10000;
+    IHS_SessionChannelControlSend(channel, k_EStreamControlKeepAlive,
+                                  (const ProtobufCMessage *)&message, IHS_PACKET_ID_NEXT);
+    /* Original records an attempt, including a rejected/failed send. */
+    control->keepAliveTimestamp = now;
 }

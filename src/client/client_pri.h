@@ -35,20 +35,53 @@
 typedef void (IHS_MessageCallback)(IHS_Client *client, const IHS_SocketAddress *address,
                                    CMsgRemoteClientBroadcastHeader *header, ProtobufCMessage *message);
 
+/* Preserve Update reentry semantics across the threaded ingress/deferred port.
+ * A different thread's independent refresh must not be mistaken for reentry. */
+#ifdef __cplusplus
+extern "C" { extern thread_local IHS_Client *IHS_ClientDispatchOwner; }
+#else
+extern _Thread_local IHS_Client *IHS_ClientDispatchOwner;
+#endif
+
+/* One most-recent key/result for the manager lifetime, not per request or host.
+ * Timer visitors serialize writers, Base protects inspection; free after timer join. */
+typedef struct IHS_AuthorizationCache {
+    uint8_t *key;
+    size_t keyLen;
+    ERemoteDeviceAuthorizationResult result;
+} IHS_AuthorizationCache;
+
 struct IHS_Client {
     IHS_Base base;
     struct {
         IHS_HostInfo host;
         uint32_t requestId;
-        uint64_t until, lastCancel;
     } canceled[8];
     unsigned canceledNext;
     IHS_HostInfo lastLaunchHost;
     uint32_t lastLaunchId;
+    bool lastLaunchAuthorizing;
+    bool lastLaunchHasTicket; /* Successful reply retains explicit-cancel ownership. */
+    IHS_AuthorizationCache authorizationCache;
+    atomic_bool deferAuthorization;
+    struct {
+        IHS_SocketAddress address;
+        CMsgRemoteClientBroadcastHeader *header;
+        ProtobufCMessage *message;
+    } authorizationQueue[32]; /* Local memory budget, not a Steam protocol limit. */
+    unsigned authorizationHead, authorizationCount, authorizationDropped;
+    unsigned authorizationDispatching;
     IHS_Timer *timers;
+    IHS_Cond *receiveWake;
+    uint64_t receiveGeneration, receiveUpdatedGeneration;
+    bool receiveBatchActive;
     IHS_TimerTask *discoveryTimer;
     uint32_t discoveryInterval;
     uint32_t discoverySeq;
+    IHS_DiscoveryTarget *discoveryTargets;
+    size_t discoveryTargetCount, discoveryClientIdCount;
+    uint64_t *discoveryClientIds; /* Tail of the same owned allocation. */
+    bool discoveryTargetsChanged; /* Consumed under Base before due selection. */
     struct {
         const IHS_ClientDiscoveryCallbacks *discovery;
         const IHS_ClientAuthorizationCallbacks *authorization;
@@ -75,6 +108,10 @@ struct IHS_Client {
 bool IHS_ClientSend(IHS_Client *client, IHS_SocketAddress address, ERemoteClientBroadcastMsg type,
                     ProtobufCMessage *message);
 
+/* Original BGetDeviceToken uses the producer's current secret and a fresh IV.
+ * The caller supplies one snapshot shared with its authorization ticket. */
+bool IHS_ClientCreateDeviceToken(IHS_Client *client, const uint8_t secret[32], uint8_t token[32]);
+
 bool IHS_ClientBroadcast(IHS_Client *client, ERemoteClientBroadcastMsg type,
                          ProtobufCMessage *message);
 
@@ -97,3 +134,10 @@ static inline bool IHS_ClientMatchesHost(const IHS_HostInfo *host,
         header->has_client_id && header->client_id == host->clientId &&
         (!host->instanceId || !header->has_instance_id || header->instance_id == host->instanceId);
 }
+
+bool IHS_ClientStreamingAuthorizationCallback(IHS_Client *, const IHS_SocketAddress *,
+        CMsgRemoteClientBroadcastHeader *, ProtobufCMessage *);
+void IHS_ClientStreamingUpdate(IHS_Client *);
+bool IHS_ClientDiscoveryBeginCycle(IHS_Client *);
+void IHS_ClientDiscoveryUpdate(IHS_Client *);
+void IHS_ClientDiscoveryEndCycle(IHS_Client *);

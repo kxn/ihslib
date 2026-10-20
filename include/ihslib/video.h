@@ -46,6 +46,9 @@ typedef enum IHS_StreamVideoCodec {
 typedef enum IHS_StreamVideoFrameFlag {
     IHS_StreamVideoFrameNone = 0x00,
     IHS_StreamVideoFrameKeyFrame = 0x01,
+    /* Local metadata: Decoder flush callback handled the first key fragment.
+     * A complete-frame consumer must not repeat that flush at submission. */
+    IHS_StreamVideoFrameFlushHandled = 0x02,
 } IHS_StreamVideoFrameFlag;
 
 typedef struct IHS_StreamVideoConfig {
@@ -57,7 +60,18 @@ typedef struct IHS_StreamVideoConfig {
 
 typedef enum IHS_StreamVideoSubmitResult {
     IHS_StreamVideoSubmitOK = 0,
+    /* Request a replacement keyframe; the backend remains active. This is not
+     * a notification that decoder state has been destroyed or recreated. */
     IHS_StreamVideoSubmitReportLost = 1,
+    /* Backend absent: request an actor-owned rebuild on the next client cycle.
+     * Unlike ReportLost, no immediate DataLost is produced by this result. */
+    IHS_StreamVideoSubmitReset = 2,
+    /* Official AVCodec can request a reset after send failure AND report
+     * DataLost after receive failure during the same synchronous submission. */
+    IHS_StreamVideoSubmitResetAndReportLost = 3,
+    /* Bit to combine with Reset for AVCodec send EIO. Directly set config
+     * field 7 false before reset; no config delegate, save or message 99. */
+    IHS_StreamVideoSubmitDisableHardware = 4,
     IHS_StreamVideoSubmitError = -1,
 } IHS_StreamVideoSubmitResult;
 
@@ -81,8 +95,39 @@ typedef struct IHS_VideoEpochInfo {
     uint64_t session_id, video_epoch;
 } IHS_VideoEpochInfo;
 
+/* Synchronous submitTracked callback only, with its borrowed session/epoch.
+ * Applies decoder feedback before the backend hands an object to the player.
+ * Return SubmitOK afterwards to avoid repeating the same feedback on return.
+ * No ownership or background use of session is transferred to the backend. */
+bool IHS_SessionVideoDecodeFeedback(IHS_Session *, const IHS_VideoEpochInfo *,
+                                    IHS_StreamVideoSubmitResult);
+/* Effective config field 7, including its true default. Backend selection
+ * reads this again for every epoch, including actor-owned decoder rebuilds. */
+bool IHS_SessionVideoHardwareDecodingEnabled(IHS_Session *);
+/* The same effective value plus protobuf field presence. No allocation; safe
+ * in the config callback's Base-lock scope. Missing has the true default. */
+bool IHS_SessionVideoHardwareDecodingPreference(IHS_Session *, bool *present);
+/* Synchronous RX/control-owner call (e.g. clientConfigChanged on that owner).
+ * Only sets the current decoder's asynchronous request; never stops or joins.
+ * Call before updating the player's cached hardware preference. SDK workers
+ * use the epoch-scoped DecodeFeedback API instead. False means no video object.
+ * Do not call from an unrelated thread or retain a borrowed session. */
+bool IHS_SessionVideoRequestReset(IHS_Session *);
+/* Synchronous borrowed call inside this epoch's startTracked/submitTracked.
+ * Reports the actual backend's format decision. Never retain session/epoch;
+ * the actor joins the worker before replacement. Threads is explicitly present,
+ * including zero. The description is copied into the session's current cache
+ * before send; send failure preserves it. Do not turn that failure into reset. */
+bool IHS_SessionVideoDecoderInfo(IHS_Session *, const IHS_VideoEpochInfo *,
+                                  const char *info, uint32_t threads);
+
 /* Set before starting session workers. Identity cannot be reassigned. */
 bool IHS_SessionSetVideoTrackingIdentity(IHS_Session *, uint64_t session_id);
+
+typedef enum IHS_StreamVideoFlushPhase {
+    IHS_StreamVideoFlushPlayer,
+    IHS_StreamVideoFlushDecoder,
+} IHS_StreamVideoFlushPhase;
 
 typedef struct IHS_StreamVideoCallbacks {
     int (*start)(IHS_Session *session, const IHS_StreamVideoConfig *config, void *context);
@@ -138,4 +183,33 @@ typedef struct IHS_StreamVideoCallbacks {
                                                  IHS_StreamVideoFrameFlag, bool *ticketTaken,
                                                  void *);
     void (*stopTracked)(IHS_Session *, const IHS_VideoEpochInfo *, void *);
+    /* Optional player preparation, before decoder start on the control actor.
+     * Nonzero retains the media mapping but discards matching complete frames.
+     * With prepare, start/startTracked may return 1 for an active decoder whose
+     * backend is unavailable; 0 is ready and negative is local fatal protection.
+     * Stop releases the decoder; player/window ownership stays with the app.
+     * Zero-initialize and rebuild callback tables when upgrading this source ABI. */
+    int (*prepare)(IHS_Session *, const IHS_StreamVideoConfig *, void *);
+    /* Optional tracked Stop phases, after the worker joins: Player, protocol
+     * partial purge, Decoder, recovery mark, then stopTracked retirement.
+     * Decoder also runs on the decoder worker at a key fragment, after partial
+     * purge and before any complete submit. It must not join/reset this worker.
+     * Flush drops internal references; caller/GPU leases must remain valid.
+     * Requires all three tracked callbacks. This is a rebuilt source ABI. */
+    void (*flushTracked)(IHS_Session *, const IHS_VideoEpochInfo *,
+                          IHS_StreamVideoFlushPhase, void *);
+    /* Tracked backend publishes through the scoped DecoderInfo API at its
+     * original trigger (AVCodec get_format). Suppresses generic Start info.
+     * Rebuild/zero-initialize callback tables for this source ABI addition. */
+    bool reportsDecoderInfo;
+    /* Optional pair for a deferred SDK format callback. interruptTracked runs
+     * before worker join (possibly under Base): cancel/wake only, no SDK/join
+     * or Base/decoder lock. `restarting` preserves same-decoder pending values.
+     * thinkTracked runs on the lifecycle actor after control FIFO, before the
+     * client stage, outside Base. Session/epoch are borrowed for this call.
+     * Interrupt is idempotent, including failed-start cleanup and joined
+     * destruction (discard late publications). A key never opened is a no-op.
+     * Requires the tracked triple. Rebuild this source ABI and zero-init. */
+    void (*interruptTracked)(IHS_Session *, const IHS_VideoEpochInfo *, bool restarting, void *);
+    void (*thinkTracked)(IHS_Session *, const IHS_VideoEpochInfo *, void *);
 } IHS_StreamVideoCallbacks;

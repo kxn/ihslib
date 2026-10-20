@@ -30,6 +30,7 @@
 
 #include "video/ch_data_video.h"
 #include "session/session_pri.h"
+#include "session/unreliable.h"
 
 void IHS_SessionChannelControlOnVideo(IHS_SessionChannel *channel, EStreamControlMessage type,
                                       IHS_Buffer *payload, const IHS_SessionPacketHeader *header) {
@@ -38,7 +39,7 @@ void IHS_SessionChannelControlOnVideo(IHS_SessionChannel *channel, EStreamContro
     switch (type) {
         case k_EStreamControlStartVideoData: {
             CStartVideoDataMsg *message = cstart_video_data_msg__unpack(NULL, payload->size,
-                                                                        IHS_BufferPointer(payload));
+                                          payload->size ? IHS_BufferPointer(payload) : NULL);
             if (message == NULL) {
                 IHS_SessionLog(session, IHS_LogLevelWarn, "Video", "Malformed CStartVideoDataMsg");
                 break;
@@ -57,7 +58,17 @@ void IHS_SessionChannelControlOnVideo(IHS_SessionChannel *channel, EStreamContro
                                video->id, message->channel);
                 IHS_SessionChannelRemove(session, video->id);
             }
-            video = IHS_SessionChannelDataVideoCreate(session, message);
+            /* Original Start*Data sets transport delay before decoder creation. */
+            if (!IHS_SessionUnreliableSetDelay(session, message->channel, 6553)) {
+                cstart_video_data_msg__free_unpacked(message, NULL);
+                break;
+            }
+            CStartVideoDataMsg effective = *message;
+            if (!effective.has_codec) {
+                effective.has_codec = true;
+                effective.codec = (EStreamVideoCodec)session->negotiatedVideoCodec;
+            }
+            video = IHS_SessionChannelDataVideoCreate(session, &effective);
             IHS_SessionChannelAdd(session, video);
             cstart_video_data_msg__free_unpacked(message, NULL);
             break;

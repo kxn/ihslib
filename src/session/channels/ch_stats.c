@@ -23,10 +23,11 @@
  *
  */
 
-#include <stdlib.h>
 #include "ch_stats.h"
 #include "ihs_buffer.h"
 #include "ihs_buffer_ext.h"
+#include "session/session_pri.h"
+#include <stdlib.h>
 
 static const IHS_SessionChannelClass ChannelClass = {
         .received = IHS_SessionChannelReceivedPacketNoop,
@@ -40,11 +41,24 @@ IHS_SessionChannel *IHS_SessionChannelStatsCreate(IHS_Session *session) {
 
 bool IHS_SessionChannelStatsSend(IHS_SessionChannel *channel, EStreamStatsMessage type,
                                  const ProtobufCMessage *message, int32_t packetId) {
-    IHS_SessionPacket packet;
-    IHS_SessionChannelInitializePacket(channel, &packet, IHS_SessionPacketTypeReliable, true, packetId);
-    IHS_BufferAppendUInt8(&packet.body, type);
-    IHS_BufferAppendMessage(&packet.body, message);
-    bool ret = IHS_SessionChannelQueuePacket(channel, &packet, true);
-    IHS_SessionPacketClear(&packet, true);
-    return ret;
+    /* Official SendStatsMessage uses Frame::Send, including fragmentation and
+     * negotiated CRC; docs/STEAMLINK_PROTOCOL_RE.md §43. */
+    IHS_SessionFrame frame;
+    IHS_SessionChannelInitializeFrame(channel, &frame, IHS_SessionPacketTypeReliable, false, packetId);
+    frame.body.maxCapacity = 0;
+    IHS_BufferAppendUInt8(&frame.body, type);
+    IHS_BufferAppendMessage(&frame.body, message);
+    IHS_SendAdmission ret = IHS_SessionChannelQueueFrameResult(channel, &frame, true);
+    IHS_SessionFrameClear(&frame, true);
+    /* A failed local preparation can have consumed IDs. Match the existing
+     * control-side protection: never continue that connection with an ID hole.
+     * Socket errors occur later on the sender and do not enter this branch. */
+    if (ret == IHS_SendAdmissionLocalFailure && !channel->session->transport.shutdown &&
+        !channel->session->transport.detached) {
+        if (channel->session->networkTest.mode)
+            IHS_SessionNetworkTestFail(channel->session);
+        else
+            IHS_SessionDisconnect(channel->session);
+    }
+    return ret == IHS_SendAdmissionAccepted;
 }

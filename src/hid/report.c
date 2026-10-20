@@ -77,8 +77,8 @@ static void Stash(IHS_HIDReportHolder *holder, const uint8_t *current, size_t le
     holder->pendingCurrentLen = len;
 }
 
-// True when `current` is byte-identical to what was last flushed, so a full report
-// carrying it would tell the host nothing it does not already know.
+// Deduplicate against the most recently processed state, independently of
+// transport publication (input-disabled batches also advance this baseline).
 static bool SameAsLastSent(const IHS_HIDReportHolder *holder, const uint8_t *current, size_t len) {
     /* Compare with the latest generated state when this batch already has
      * reports. Comparing only with the last flushed state drops a full release

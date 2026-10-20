@@ -7,12 +7,27 @@
 #include <stdatomic.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 static unsigned progress, authorized;
 static atomic_int failures;
+static atomic_int clock_forward;
+/* Freeze wall seconds except for the deliberate +16s deadline input. Real
+ * subsecond boundaries must not inject legitimate retries into ownership checks. */
+time_t __wrap_time(time_t *out) {
+    time_t now = 1000 + atomic_load(&clock_forward);
+    if (out) *out = now;
+    return now;
+}
+int __real_clock_gettime(clockid_t, struct timespec *);
+int __wrap_clock_gettime(clockid_t clock, struct timespec *time) {
+    int ret=__real_clock_gettime(clock,time);
+    if(!ret && clock==CLOCK_MONOTONIC)time->tv_sec+=atomic_load(&clock_forward);
+    return ret;
+}
 static void on_failure(IHS_Client *c, const IHS_HostInfo *h, IHS_StreamingResult result, void *ctx) {
     (void)c; (void)h; (void)ctx;
-    assert(result == IHS_StreamingTimeout);
+    (void)result;
     atomic_fetch_add(&failures, 1);
 }
 static void on_progress(IHS_Client *c, const IHS_HostInfo *h, void *ctx) {
@@ -43,7 +58,7 @@ int main(void) {
     assert(!bind(fd,(void*)&a,sizeof(a)));socklen_t size=sizeof(a);assert(!getsockname(fd,(void*)&a,&size));
     struct timeval timeout={.tv_sec=2};setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
     IHS_Client *c=IHS_ClientCreate(&clientConfig);assert(c);
-    IHS_HostInfo host={.clientId=23,.instanceId=45};
+    IHS_HostInfo host={.clientId=23,.instanceId=45,.universe=IHS_SteamUniversePublic};
     IHS_IPAddressFromString(&host.address.ip,"127.0.0.1");host.address.port=ntohs(a.sin_port);
     IHS_ClientStreamingCallbacks cb={.progress=on_progress,.failed=on_failure};IHS_ClientSetStreamingCallbacks(c,&cb,NULL);
     IHS_StreamingRequest req={.gameId=2358720};
@@ -74,17 +89,20 @@ int main(void) {
     uint8_t bytes[4096];ssize_t n=recv(fd,bytes,sizeof(bytes),0);assert(n>16);
     unsigned hs=le(bytes+8), ps=le(bytes+12+hs);
     CMsgRemoteDeviceProofResponse *pr=cmsg_remote_device_proof_response__unpack(NULL,ps,bytes+16+hs);
-    assert(pr && !pr->has_request_id && pr->has_updated_secret && !pr->updated_secret);
+    assert(pr && pr->has_request_id && pr->request_id == current && pr->has_updated_secret && pr->updated_secret);
     assert(pr->response.len>0);cmsg_remote_device_proof_response__free_unpacked(pr,NULL);
-    /* Old Progress messages must not postpone the new transaction's timeout. */
+    /* Original waiting state retries, including beyond the former invented
+     * 15s deadline; stale Progress never belongs to the current transaction. */
     head.msg_type=k_ERemoteDeviceStreamingProgress;
     CMsgRemoteDeviceStreamingProgress stale=CMSG_REMOTE_DEVICE_STREAMING_PROGRESS__INIT;
     stale.request_id=old;
-    for (int i=0;i<10 && !atomic_load(&failures);++i) {
-        usleep(2000000);
+    atomic_store(&clock_forward,16);
+    for (int i=0;i<10;++i) {
+        usleep(1000);
         IHS_ClientStreamingCallback(c,&host.address,&head,(void*)&stale);
     }
-    assert(atomic_load(&failures)==1);
+    assert(receive_id(fd,5)==current);
+    assert(!atomic_load(&failures));
     assert(IHS_ClientStreamingCancel(c));
     /* Timed request retries may precede cancellation on the host socket. */
     uint8_t discard[4096];

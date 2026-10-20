@@ -182,29 +182,42 @@ static int CryptoAES_CBC_PKCS7Pad(const uint8_t *in, size_t inLen, const uint8_t
             *outLen = writeLen;
         }
     } else {
-        if (*outLen < inLen || (inLen % IHS_CRYPTO_AES_BLOCK_SIZE) != 0) {
+        /* Original CCrypto CBC (0x746f28): commit the prefix, keep the last
+         * block private until padding/capacity validation. In-place callers
+         * observe the original final ciphertext block on failure. */
+        if (inLen < IHS_CRYPTO_AES_BLOCK_SIZE ||
+            (inLen % IHS_CRYPTO_AES_BLOCK_SIZE) != 0 ||
+            *outLen < inLen - IHS_CRYPTO_AES_BLOCK_SIZE) {
             ret = -1;
             goto cleanup;
         }
-        mbedtls_aes_setkey_dec(&aes, key, keyLen * 8);
-        for (size_t i = 0; i < inLen; i += IHS_CRYPTO_AES_BLOCK_SIZE) {
+        ret = mbedtls_aes_setkey_dec(&aes, key, keyLen * 8);
+        if (ret != 0) goto cleanup;
+        size_t prefix = inLen - IHS_CRYPTO_AES_BLOCK_SIZE;
+        for (size_t i = 0; i < prefix; i += IHS_CRYPTO_AES_BLOCK_SIZE) {
             memcpy(block, in + i, IHS_CRYPTO_AES_BLOCK_SIZE);
-            ret = mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_DECRYPT, IHS_CRYPTO_AES_BLOCK_SIZE, blockIv, block, &out[i]);
-            if (ret != 0) {
-                goto cleanup;
-            }
+            ret = mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_DECRYPT,
+                                       IHS_CRYPTO_AES_BLOCK_SIZE, blockIv, block, out + i);
+            if (ret != 0) goto cleanup;
         }
-        /* Remove PKCS7 padding */
-        uint8_t padLen = out[inLen - 1];
-        if (padLen > IHS_CRYPTO_AES_BLOCK_SIZE) {
+        uint8_t last[IHS_CRYPTO_AES_BLOCK_SIZE];
+        memcpy(block, in + prefix, IHS_CRYPTO_AES_BLOCK_SIZE);
+        ret = mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_DECRYPT,
+                                   IHS_CRYPTO_AES_BLOCK_SIZE, blockIv, block, last);
+        if (ret != 0) goto cleanup;
+        uint8_t padLen = last[IHS_CRYPTO_AES_BLOCK_SIZE - 1];
+        if (!padLen || padLen > IHS_CRYPTO_AES_BLOCK_SIZE ||
+            !CheckPKCS7Pad(last + IHS_CRYPTO_AES_BLOCK_SIZE - padLen, padLen) ||
+            *outLen < inLen - padLen) {
             ret = -1;
             goto cleanup;
         }
-        if (!CheckPKCS7Pad(&out[inLen - padLen], padLen)) {
-            ret = -1;
-            goto cleanup;
-        }
-        *outLen = inLen - padLen;
+        size_t plainLen = inLen - padLen;
+        size_t tail = *outLen >= inLen ? IHS_CRYPTO_AES_BLOCK_SIZE
+                                       : IHS_CRYPTO_AES_BLOCK_SIZE - padLen;
+        memcpy(out + prefix, last, tail);
+        if (*outLen > plainLen) out[plainLen] = 0;
+        *outLen = plainLen;
     }
     cleanup:
     mbedtls_aes_free(&aes);

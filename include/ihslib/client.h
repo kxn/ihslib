@@ -103,6 +103,14 @@ typedef struct IHS_StreamingRequest {
     int32_t gamepadCount;
     /** Optional real game ID from host activity. Zero starts the selected interface. */
     uint64_t gameId;
+    /** Request a dedicated network-test endpoint/key (discovery field 12).
+     * The normal success callback supplies its credentials. Create a fresh
+     * Session, configure its network-test mode, then connect; no game/decoder
+     * or settings change is implied. False requests ordinary streaming. */
+    bool networkTest;
+    /** Selected host identity for caller-side key lookup and Proof writes. Captured
+     * at creation, never serialized or replaced by AuthorizationResponse.steamid. */
+    uint64_t keySteamId;
 } IHS_StreamingRequest;
 
 typedef struct IHS_ClientDiscoveryCallbacks {
@@ -120,6 +128,12 @@ typedef struct IHS_ClientAuthorizationCallbacks {
 
     void (*failed)(IHS_Client *client, const IHS_HostInfo *host, IHS_AuthorizationResult result,
                    void *context);
+
+    /** Attempt host-key persistence after selecting the new secret and before
+     * AuthorizationConfirmed. Failure is an application diagnostic, not a
+     * different protocol result. Do not destroy/cancel/replace a request from this observer; enqueue actions. */
+    void (*persist)(IHS_Client *client, const IHS_HostInfo *host, uint64_t steamId,
+                    const uint8_t secretKey[32], void *context);
 } IHS_ClientAuthorizationCallbacks;
 
 typedef struct IHS_ClientStreamingCallbacks {
@@ -130,6 +144,20 @@ typedef struct IHS_ClientStreamingCallbacks {
 
     void (*failed)(IHS_Client *client, const IHS_HostInfo *host, IHS_StreamingResult result,
                    void *context);
+    /** Same stream owner enters authorization (pin is four digits), or resumes
+     * streaming/accepts credentials (pin=NULL). Pairing and connect PIN differ.
+     * Callbacks may enqueue actions; do not synchronously replace/cancel/destroy
+     * this owner from authorization or persist observers. */
+    void (*authorization)(IHS_Client *, const IHS_HostInfo *, const char *pin,
+                          uint64_t steamId, void *context);
+    void (*authorizationFailed)(IHS_Client *, const IHS_HostInfo *, IHS_AuthorizationResult,
+                                void *context);
+    /** Proof rotation selected a new secret. Attempt storage before encryption/
+     * reply, using the original request's keySteamId. Failure does not change
+     * the protocol result. Enqueue actions; do not reenter/cancel/replace/destroy
+     * the owner or change its secret from this observer. */
+    void (*persistProof)(IHS_Client *, const IHS_HostInfo *, uint64_t keySteamId,
+                         const uint8_t secret[32], void *context);
 } IHS_ClientStreamingCallbacks;
 
 IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config);
@@ -165,6 +193,13 @@ void IHS_ClientSetAuthorizationCallbacks(IHS_Client *client,
                                          const IHS_ClientAuthorizationCallbacks *callbacks,
                                          void *context);
 
+/** Configure before starting requests. Deferred delivery serializes authorization
+ * and streaming handshake callbacks with an application's state/storage actor. The RX worker queues
+ * bounded owned messages; Pump releases them after dispatch. Keep the client
+ * alive through each Pump, and stop/join RX before destroying it. */
+void IHS_ClientSetAuthorizationDeferred(IHS_Client *client, bool deferred);
+size_t IHS_ClientPumpAuthorization(IHS_Client *client, size_t budget);
+
 void IHS_ClientSetStreamingCallbacks(IHS_Client *client,
                                      const IHS_ClientStreamingCallbacks *callbacks, void *context);
 
@@ -184,6 +219,34 @@ bool IHS_ClientStartDiscovery(IHS_Client *client, uint32_t interval);
 
 bool IHS_ClientStopDiscovery(IHS_Client *client);
 
+/** Local discovery subscription. Enable adds one broadcast owner and requests a
+ * fresh round; Disable balances one owner. The manager continues its wall-clock
+ * rounds (including saved targets) until client destruction/StopDiscovery.
+ * A full round is followed by at most two same-sequence fast sends. Accepted
+ * operations are ordered: apply one Enable/Trigger, complete its receive and
+ * callback phase, then choose its due send before applying later operations.
+ * Reentry from this client's dispatched callback applies in that current phase.
+ * Success means accepted, not synchronous completion or delivery. Local backlog
+ * exhaustion rejects atomically; Disable also rejects unbalanced references.
+ * These APIs cannot share a task with the explicit-interval StartDiscovery API. */
+bool IHS_ClientEnableDiscovery(IHS_Client *client);
+bool IHS_ClientDisableDiscovery(IHS_Client *client);
+bool IHS_ClientTriggerDiscovery(IHS_Client *client);
+
+typedef struct IHS_DiscoveryTarget {
+    uint64_t clientId; /* Zero is an address hint, not a directed identity. */
+    IHS_IPAddress ip;
+} IHS_DiscoveryTarget;
+
+/** Replace the owned local discovery snapshot. Requests use port 27036 and the
+ * current round sequence for all saved addresses and broadcast. When no broad
+ * subscription exists, the broadcast carries the unique nonzero client IDs.
+ * Success transfers an owned copy into the operation order; it may not yet be
+ * the committed snapshot while prior operations remain. Failure retains all
+ * committed and accepted snapshots. No authentication change. */
+bool IHS_ClientSetDiscoveryTargets(IHS_Client *client,
+    const IHS_DiscoveryTarget *targets, size_t count);
+
 /* ----------------------------------------------------
  * - Authorization functions
  * ---------------------------------------------------- */
@@ -202,12 +265,21 @@ bool IHS_ClientAuthorizationCancel(IHS_Client *client);
  * - Streaming functions
  * ---------------------------------------------------- */
 
+/** Request ordinary streaming or a network-test ticket. Waiting/Busy stream
+ * sends use time()+1; the same owner's authorization sends use time()+3 until
+ * a terminal response or explicit StreamingCancel. This
+ * API does not invent a silent-host deadline. Unauthorized enters same-owner
+ * authorization; callbacks report the pairing code and resume. Credentials are borrowed during success.
+ * A repeated request to the same host while waiting is ignored. A new request
+ * replaces ticket ownership without sending Cancel; explicit Cancel is separate. */
 bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
                                 const IHS_StreamingRequest *request);
 
-/** Cancel the current launch transaction, preserving a bounded late-response record. */
+/** Cancel the current request, including one that already supplied a ticket,
+ * preserving a bounded late-response/host record. */
 bool IHS_ClientStreamingCancel(IHS_Client *client);
 
-/** Worker consumed the successful launch response into a session. Subsequent
- * local stop is a session disconnect, not a launch cancellation. */
+/** Stop waiting after consuming the ticket. Keep the ID available for explicit
+ * Cancel; replacement Request retires it without cancellation (RE §124).
+ * Handshake ownership remains alive for late authorization/Proof messages. */
 void IHS_ClientStreamingEstablished(IHS_Client *client);

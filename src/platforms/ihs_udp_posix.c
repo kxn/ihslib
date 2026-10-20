@@ -27,12 +27,14 @@
 #include "ihs_thread.h"
 
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h>
 
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <fcntl.h>
 #include <errno.h>
 
@@ -48,7 +50,13 @@
 struct IHS_UDPSocket {
     int fd;
     IHS_Mutex *mutex;
+    bool broadcast;
+    atomic_uint mode;
 };
+
+enum { SocketNonblocking = 1, SocketReadFlag = 2 };
+static bool SetBlockingLocked(IHS_UDPSocket *, bool);
+static void ConfigureSocket(int, bool, bool);
 
 static void AddressFromSys(IHS_SocketAddress *ihs, const struct sockaddr_storage *sys);
 
@@ -56,39 +64,86 @@ static size_t AddressToSys(const IHS_SocketAddress *ihs, struct sockaddr_storage
 
 IHS_UDPSocket *IHS_UDPSocketOpen(bool broadcast) {
     IHS_UDPSocket *s = calloc(1, sizeof(IHS_UDPSocket));
+    if (!s) return NULL;
     s->fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    assert(s->fd >= 0);
+    if (s->fd < 0) {
+        int error = errno;
+        free(s);
+        errno = error;
+        return NULL;
+    }
     s->mutex = IHS_MutexCreate();
-    assert(s->mutex != NULL);
+    if (!s->mutex) {
+        close(s->fd);
+        free(s);
+        return NULL;
+    }
+    s->broadcast = broadcast;
+    atomic_init(&s->mode, 0);
+    ConfigureSocket(s->fd, broadcast, true);
+    return s;
+}
+
+static void ConfigureSocket(int fd, bool broadcast, bool reportInitial) {
+    (void)reportInitial;
     /* A 1440p keyframe arrives as a burst of hundreds of datagrams. The default
      * receive buffer (~208 KiB) overflows mid-frame and the kernel drops the
      * remainder, so frames never reassemble. SO_RCVBUF is clamped to
      * net.core.rmem_max; SO_RCVBUFFORCE ignores the clamp but needs CAP_NET_ADMIN. */
     int rcvbuf = 4 * 1024 * 1024;
 #ifdef SO_RCVBUFFORCE
-    if (setsockopt(s->fd, SOL_SOCKET, SO_RCVBUFFORCE, &rcvbuf, sizeof(rcvbuf)) != 0) {
-        setsockopt(s->fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &rcvbuf, sizeof(rcvbuf)) != 0) {
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
     }
 #else
-    setsockopt(s->fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 #endif
+#if IHSLIB_DIAGNOSTICS
     int actual = 0;
     socklen_t actualLen = sizeof(actual);
-    if (getsockopt(s->fd, SOL_SOCKET, SO_RCVBUF, &actual, &actualLen) == 0 && actual < rcvbuf) {
+    if (reportInitial && getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &actual, &actualLen) == 0 && actual < rcvbuf) {
         fprintf(stderr, "IHS_UDPSocketOpen: SO_RCVBUF capped at %d bytes (wanted %d); "
                         "raise net.core.rmem_max to avoid dropped video packets\n", actual, rcvbuf);
     }
+#endif
     if (broadcast) {
         uint32_t opt = 1;
-        setsockopt(s->fd, SOL_SOCKET, SO_BROADCAST, (char *) &opt, sizeof(opt));
+        setsockopt(fd, SOL_SOCKET, SO_BROADCAST, (char *) &opt, sizeof(opt));
     }
-    return s;
 }
 
 void IHS_UDPSocketClose(IHS_UDPSocket *s) {
     IHS_MutexDestroy(s->mutex);
-    close(s->fd);
+    if (s->fd >= 0) close(s->fd);
     free(s);
+}
+
+bool IHS_UDPSocketReopen(IHS_UDPSocket *s) {
+    /* The client owner excludes RX as well as sends while replacing this fd.
+     * Keep this object/mutex: BaseWorker retains its pointer until teardown. */
+    IHS_MutexLock(s->mutex);
+    if (s->fd >= 0) close(s->fd);
+    s->fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    bool ready = s->fd >= 0;
+    if (ready) {
+        ConfigureSocket(s->fd, s->broadcast, false);
+        if (atomic_load(&s->mode) & SocketNonblocking) SetBlockingLocked(s, false);
+    }
+    int error = errno;
+    IHS_MutexUnlock(s->mutex);
+    if (!ready) errno = error;
+    return ready;
+}
+
+int IHS_UDPSocketWaitReadable(IHS_UDPSocket *s, uint32_t timeoutMs) {
+    if (s->fd < 0) { errno = EBADF; return -1; }
+    fd_set reads;
+    FD_ZERO(&reads); FD_SET(s->fd, &reads);
+    struct timeval timeout = {.tv_sec = timeoutMs / 1000, .tv_usec = (timeoutMs % 1000) * 1000};
+    /* TransportUDP::BWait @8026f8 ignores select's return and checks the
+     * output set. Preserve that result on errors as well (§157). */
+    (void)select(s->fd + 1, &reads, NULL, NULL, &timeout);
+    return FD_ISSET(s->fd, &reads) != 0;
 }
 
 int IHS_UDPSocketReceive(IHS_UDPSocket *s, IHS_UDPPacket *packet) {
@@ -96,8 +151,9 @@ int IHS_UDPSocketReceive(IHS_UDPSocket *s, IHS_UDPPacket *packet) {
     socklen_t senderlen = sizeof(sender);
     ssize_t len;
     IHS_BufferEnsureMaxSize(&packet->buffer, 2048);
+    int flags = (atomic_load(&s->mode) & SocketReadFlag) ? MSG_DONTWAIT : 0;
     if ((len = recvfrom(s->fd, IHS_BufferPointer(&packet->buffer), IHS_BufferMaxSize(&packet->buffer),
-                        0, (struct sockaddr *) &sender, &senderlen)) <= 0) {
+                        flags, (struct sockaddr *) &sender, &senderlen)) <= 0) {
         if (len == 0) return 0; /* empty datagram, nothing to deliver */
         switch (errno) {
             case EAGAIN:
@@ -116,8 +172,9 @@ int IHS_UDPSocketReceive(IHS_UDPSocket *s, IHS_UDPPacket *packet) {
             case EHOSTUNREACH:
                 return 0;
             default:
-                fprintf(stderr, "IHS_UDPSocketReceive: fatal recvfrom errno=%d (%s)\n",
-                        errno, strerror(errno));
+                /* The session owner ends this read batch and updates its
+                 * connection/deadline. Generic owners may still stop. Never
+                 * flood blocking stderr on a continuing receive path. */
                 return -1;
         }
     }
@@ -130,14 +187,36 @@ bool IHS_UDPSocketSend(IHS_UDPSocket *s, const IHS_UDPPacket *packet) {
     struct sockaddr_storage addr;
     size_t addr_len = AddressToSys(&packet->address, &addr);
     IHS_MutexLock(s->mutex);
-    bool ret = sendto(s->fd, IHS_BufferPointer(&packet->buffer), packet->buffer.size, 0,
-                      (struct sockaddr *) &addr, addr_len) > 0;
+    /* Official TransportUDP BInit sets O_NONBLOCK. Keep bounded receive waits,
+     * but make each outgoing attempt nonblocking, including the one goodbye. */
+    ssize_t sent = sendto(s->fd, IHS_BufferPointer(&packet->buffer), packet->buffer.size, MSG_DONTWAIT,
+                          (struct sockaddr *) &addr, addr_len);
+    int error = errno;
+    /* CDiscoverySocket::BSend excludes negative EHOSTUNREACH from its error
+     * count. Media Session sockets keep their ordinary send result. A short
+     * positive send is always an error, even if errno is stale EHOSTUNREACH. */
+    bool ret = sent == (ssize_t)packet->buffer.size ||
+               (s->broadcast && sent < 0 && error == EHOSTUNREACH);
     IHS_MutexUnlock(s->mutex);
+    if (!ret) errno = error;
     return ret;
 }
 
+static bool SetBlockingLocked(IHS_UDPSocket *s, bool blocking) {
+    int flags = fcntl(s->fd, F_GETFL);
+    bool result = flags >= 0 &&
+        fcntl(s->fd, F_SETFL, blocking ? flags & ~O_NONBLOCK : flags | O_NONBLOCK) == 0;
+    /* Preserve the original noncritical fcntl result without letting a failed
+     * O_NONBLOCK request turn a Switch RX/exit path into a blocking read. */
+    atomic_store(&s->mode, blocking ? 0 : SocketNonblocking | (result ? 0 : SocketReadFlag));
+    return result;
+}
+
 bool IHS_UDPSocketSetBlocking(IHS_UDPSocket *s, bool blocking) {
-    return fcntl(s->fd, F_SETFL, blocking ? 0 : O_NONBLOCK) == 0;
+    IHS_MutexLock(s->mutex);
+    bool result = SetBlockingLocked(s, blocking);
+    IHS_MutexUnlock(s->mutex);
+    return result;
 }
 
 bool IHS_UDPSocketSetRecvTimeout(IHS_UDPSocket *s, uint32_t timeoutUs) {

@@ -33,9 +33,11 @@
 #error "Please include <stdbool.h>"
 #endif
 
-#define PROTOBUF_C_SET_VALUE(message, key, value) (message).has_##key = true; (message).key = (value)
+#define PROTOBUF_C_SET_VALUE(message, key, value) \
+    do { (message).has_##key = true; (message).key = (value); } while (0)
 
-#define PROTOBUF_C_P_SET_VALUE(message, key, value) (message)->has_##key = true; (message)->key = (value)
+#define PROTOBUF_C_P_SET_VALUE(message, key, value) \
+    do { (message)->has_##key = true; (message)->key = (value); } while (0)
 
 #define IHS_UNPACK_BUFFER(unpack_fn, buffer) unpack_fn(NULL, (buffer)->size, IHS_BufferPointer((buffer)))
 

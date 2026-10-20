@@ -44,8 +44,6 @@ static bool IsMessageEncrypted(EStreamControlMessage type);
 static size_t EncryptedMessageCapacity(size_t plainSize);
 
 static void OnControlInit(IHS_SessionChannel *channel, const void *data);
-static void ControlOnNackPacket(IHS_SessionChannelControl *control, IHS_SessionPacket *packet);
-static void ControlSendGapNack(IHS_SessionChannelControl *control);
 
 static void OnControlDeinit(IHS_SessionChannel *channel);
 
@@ -78,6 +76,7 @@ IHS_SessionChannel *IHS_SessionChannelControlCreate(IHS_Session *session) {
 
 /* Bounded diagnostic snapshots. Wire length and truncation are explicit;
  * this is not a complete packet capture. Initialized before session workers. */
+#if IHSLIB_DIAGNOSTICS
 #define HID_REPORT_RING_LEN 128
 #define HID_REPORT_RING_CAP 96
 #define HID_PENDING_CAP     512
@@ -182,27 +181,41 @@ void IHS_SessionChannelControlGetRecentHIDReports(uint64_t *out_ms, uint16_t *ou
     }
     IHS_MutexUnlock(hidPendingLock);
 }
+#endif
 
-static bool ControlSendLocked(IHS_SessionChannelControl *control, EStreamControlMessage type,
-                              const ProtobufCMessage *message, int32_t packetId,
-                              uint16_t *assignedPacketId);
+static IHS_SendAdmission ControlSendLocked(IHS_SessionChannelControl *control,
+                                           EStreamControlMessage type,
+                                           const ProtobufCMessage *message, int32_t packetId,
+                                           uint16_t *assignedPacketId);
 
 bool IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamControlMessage type,
                                    const ProtobufCMessage *message, int32_t packetId) {
     assert(channel->id == IHS_SessionChannelIdControl);
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *)channel;
     IHS_MutexLock(control->sendLock);
-    bool ret = ControlSendLocked(control, type, message, packetId, NULL);
+    IHS_SendAdmission ret = ControlSendLocked(control, type, message, packetId, NULL);
     IHS_MutexUnlock(control->sendLock);
-    if (!ret) {
-        IHS_SessionDisconnect(channel->session);
+    if (ret == IHS_SendAdmissionLocalFailure &&
+        !atomic_load(&channel->session->transport.shutdown) &&
+        !channel->session->transport.detached) {
+        if (channel->session->networkTest.mode)
+            IHS_SessionNetworkTestFail(channel->session);
+        else
+            IHS_SessionDisconnect(channel->session);
     }
-    return ret;
+    return ret == IHS_SendAdmissionAccepted;
 }
 
-static bool ControlSendLocked(IHS_SessionChannelControl *control, EStreamControlMessage type,
-                              const ProtobufCMessage *message, int32_t packetId,
-                              uint16_t *assignedPacketId) {
+IHS_SendAdmission IHS_SessionChannelControlCompleteLocked(IHS_SessionChannelControl *control) {
+    CNegotiationCompleteMsg message = CNEGOTIATION_COMPLETE_MSG__INIT;
+    return ControlSendLocked(control, k_EStreamControlNegotiationComplete,
+                              (const ProtobufCMessage *)&message, IHS_PACKET_ID_NEXT, NULL);
+}
+
+static IHS_SendAdmission ControlSendLocked(IHS_SessionChannelControl *control,
+                                           EStreamControlMessage type,
+                                           const ProtobufCMessage *message, int32_t packetId,
+                                           uint16_t *assignedPacketId) {
     IHS_SessionChannel *channel = &control->base;
     assert(channel->id == IHS_SessionChannelIdControl);
     size_t messageCapacity = protobuf_c_message_get_packed_size(message);
@@ -218,21 +231,24 @@ static bool ControlSendLocked(IHS_SessionChannelControl *control, EStreamControl
         break;
     }
     IHS_SessionFrame frame;
-    IHS_SessionChannelInitializeFrame(channel, &frame, IHS_SessionPacketTypeReliable, true,
+    /* Official Channel::Send clears CRC; Socket adds it only when negotiated.
+     * docs/STEAMLINK_PROTOCOL_RE.md §42 executes the full producer/wire chain. */
+    IHS_SessionChannelInitializeFrame(channel, &frame, IHS_SessionPacketTypeReliable, false,
                                       packetId);
+    /* Complete configs can exceed one packet; channel fragmentation applies
+     * MTU after encryption. Keep packet buffers bounded, allow a larger frame. */
+    frame.body.maxCapacity = 0;
     frame.header.hidReport = type == k_EStreamControlRemoteHID;
-    if (assignedPacketId != NULL) {
-        *assignedPacketId = frame.header.packetId;
-    }
-    IHS_SessionLog(channel->session, logLevel, "Control", "Send control message: %s, id=%u",
-                   value->name, frame.header.packetId);
     IHS_BufferAppendUInt8(&frame.body, type);
     if (IsMessageEncrypted(type)) {
+        /* Client prepares encrypted control via GetChannel before Frame's
+         * transport guard, even if the connection then rejects the Frame. */
+        IHS_SessionReliableGet(channel->session, channel->id);
         size_t cipherSize = EncryptedMessageCapacity(messageCapacity);
         uint8_t *serialized = calloc(1, messageCapacity ? messageCapacity : 1);
         if (serialized == NULL) {
             IHS_SessionFrameClear(&frame, true);
-            return false;
+            return IHS_SendAdmissionLocalFailure;
         }
         size_t serializedLen = protobuf_c_message_pack(message, serialized);
         uint8_t *cipher = IHS_BufferPointerForAppend(&frame.body, cipherSize);
@@ -242,14 +258,17 @@ static bool ControlSendLocked(IHS_SessionChannelControl *control, EStreamControl
             IHS_SessionFrameClear(&frame, true);
             IHS_SessionLog(channel->session, IHS_LogLevelError, "Control",
                            "Failed to encrypt payload\n");
-            return false;
+            return IHS_SendAdmissionLocalFailure;
         }
         free(serialized);
         frame.body.size += cipherSize;
     } else {
         IHS_BufferAppendMessage(&frame.body, message);
     }
-    bool ret = IHS_SessionChannelQueueFrame(channel, &frame, true);
+    IHS_SendAdmission ret = IHS_SessionChannelQueueFrameResult(channel, &frame, true);
+    if (assignedPacketId != NULL) *assignedPacketId = frame.header.packetId;
+    IHS_SessionLog(channel->session, logLevel, "Control", "Send control message: %s, id=%u",
+                   value->name, frame.header.packetId);
     IHS_SessionFrameClear(&frame, true);
     return ret;
 }
@@ -262,6 +281,10 @@ static bool ControlSendLocked(IHS_SessionChannelControl *control, EStreamControl
 bool IHS_SessionChannelControlSubmitHIDReport(IHS_SessionChannel *channel, const uint8_t *data,
                                               size_t dataLen, bool activeInput) {
     assert(channel->id == IHS_SessionChannelIdControl);
+    /* Original SendRemoteHIDMessage @7ab39c checks both gates before preparing
+     * protobuf/encryption (§152). This fast report path bypasses SendHIDMsg. */
+    if (!IHS_SessionStreaming(channel->session) || !IHS_SessionInputEnabled(channel->session))
+        return false;
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *)channel;
     IHS_MutexLock(control->sendLock);
     control->hidSubmitted++;
@@ -273,17 +296,22 @@ bool IHS_SessionChannelControlSubmitHIDReport(IHS_SessionChannel *channel, const
      * (SendRemoteHIDMessage bool → CRemoteHIDMsg.active_input, 0x7ab4c8). */
     wrapped.has_active_input = true;
     wrapped.active_input = activeInput;
-    bool ret = ControlSendLocked(control, k_EStreamControlRemoteHID,
-                                 (const ProtobufCMessage *)&wrapped, IHS_PACKET_ID_NEXT, NULL);
-    if (ret)
+    IHS_SendAdmission ret =
+        ControlSendLocked(control, k_EStreamControlRemoteHID, (const ProtobufCMessage *)&wrapped,
+                          IHS_PACKET_ID_NEXT, NULL);
+    if (ret == IHS_SendAdmissionAccepted)
         control->hidSent++;
-    if (ret)
+#if IHSLIB_DIAGNOSTICS
+    if (ret == IHS_SendAdmissionAccepted)
         HIDPendingPush(IHS_TimerNow(), data, dataLen);
+#endif
     IHS_MutexUnlock(control->sendLock);
-    if (!ret) {
+    if (ret == IHS_SendAdmissionLocalFailure &&
+        !atomic_load(&channel->session->transport.shutdown) &&
+        !channel->session->transport.detached) {
         IHS_SessionDisconnect(channel->session);
     }
-    return ret;
+    return ret == IHS_SendAdmissionAccepted;
 }
 
 bool IHS_SessionChannelControlFlushPendingHID(IHS_SessionChannel *channel) {
@@ -311,240 +339,76 @@ void IHS_SessionChannelControlHandshake(IHS_SessionChannel *channel, bool networ
                                   (const ProtobufCMessage *)&message, IHS_PACKET_ID_NEXT);
 }
 
-static uint64_t ControlFeedbackTick(int count, void *context) {
-    IHS_UNUSED(count);
-    IHS_SessionChannelControlUpdateFeedback(context);
-    return 5;
-}
-
-static void ControlFeedbackEnd(void *context) {
-    ((IHS_SessionChannelControl *)context)->feedbackTimer = NULL;
-}
-
 void IHS_SessionChannelControlUpdateFeedback(IHS_SessionChannelControl *control) {
-    IHS_MutexLock(control->receiveLock);
-    ControlSendGapNack(control);
-    IHS_MutexUnlock(control->receiveLock);
+    IHS_SessionReliableUpdateChannel(control->base.session, control->base.id);
 }
 
 static void OnControlInit(IHS_SessionChannel *channel, const void *data) {
     IHS_UNUSED(data);
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *)channel;
     control->sendLock = IHS_MutexCreate();
-    control->receiveLock = IHS_MutexCreate();
-    control->framePacketWindow = IHS_SessionPacketsWindowCreateReliable(320, 0);
-    control->feedbackTimer = IHS_TimerTaskStart(channel->session->timers, ControlFeedbackTick,
-                                                ControlFeedbackEnd, 5, control);
+    control->incomingLock = IHS_MutexCreate();
+    channel->initFailed = !control->sendLock || !control->incomingLock;
 }
 
 static void OnControlDeinit(IHS_SessionChannel *channel) {
     IHS_SessionChannelControl *control = (IHS_SessionChannelControl *)channel;
-    IHS_SessionChannelControlStopHeartbeat(channel);
-    if (control->feedbackTimer)
-        IHS_TimerTaskStopImmediate(control->feedbackTimer);
-    IHS_SessionPacketsWindowDestroy(control->framePacketWindow);
-    IHS_MutexDestroy(control->receiveLock);
-    IHS_MutexDestroy(control->sendLock);
+    IHS_SessionChannelControlClearIncoming(channel);
+    if (control->incomingLock) IHS_MutexDestroy(control->incomingLock);
+    if (control->sendLock) IHS_MutexDestroy(control->sendLock);
 }
 
 static void OnControlReceived(IHS_SessionChannel *channel, IHS_SessionPacket *packet) {
-    IHS_SessionChannelControl *control = (IHS_SessionChannelControl *)channel;
-    IHS_SessionPacketsWindow *window = control->framePacketWindow;
-    /* ACK the contiguous packet-receipt watermark, including fragments of an
-     * incomplete frame. This callback treats each received datagram as a batch. */
-    switch (packet->header.type) {
-    case IHS_SessionPacketTypeReliable:
-    case IHS_SessionPacketTypeReliableFrag:
-        IHS_MutexLock(control->receiveLock);
-        control->peerTimestamp = packet->header.sendTimestamp;
-        control->peerReceiveTime = IHS_SessionPacketTimestamp();
-        control->receivedReliable = true;
-        bool added = IHS_SessionPacketsWindowAdd(window, packet);
-        IHS_MutexUnlock(control->receiveLock);
-        if (!added) {
-            /* Log and disconnect once: the packets keep coming, and firing a
-             * disconnect per packet floods the link and re-enters teardown. */
-            if (!control->overflowed) {
-                control->overflowed = true;
-                IHS_SessionLog(channel->session, IHS_LogLevelError, "Control",
-                               "Frames window overflow");
-                IHS_SessionDisconnect(channel->session);
-            }
-            return;
-        }
-        break;
-    case IHS_SessionPacketTypeACK:
-        /* SessionRecvCallback already processed the cumulative ACK. */
-        break;
-    case IHS_SessionPacketTypeNACK:
-        ControlOnNackPacket(control, packet);
-        break;
-    default:
-        /* Official ignores unrecognized channel packet types (its channel
-         * HandlePacket default falls through without action). Killing the
-         * session on one unexpected packet turns a harmless difference
-         * into a dead stream. */
-        IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Control",
-                       "Ignoring unrecognized packet type %u\n", packet->header.type);
-        break;
-    }
-    IHS_SessionFrame frame;
-    IHS_BufferInit(&frame.body, 1024, 1024 * 1024);
+    IHS_SessionReliableReceived(channel->session, packet);
+}
 
-    for (;;) {
-        IHS_MutexLock(control->receiveLock);
-        bool ready = IHS_SessionPacketsWindowPoll(window, &frame);
-        IHS_MutexUnlock(control->receiveLock);
-        if (!ready)
+void IHS_SessionChannelControlReceiveFrame(IHS_SessionChannel *channel, IHS_SessionFrame *frame) {
+    IHS_SessionChannelControl *control = (void *)channel;
+    int phase = channel->session->state.connectionState;
+    if (phase == IHS_SessionConnectionStateUnconnected ||
+        phase == IHS_SessionConnectionStateStopping || channel->session->base.interrupted ||
+        channel->session->transport.detached) return;
+    /* Frame::SetPacket without a message byte leaves type zero; the original
+     * still consumes a decrypt attempt and rejects the missing cipher. */
+    EStreamControlMessage type = frame->body.size ? *IHS_BufferPointer(&frame->body) : 0;
+    if (frame->body.size) IHS_BufferOffsetBy(&frame->body, 1);
+    if (IsMessageEncrypted(type)) {
+        IHS_Buffer plain;
+        IHS_BufferInit(&plain, 1024, 1024 * 1024);
+        /* OnStreamPacket 0x7ad054..0x7ad070 increments BEFORE BDecrypt,
+         * including failed attempts. No resynchronization or rollback. */
+        uint64_t expectSequence = control->recvEncryptSequence++, actualSequence;
+        switch (IHS_SessionFrameDecrypt(channel->session, &frame->body, &plain, expectSequence,
+                                        &actualSequence)) {
+        case IHS_SessionPacketResultOK: {
+            IHS_SessionChannelControlHandoff(channel, type, &plain, &frame->header);
             break;
-        if (frame.body.size == 0) {
-            IHS_SessionPacketsWindowReleaseFrame(&frame);
-            continue;
         }
-        EStreamControlMessage type = *IHS_BufferPointer(&frame.body);
-        IHS_BufferOffsetBy(&frame.body, 1);
-        if (IsMessageEncrypted(type)) {
-            IHS_Buffer plain;
-            IHS_BufferInit(&plain, 1024, 1024 * 1024);
-            /* OnStreamPacket 0x7ad054..0x7ad070 increments BEFORE BDecrypt,
-             * including failed attempts. No resynchronization or rollback. */
-            uint64_t expectSequence = control->recvEncryptSequence++, actualSequence;
-            switch (IHS_SessionFrameDecrypt(channel->session, &frame.body, &plain, expectSequence,
-                                            &actualSequence)) {
-            case IHS_SessionPacketResultOK: {
-                IHS_SessionChannelControlOnMessageReceived(channel, type, &plain, &frame.header);
-                break;
-            }
-            case IHS_SessionFrameDecryptHashMismatch:
-            case IHS_SessionFrameDecryptOldSequence: {
-                // Ignore this packet
-                break;
-            }
-            case IHS_SessionFrameDecryptSequenceMismatch: {
-                IHS_SessionLog(
-                    channel->session, IHS_LogLevelWarn, "Control",
-                    "Mismatched message sequence %llu (expect %llu). id=%d, retransmit=%d, type=%s",
-                    actualSequence, expectSequence, frame.header.packetId,
-                    frame.header.retransmitCount, ControlMessageTypeName(type));
-                break;
-            }
-            case IHS_SessionFrameDecryptFailed: {
-                IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Control",
-                               "Failed to decrypt control message. id=%d, retransmit=%d, type=%s",
-                               frame.header.packetId, frame.header.retransmitCount,
-                               ControlMessageTypeName(type));
-                break;
-            }
-            }
-            IHS_BufferClear(&plain, true);
-        } else {
-            IHS_SessionChannelControlOnMessageReceived(channel, type, &frame.body, &frame.header);
+        case IHS_SessionFrameDecryptHashMismatch:
+        case IHS_SessionFrameDecryptOldSequence: {
+            // Ignore this packet
+            break;
         }
-        IHS_SessionPacketsWindowReleaseFrame(&frame);
-    }
-
-    IHS_BufferClear(&frame.body, true);
-
-    /* Confirm received packets even if their complete frame is still pending.
-     * A duplicate must re-ACK, otherwise loss of the last ACK never heals. */
-    IHS_MutexLock(control->receiveLock);
-    if (packet->header.type == IHS_SessionPacketTypeReliable ||
-        packet->header.type == IHS_SessionPacketTypeReliableFrag) {
-        uint16_t confirmed = IHS_SessionPacketsWindowContiguousId(window);
-        IHS_SessionChannelPacketAck(channel, confirmed, 0, true,
-                                    control->peerTimestamp + IHS_SessionPacketTimestamp() -
-                                        control->peerReceiveTime);
-    }
-    ControlSendGapNack(control);
-    IHS_MutexUnlock(control->receiveLock);
-}
-
-/* Peer reports its receive state for OUR reliable stream. Extended NACK body
- * (wire offsets after the 13B header): [0..3] u32 timestamp, [4..5] u16
- * contiguous delivery point, [6..] presence mask (bit=1: peer holds it).
- * bit=1 releases the packet from retransmission; bit=0 forces a resend.
- * Header-only (empty body) is the simple form: everything the reference
- * (header.packetId) covers is missing on the peer. */
-static void ControlOnNackPacket(IHS_SessionChannelControl *control, IHS_SessionPacket *packet) {
-    IHS_Session *session = control->base.session;
-    uint64_t nowMs = IHS_TimerNow();
-    /* HandleNackPacket 0x7f9610: ignore stale feedback, allowing equality. */
-    if (control->haveNackTimestamp &&
-        (int32_t)(packet->header.sendTimestamp - control->lastNackTimestamp) < 0)
-        return;
-    if (packet->body.size != 0 && packet->body.size < 6)
-        return;
-    control->haveNackTimestamp = true;
-    control->lastNackTimestamp = packet->header.sendTimestamp;
-    uint32_t cutoff = IHS_SessionPacketTimestamp() - IHS_StreamClockNackAgeTicks(&session->clock);
-    if (packet->body.size >= 6) {
-        const uint8_t *body = IHS_BufferPointer(&packet->body);
-        uint32_t seen =
-            body[0] | (uint32_t)body[1] << 8 | (uint32_t)body[2] << 16 | (uint32_t)body[3] << 24;
-        /* csel ..., lt at 0x7f977c selects seen when cutoff < seen (max). */
-        if ((int32_t)(cutoff - seen) < 0)
-            cutoff = seen;
-        uint16_t contiguous = (uint16_t)(body[4] | (body[5] << 8));
-        IHS_RetransmissionAcknowledgeThrough(&session->retransmission, IHS_SessionChannelIdControl,
-                                             (uint16_t)(contiguous + 1u), nowMs);
-        size_t maskLen = packet->body.size - 6;
-        for (size_t j = 0; j < maskLen; j++) {
-            uint8_t bits = body[6 + j];
-            /* 0x7f9840 skips zero bytes; 0x7f9868..78 stops after the highest
-             * set bit. Trailing zero bits are not explicit resend requests. */
-            for (size_t k = 0; bits; k++, bits >>= 1) {
-                uint16_t id = (uint16_t)(packet->header.packetId + j * 8 + k);
-                if (bits & 1u) {
-                    IHS_RetransmissionAcknowledge(&session->retransmission,
-                                                  IHS_SessionChannelIdControl, id, INT16_MIN,
-                                                  nowMs);
-                } else {
-                    IHS_RetransmissionNackBefore(&session->retransmission,
-                                                 IHS_SessionChannelIdControl, id, false, cutoff,
-                                                 nowMs);
-                }
-            }
+        case IHS_SessionFrameDecryptSequenceMismatch: {
+            IHS_SessionLog(
+                channel->session, IHS_LogLevelWarn, "Control",
+                "Mismatched message sequence %llu (expect %llu). id=%d, retransmit=%d, type=%s",
+                actualSequence, expectSequence, frame->header.packetId,
+                frame->header.retransmitCount, ControlMessageTypeName(type));
+            break;
         }
+        case IHS_SessionFrameDecryptFailed: {
+            IHS_SessionLog(channel->session, IHS_LogLevelWarn, "Control",
+                           "Failed to decrypt control message. id=%d, retransmit=%d, type=%s",
+                           frame->header.packetId, frame->header.retransmitCount,
+                           ControlMessageTypeName(type));
+            break;
+        }
+        }
+        IHS_BufferClear(&plain, true);
+    } else {
+        IHS_SessionChannelControlHandoff(channel, type, &frame->body, &frame->header);
     }
-    /* Header-only and extended forms also request IDs BELOW the bitmap base. */
-    IHS_RetransmissionNackBefore(&session->retransmission, IHS_SessionChannelIdControl,
-                                 packet->header.packetId, true, cutoff, nowMs);
-}
-
-static void ControlSendGapNack(IHS_SessionChannelControl *control) {
-    IHS_Session *session = control->base.session;
-    IHS_SessionPacketsWindow *window = control->framePacketWindow;
-    /* Only when a packet slot is actually MISSING: a partially received
-     * frame (fragments still in flight) leaves all buffered slots used and
-     * must not trigger a NACK. Official scans its receive ring the same way
-     * (UpdateReliableState 0x7f9d0c). */
-    if (!IHS_SessionPacketsWindowHasHole(window)) {
-        return;
-    }
-    uint16_t confirmed = IHS_SessionPacketsWindowContiguousId(window);
-    uint16_t needed = (uint16_t)(confirmed + 1u);
-    uint64_t nowMs = IHS_TimerNow();
-    /* Official hole-age threshold is 65 units (~1 ms, [f47000+2444] from the
-     * 0x7fe284 initializer); the effective cadence is the channel update tick
-     * (5 ms), which the retransmission tick matches. */
-    if (control->lastNackSentMs != 0 && nowMs - control->lastNackSentMs < 5) {
-        return;
-    }
-    control->lastNackSentMs = nowMs;
-
-    /* Extended NACK: presence mask covering up to 320 IDs from the base. */
-    uint8_t bitmap[40];
-    IHS_SessionPacketsWindowHoleBitmap(window, needed, bitmap, 320);
-
-    IHS_SessionPacket packet;
-    IHS_SessionChannelInitializePacket(&control->base, &packet, IHS_SessionPacketTypeNACK, false,
-                                       needed);
-    packet.header.fragmentId = 0;
-    IHS_BufferAppendUInt32LE(&packet.body, control->peerTimestamp);
-    IHS_BufferAppendUInt16LE(&packet.body, confirmed);
-    IHS_BufferAppendMem(&packet.body, bitmap, sizeof(bitmap));
-    IHS_SessionChannelQueuePacket(&control->base, &packet, false);
-    IHS_SessionPacketClear(&packet, true);
 }
 
 void IHS_SessionChannelControlOnMessageReceived(IHS_SessionChannel *channel,
@@ -572,6 +436,8 @@ void IHS_SessionChannelControlOnMessageReceived(IHS_SessionChannel *channel,
         break;
     }
     case k_EStreamControlSetStreamingClientConfig: {
+        /* Receive/drain owns phase selection. The generic original table also
+         * accepts this in phases other than 6; OnSet* itself has no phase guard. */
         CSetStreamingClientConfig *message =
             IHS_UNPACK_BUFFER(cset_streaming_client_config__unpack, payload);
         if (message == NULL) {
@@ -597,11 +463,6 @@ void IHS_SessionChannelControlOnMessageReceived(IHS_SessionChannel *channel,
     case k_EStreamControlStartAudioData:
     case k_EStreamControlStopAudioData: {
         IHS_SessionChannelControlOnAudio(channel, type, payload, header);
-        break;
-    }
-    case k_EStreamControlStartMicrophoneData:
-    case k_EStreamControlStopMicrophoneData: {
-        IHS_SessionChannelControlOnMicrophone(channel, type, payload, header);
         break;
     }
     case k_EStreamControlStartVideoData:
@@ -819,11 +680,10 @@ static void OnServerHandshake(IHS_SessionChannel *channel, const CServerHandshak
     if (session->state.connectionState != IHS_SessionConnectionStateHandshaking) {
         return;
     }
-    if (message->info->has_mtu) {
-        session->state.mtu = message->info->mtu;
-    } else {
-        session->state.mtu = 1500;
-    }
+    /* Official uses the optional int32 value (zero when absent), then clamps
+     * it at 0x7a64cc..0x7a64f0. Required info validation is separate. */
+    int32_t mtu = message->info->mtu;
+    session->state.mtu = mtu < 512 ? 512 : mtu > 1472 ? 1472 : mtu;
     IHS_SessionChannelControlRequestAuthentication(channel);
 }
 
@@ -836,30 +696,10 @@ static void OnSetClientConfig(IHS_SessionChannel *channel,
         return;
     }
     IHS_Session *session = channel->session;
-    // Mirror Steam's BStreamingInput/Audio/Video reading from the negotiated client config.
-    // Each flag is only updated if the server actually included it; absent fields keep the
-    // current value (which started at true at session creation).
-    if (config->has_enable_input_streaming) {
-        session->state.streamingInput = config->enable_input_streaming;
-    }
-    if (config->has_enable_audio_streaming) {
-        session->state.streamingAudio = config->enable_audio_streaming;
-    }
-    if (config->has_enable_video_streaming) {
-        session->state.streamingVideo = config->enable_video_streaming;
-    }
-    IHS_SessionLog(session, IHS_LogLevelDebug, "Control",
-                   "Set client config. input=%u audio=%u video=%u enable_video_hevc=%u",
-                   session->state.streamingInput, session->state.streamingAudio,
-                   session->state.streamingVideo, config->enable_video_hevc);
+    IHS_SessionClientConfigApply(session, config, true);
 }
 
 bool IHS_SessionInputEnabled(IHS_Session *session) {
-    /* Host-issued temporary disable (scene transitions etc.) suppresses ALL
-     * input reports, matching the official client's OnSetInputTemporarily
-     * Disabled handling. The delta chain stays intact: while disabled no
-     * deltas are submitted and `previous` does not advance, so the first
-     * delta after re-enable carries the full accumulated change. */
     /* OnSetInputTemporarilyDisabled opens an informational dialog. Its
      * controller handlers return false (0x766cb8/0x766cc0), so it does not
      * suppress HID reports. Only negotiated enable_input_streaming gates input. */

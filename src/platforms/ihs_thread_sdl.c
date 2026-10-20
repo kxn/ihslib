@@ -73,3 +73,7 @@ bool IHS_CondWait(IHS_Cond *cond, IHS_Mutex *mutex) {
     SDL_assert(mutex != NULL);
     return SDL_CondWait((SDL_cond *) cond, (SDL_mutex *) mutex) == 0;
 }
+
+bool IHS_CondWaitTimeout(IHS_Cond *cond, IHS_Mutex *mutex, uint32_t milliseconds) {
+    return SDL_CondWaitTimeout((SDL_cond *)cond, (SDL_mutex *)mutex, milliseconds) == 0;
+}

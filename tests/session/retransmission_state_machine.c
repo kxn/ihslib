@@ -37,7 +37,64 @@ static void InitPacket(IHS_SessionPacket *packet, uint16_t packetId,
     IHS_BufferAppendUInt8(&packet->body, payload);
 }
 
+typedef struct {
+    IHS_SessionRetransmission *r;
+    uint16_t ids[8];
+    uint8_t counts[8];
+    unsigned size, mode;
+} FailureCapture;
+static bool failure_send(IHS_SessionPacket *p, void *ctx) {
+    FailureCapture *c = ctx;
+    assert(c->size < 8);
+    c->ids[c->size] = p->header.packetId;
+    c->counts[c->size++] = p->header.retransmitCount;
+    if (c->mode == 1 && p->header.packetId == 10) return false;
+    if (c->mode == 2 && p->header.packetId == 10) {
+        assert(IHS_RetransmissionAcknowledge(c->r, 1, 10, 0, 25));
+        assert(IHS_RetransmissionAcknowledge(c->r, 1, 11, 0, 25));
+    }
+    if (c->mode == 3 && p->header.packetId == 10)
+        assert(IHS_RetransmissionNack(c->r, 1, 10, 0, 25));
+    return true;
+}
+static void failure_and_feedback(void) {
+    for (unsigned mode = 1; mode <= 3; ++mode) {
+        IHS_SessionRetransmission r;
+        IHS_RetransmissionInit(&r, NULL);
+        for (unsigned i = 0; i < 3; ++i) {
+            IHS_SessionPacket p;
+            InitPacket(&p, i == 2 ? 20 : 10 + i, 0, 7);
+            p.header.channelId = i == 2 ? 2 : 1;
+            assert(IHS_RetransmissionTrack(&r, &p, 0));
+            IHS_RetransmissionNoteInitialSend(&r, &p.header, true, 0);
+            IHS_SessionPacketClear(&p, true);
+        }
+        FailureCapture c = {.r = &r, .mode = mode};
+        assert(IHS_RetransmissionProcessAt(&r, 25, failure_send, &c) == (mode == 3 ? 3 : 2));
+        assert(c.ids[0] == 10 && c.ids[c.size - 1] == 20);
+        if (mode == 1) {
+            // Failure stops this channel, but neither advances nor delays 11.
+            c.mode = 0;
+            assert(IHS_RetransmissionProcessAt(&r, 26, failure_send, &c) == 1);
+            assert(c.ids[2] == 11 && c.counts[2] == 1);
+            assert(IHS_RetransmissionNack(&r, 1, 10, 0, 26));
+            assert(IHS_RetransmissionProcessAt(&r, 26, failure_send, &c) == 1);
+            assert(c.ids[3] == 10 && c.counts[3] == 1);
+        } else if (mode == 2) {
+            // ACK can release the current and a not-yet-visited snapshot item.
+            assert(!IHS_RetransmissionIsTracked(&r, 1, 10, 0));
+            assert(!IHS_RetransmissionIsTracked(&r, 1, 11, 0));
+        } else {
+            // Feedback during I/O is not overwritten by completion of that send.
+            c.mode = 0;
+            assert(IHS_RetransmissionProcessAt(&r, 25, failure_send, &c) == 1);
+            assert(c.ids[3] == 10 && c.counts[3] == 2);
+        }
+        IHS_RetransmissionDeinit(&r);
+    }
+}
 int main(void) {
+    failure_and_feedback();
     IHS_SessionRetransmission retransmission;
     IHS_RetransmissionInit(&retransmission, NULL);
 

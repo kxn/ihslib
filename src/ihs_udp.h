@@ -37,9 +37,18 @@ typedef struct IHS_UDPPacket {
     IHS_Buffer buffer;
 } IHS_UDPPacket;
 
+/* NULL means construction failed; no descriptor/object is transferred. */
 IHS_UDPSocket *IHS_UDPSocketOpen(bool broadcast);
 
 void IHS_UDPSocketClose(IHS_UDPSocket *socket);
+
+/* Actual stream packet constructor/TransportUDP::Recv uses 2272 bytes (§157).
+ * This is not the negotiated MTU or a decoder/payload limit. */
+#define IHS_STREAM_UDP_RECV_CAPACITY 2272u
+
+/* Readiness only. POSIX follows the output fd_set even on select errors;
+ * other backends can return -1. Session still advances its connection tick. */
+int IHS_UDPSocketWaitReadable(IHS_UDPSocket *, uint32_t timeoutMs);
 
 int IHS_UDPSocketReceive(IHS_UDPSocket *s, IHS_UDPPacket *packet);
 
@@ -47,9 +56,16 @@ int IHS_UDPSocketReceive(IHS_UDPSocket *s, IHS_UDPPacket *packet);
  *
  * @param s
  * @param packet
- * @return true if succeeded
+ * @return accepted by the socket policy, not proof of delivery. Discovery
+ * broadcast-enabled sockets treat a negative EHOSTUNREACH as nonfatal;
+ * ordinary media sockets and positive short sends still report failure.
  */
 bool IHS_UDPSocketSend(IHS_UDPSocket *s, const IHS_UDPPacket *packet);
+
+/** Replace the raw socket, retaining its owner object and nonblocking intent.
+ * The caller must serialize all receives, sends and teardown around this call.
+ * A failed reopen leaves an inert socket which can be reopened or closed. */
+bool IHS_UDPSocketReopen(IHS_UDPSocket *s);
 
 bool IHS_UDPSocketSetBlocking(IHS_UDPSocket *s, bool blocking);
 

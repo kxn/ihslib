@@ -13,6 +13,7 @@ int main(int argc, char *argv[]) {
                     .hostConnectionId = 234,
             }
     };
+    session.base.lock = IHS_MutexCreate();
     IHS_SessionChannel *channel = IHS_SessionChannelDiscoveryCreate(&session);
     IHS_SessionPacket packet;
     IHS_SessionChannelInitializePacket(channel, &packet, IHS_SessionPacketTypeConnect, false, 12);
@@ -39,5 +40,6 @@ int main(int argc, char *argv[]) {
     IHS_BufferClear(&parsed.body, true);
 
     IHS_SessionChannelDestroy(channel);
+    IHS_MutexDestroy(session.base.lock);
     return 0;
 }

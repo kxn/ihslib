@@ -42,4 +42,7 @@ void IHS_SessionFrameBodyInitialize(IHS_Buffer *body, bool hasCrc) {
 
 void IHS_SessionFrameClear(IHS_SessionFrame *frame, bool freeData) {
     IHS_BufferClear(&frame->body, freeData);
+    frame->receivedRetries = 0;
+    frame->mediaOffset = 0;
+    frame->mediaPrepared = false;
 }

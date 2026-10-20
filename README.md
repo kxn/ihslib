@@ -14,6 +14,9 @@ Based on [reverse engineering work](https://github.com/mariotaku/steamlink.py) o
 be core of fully featured Steam Remote Play client.
 
 This project is licensed under LGPL v3.
+`src/session/outgoing_sort.c` specializes the bounded libc++19 sorting algorithm
+under Apache-2.0 WITH LLVM-exception; its notice is in
+[`src/session/LLVM-LICENSE.txt`](src/session/LLVM-LICENSE.txt).
 
 ## Credits
 

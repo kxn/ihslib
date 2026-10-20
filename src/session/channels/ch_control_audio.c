@@ -29,6 +29,7 @@
 #include "ch_control.h"
 #include "ch_data_audio.h"
 #include "session/session_pri.h"
+#include "session/unreliable.h"
 
 #include "protobuf/pb_utils.h"
 #include "protobuf/discovery.pb-c.h"
@@ -42,19 +43,36 @@ void IHS_SessionChannelControlOnAudio(IHS_SessionChannel *channel, EStreamContro
         case k_EStreamControlStartAudioData: {
             IHS_SessionChannel *audio = IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataAudio);
             CStartAudioDataMsg *message = cstart_audio_data_msg__unpack(NULL, payload->size,
-                                                                            IHS_BufferPointer(payload));
+                                                                            payload->size ? IHS_BufferPointer(payload) : NULL);
             if (message == NULL) {
                 IHS_SessionLog(session, IHS_LogLevelWarn, "Audio", "Malformed CStartAudioDataMsg");
                 break;
             }
             /* OnStartAudioData 0x7adddc..0x7addf8 stops the previous decoder. */
             if (audio) IHS_SessionChannelRemove(session, audio->id);
-            audio = IHS_SessionChannelDataAudioCreate(session, message);
+            /* Original Start*Data sets transport delay before decoder creation. */
+            if (!IHS_SessionUnreliableSetDelay(session, message->channel, 6553)) {
+                cstart_audio_data_msg__free_unpacked(message, NULL);
+                break;
+            }
+            /* Presence matters: explicit None stays None; omission reads the
+             * complete negotiated config member (official 0x7ade98..b0). */
+            CStartAudioDataMsg resolved = *message;
+            if (!message->has_codec)
+                resolved.codec = session->negotiatedConfig
+                                     ? session->negotiatedConfig->selected_audio_codec
+                                     : k_EStreamAudioCodecNone;
+            audio = IHS_SessionChannelDataAudioCreate(session, &resolved);
             IHS_SessionChannelAdd(session, audio);
             cstart_audio_data_msg__free_unpacked(message, NULL);
             break;
         }
         case k_EStreamControlStopAudioData: {
+            CStopAudioDataMsg *message = cstop_audio_data_msg__unpack(NULL, payload->size,
+                                                                      payload->size ? IHS_BufferPointer(payload) : NULL);
+            if (!message)
+                break; /* Failed Frame::Get leaves channel/decoder unchanged. */
+            cstop_audio_data_msg__free_unpacked(message, NULL);
             IHS_SessionChannel *audio = IHS_SessionChannelForType(session, IHS_SessionChannelTypeDataAudio);
             if (!audio) break;
             IHS_SessionChannelRemove(session, audio->id);

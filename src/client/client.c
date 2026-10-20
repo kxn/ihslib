@@ -40,6 +40,7 @@
 #include "protobuf/pb_utils.h"
 
 static void ClientInitialized(IHS_Base *base, void *context);
+static bool ClientReceiveCycle(IHS_Base *base, void *context, IHS_UDPPacket *packet);
 
 static const unsigned char PACKET_MAGIC[8] = {0xff, 0xff, 0xff, 0xff, 0x21, 0x4c, 0x5f, 0xa0};
 
@@ -68,20 +69,51 @@ static const ProtobufCMessageDescriptor
 
 static IHS_BaseRunCallbacks ClientRunCallbacks = {
     .initialized = ClientInitialized,
+    .receiveCycle = ClientReceiveCycle,
+    .receiveCapacity = 2048,
 };
+
+_Thread_local IHS_Client *IHS_ClientDispatchOwner;
 
 IHS_Client *IHS_ClientCreate(const IHS_ClientConfig *config) {
     IHS_Client *client = malloc(sizeof(IHS_Client));
+    if (!client) return NULL;
     memset(client, 0, sizeof(IHS_Client));
+    client->authorizationCache.result = k_ERemoteDeviceAuthorizationFailed;
+    /* BStart's initial no-subscriber Update has advanced the discovery round. */
+    client->discoverySeq = 1;
+    atomic_init(&client->deferAuthorization, false);
     IHS_BaseInit(&client->base, config, ClientRecvCallback, true);
+    if (!client->base.lock) {
+        free(client);
+        return NULL;
+    }
     IHS_BaseSetRunCallbacks(&client->base, &ClientRunCallbacks, NULL);
+    client->receiveWake = IHS_CondCreate();
+    if (!client->receiveWake) {
+        IHS_BaseDestroy(&client->base);
+        free(client);
+        return NULL;
+    }
     client->timers = IHS_TimerCreate();
+    if (!client->timers) {
+        IHS_CondDestroy(client->receiveWake);
+        IHS_BaseDestroy(&client->base);
+        free(client);
+        return NULL;
+    }
 
     client->privCallbacks.discovery = IHS_ClientDiscoveryCallback;
     client->privCallbacks.authorization = IHS_ClientAuthorizationCallback;
     client->privCallbacks.streaming = IHS_ClientStreamingCallback;
 
-    IHS_BaseStartWorker(&client->base, "IHSClient");
+    if (!IHS_BaseStartWorker(&client->base, "IHSClient")) {
+        IHS_TimerDestroy(client->timers);
+        IHS_CondDestroy(client->receiveWake);
+        IHS_BaseDestroy(&client->base);
+        free(client);
+        return NULL;
+    }
     return client;
 }
 
@@ -99,15 +131,113 @@ void IHS_ClientSetSecretKey(IHS_Client *client, const uint8_t *secretKey) {
 
 void IHS_ClientStop(IHS_Client *client) {
     IHS_BaseInterruptWorker(&client->base);
+    IHS_BaseLock(&client->base);
+    IHS_CondSignal(client->receiveWake);
+    IHS_BaseUnlock(&client->base);
 }
 
 void IHS_ClientThreadedJoin(IHS_Client *client) {
     IHS_BaseWaitWorker(&client->base);
 }
 
+static void FreeAuthorizationFrame(CMsgRemoteClientBroadcastHeader *header, ProtobufCMessage *message) {
+    cmsg_remote_client_broadcast_header__free_unpacked(header, NULL);
+    if (message) protobuf_c_message_free_unpacked(message, NULL);
+}
+
+void IHS_ClientSetAuthorizationDeferred(IHS_Client *client, bool deferred) {
+    atomic_store_explicit(&client->deferAuthorization, deferred, memory_order_release);
+}
+
+/* Original manager Update sends RequestStatus (@798ab0) before a due
+ * SendStartStreamingRequest (@798c74). Hold one timer owner across both stages
+ * so the standalone timer cannot finish a discovery cycle between them. */
+static void ClientUpdateVisit(IHS_TimerTask *unused, void *opaque) {
+    (void)unused;
+    IHS_Client *client = opaque;
+    IHS_BaseLock(&client->base);
+    bool ready = !client->base.interrupted && !client->receiveBatchActive &&
+                 !client->authorizationCount && !client->authorizationDispatching;
+    bool fresh = client->receiveUpdatedGeneration != client->receiveGeneration;
+    if (ready && fresh) client->receiveUpdatedGeneration = client->receiveGeneration;
+    IHS_BaseUnlock(&client->base);
+    if (!ready) return;
+    if (!fresh) {
+        /* Preserve the deferred API's initial-send behavior after publication
+         * between reads. StreamingAdvance itself rejects stale retries. This
+         * is not a new manager Update/reentry scope. */
+        IHS_ClientStreamingUpdate(client);
+        return;
+    }
+    IHS_Client *previousDispatch = IHS_ClientDispatchOwner;
+    IHS_ClientDispatchOwner = client;
+    IHS_ClientDiscoveryUpdate(client);
+    IHS_ClientStreamingUpdate(client);
+    /* A late nested refresh applies to the next Update, since discovery has
+     * already run. Resolve the current slot again: a callback may Stop it. */
+    IHS_ClientDiscoveryEndCycle(client);
+    IHS_ClientDispatchOwner = previousDispatch;
+}
+static void ClientUpdateAfterReceive(IHS_Client *client) {
+    IHS_TimerTaskVisitSlot(client->timers, &client->discoveryTimer, ClientUpdateVisit, client);
+}
+
+size_t IHS_ClientPumpAuthorization(IHS_Client *client, size_t budget) {
+    if (!client) return 0;
+    size_t dispatched = 0;
+    while (dispatched < budget) {
+        IHS_BaseLock(&client->base);
+        if (!client->authorizationCount) {
+            IHS_BaseUnlock(&client->base);
+            break;
+        }
+        unsigned index = client->authorizationHead;
+        IHS_SocketAddress address = client->authorizationQueue[index].address;
+        CMsgRemoteClientBroadcastHeader *header = client->authorizationQueue[index].header;
+        ProtobufCMessage *message = client->authorizationQueue[index].message;
+        client->authorizationHead = (index + 1) % 32;
+        --client->authorizationCount;
+        ++client->authorizationDispatching;
+        IHS_BaseUnlock(&client->base);
+        /* Match BaseWorker's dispatch order: no Base lock around timer visitors. */
+        IHS_Client *previousDispatch = IHS_ClientDispatchOwner;
+        IHS_ClientDispatchOwner = client;
+        if (header->msg_type == k_ERemoteDeviceAuthorizationResponse ||
+            header->msg_type == k_ERemoteDeviceAuthorizationConfirmed ||
+            header->msg_type == k_ERemoteDeviceAuthorizationRequest ||
+            header->msg_type == k_ERemoteDeviceAuthorizationCancelRequest)
+            client->privCallbacks.authorization(client, &address, header, message);
+        else
+            client->privCallbacks.streaming(client, &address, header, message);
+        IHS_ClientDispatchOwner = previousDispatch;
+        FreeAuthorizationFrame(header, message);
+        IHS_BaseLock(&client->base);
+        --client->authorizationDispatching;
+        IHS_BaseUnlock(&client->base);
+        ++dispatched;
+    }
+    IHS_BaseLock(&client->base);
+    bool drained = client->authorizationCount == 0;
+    IHS_BaseUnlock(&client->base);
+    /* Original Update processes inbound packets before due sends. A bounded
+     * pump which leaves queued work must not retry an already-obsolete phase. */
+    if (budget && drained && atomic_load_explicit(&client->deferAuthorization, memory_order_acquire))
+        ClientUpdateAfterReceive(client);
+    return dispatched;
+}
+
 void IHS_ClientDestroy(IHS_Client *client) {
+    /* The caller has joined RX; queued callbacks must not outlive their client. */
+    for (unsigned n = 0; n < client->authorizationCount; ++n) {
+        unsigned index = (client->authorizationHead + n) % 32;
+        FreeAuthorizationFrame(client->authorizationQueue[index].header,
+                               client->authorizationQueue[index].message);
+    }
     IHS_TimerDestroy(client->timers);
+    free(client->discoveryTargets);
+    free(client->authorizationCache.key);
     IHS_ClientLog(client, IHS_LogLevelInfo, "Client", "Destroying client, bye!");
+    IHS_CondDestroy(client->receiveWake);
     IHS_BaseDestroy(&client->base);
     free(client);
 }
@@ -135,6 +265,18 @@ void IHS_ClientSetStreamingCallbacks(IHS_Client *client,
 
 const char *IHS_ClientError(IHS_Client *client) {
     return "";
+}
+
+bool IHS_ClientCreateDeviceToken(IHS_Client *client, const uint8_t secret[32], uint8_t token[32]) {
+    uint8_t id[8];
+    IHS_WriteUInt64LE(id, client->base.deviceId);
+    size_t count = 32;
+    int result = IHS_CryptoSymmetricEncrypt(id, sizeof(id), secret, 32, token, &count);
+    if (result != 0 || count != 32) {
+        memset(token, 0, 32);
+        return false;
+    }
+    return true;
 }
 
 bool IHS_ClientSend(IHS_Client *client, IHS_SocketAddress address, ERemoteClientBroadcastMsg type,
@@ -170,18 +312,28 @@ bool IHS_ClientSend(IHS_Client *client, IHS_SocketAddress address, ERemoteClient
 
 bool IHS_ClientBroadcast(IHS_Client *client, ERemoteClientBroadcastMsg type,
                          ProtobufCMessage *message) {
-    IHS_SocketAddress address = {
-        {.v4 = {IHS_IPAddressFamilyIPv4, {0xFF, 0xFF, 0xFF, 0xFF}}}, 27036};
-    bool sent = IHS_ClientSend(client, address, type, message);
+    IHS_SocketAddress targets[9] = {{
+        .ip = {.v4 = {IHS_IPAddressFamilyIPv4, {0xFF, 0xFF, 0xFF, 0xFF}}}, .port = 27036}};
     /* 255.255.255.255 alone doesn't reach Steam hosts from every device and
      * network; send to each local subnet's broadcast address as well. Hosts
      * answer every copy, discovery already handles repeated status. */
     IHS_IPAddress directed[8];
     size_t count = IHS_UDPBroadcastAddresses(directed, sizeof(directed) / sizeof(directed[0]));
     for (size_t i = 0; i < count; i++) {
-        address.ip = directed[i];
-        sent = IHS_ClientSend(client, address, type, message) || sent;
+        targets[i + 1] = (IHS_SocketAddress){.ip = directed[i], .port = 27036};
     }
+    /* Original CDiscoverySocket::BSend fixes its destination list, then retries
+     * the whole list after a failed pass, at most twice. Only the raw socket
+     * changes; queued transactions and the client/RX owner remain intact. */
+    IHS_BaseLock(&client->base);
+    bool sent = false;
+    for (unsigned pass = 0; pass < 3 && !client->base.interrupted && client->base.socket; ++pass) {
+        for (size_t i = 0; i <= count; ++i)
+            sent = IHS_ClientSend(client, targets[i], type, message) || sent;
+        if (sent) break;
+        if (pass < 2) IHS_UDPSocketReopen(client->base.socket);
+    }
+    IHS_BaseUnlock(&client->base);
     return sent;
 }
 
@@ -210,9 +362,14 @@ static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
         IHS_BaseLog(base, IHS_LogLevelDebug, "Client", "Malformed broadcast header");
         return;
     }
+    /* Fixed official LAN BProcess rejects zero/default identity before dispatch. */
+    if (!header->has_client_id || !header->client_id) {
+        cmsg_remote_client_broadcast_header__free_unpacked(header, NULL);
+        return;
+    }
     IHS_BufferOffsetBy(data, (int)header_size);
     IHS_BufferOffsetBy(data, (int)IHS_ReadUInt32LE(IHS_BufferPointer(data), &payload_size));
-    if (payload_size > data->size) {
+    if (payload_size != data->size) {
         cmsg_remote_client_broadcast_header__free_unpacked(header, NULL);
         return;
     }
@@ -229,6 +386,10 @@ static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
         descriptor
             ? protobuf_c_message_unpack(descriptor, NULL, payload_size, IHS_BufferPointer(data))
             : NULL;
+    if (type == k_ERemoteDeviceProofRequest && !message) {
+        cmsg_remote_client_broadcast_header__free_unpacked(header, NULL);
+        return;
+    }
     IHS_Client *client = (IHS_Client *)base;
     switch (type) {
     case k_ERemoteClientBroadcastMsgDiscovery:
@@ -241,15 +402,32 @@ static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
     case k_ERemoteDeviceAuthorizationResponse:
     case k_ERemoteDeviceAuthorizationCancelRequest:
     case k_ERemoteDeviceAuthorizationConfirmed:
-        client->privCallbacks.authorization(client, address, header, message);
-        break;
     case k_ERemoteDeviceStreamingRequest:
     case k_ERemoteDeviceStreamingResponse:
     case k_ERemoteDeviceStreamingProgress:
     case k_ERemoteDeviceStreamingCancelRequest:
     case k_ERemoteDeviceProofRequest:
     case k_ERemoteDeviceProofResponse:
-        client->privCallbacks.streaming(client, address, header, message);
+        if (atomic_load_explicit(&client->deferAuthorization, memory_order_acquire)) {
+            IHS_BaseLock(base);
+            if (client->authorizationCount < 32) {
+                unsigned index = (client->authorizationHead + client->authorizationCount++) % 32;
+                client->authorizationQueue[index].address = *address;
+                client->authorizationQueue[index].header = header;
+                client->authorizationQueue[index].message = message;
+                IHS_BaseUnlock(base);
+            } else {
+                ++client->authorizationDropped;
+                IHS_BaseUnlock(base);
+                FreeAuthorizationFrame(header, message);
+            }
+            return; /* Queue owns header/message; a full queue drops and frees them. */
+        }
+        if (type == k_ERemoteDeviceAuthorizationResponse || type == k_ERemoteDeviceAuthorizationConfirmed ||
+            type == k_ERemoteDeviceAuthorizationRequest || type == k_ERemoteDeviceAuthorizationCancelRequest)
+            client->privCallbacks.authorization(client, address, header, message);
+        else
+            client->privCallbacks.streaming(client, address, header, message);
         break;
     case k_ERemoteClientBroadcastMsgPairingState:
     case k_ERemoteClientBroadcastMsgPairingExclusivity:
@@ -271,6 +449,61 @@ static void ClientRecvCallback(IHS_Base *base, const IHS_SocketAddress *address,
 
 static void ClientInitialized(IHS_Base *base, void *context) {
     (void)context;
-    IHS_UDPSocketSetBlocking(base->socket, true);
-    IHS_UDPSocketSetRecvTimeout(base->socket, 10000 /* 10ms */);
+    /* Official CDiscoverySocket::BInit requests O_NONBLOCK (@caddbc).
+     * CServerManagerNetworkWatcher schedules Update at 100ms (@c9643c). */
+    IHS_UDPSocketSetBlocking(base->socket, false);
+}
+
+static bool ClientReceiveCycle(IHS_Base *base, void *context, IHS_UDPPacket *packet) {
+    (void)context;
+    IHS_Client *client = (IHS_Client *)base;
+    if (!IHS_ClientDiscoveryBeginCycle(client)) {
+        IHS_BaseLock(base);
+        if (!base->interrupted) IHS_CondWaitTimeout(client->receiveWake, base->lock, 100);
+        bool running = !base->interrupted;
+        IHS_BaseUnlock(base);
+        return running;
+    }
+    IHS_BaseLock(base);
+    if (base->interrupted) {
+        IHS_BaseUnlock(base);
+        return false;
+    }
+    client->receiveBatchActive = true;
+    IHS_BaseUnlock(base);
+    uint64_t due = IHS_TimerNow() + 100;
+    while (!base->interrupted) {
+        /* Discovery broadcast recovery can replace the raw fd. It holds Base
+         * through the change; no receive may retain the old descriptor. */
+        IHS_BaseLock(base);
+        int result = IHS_UDPSocketReceive(base->socket, packet);
+        IHS_BaseUnlock(base);
+        /* Original BReceive @cae2c0 treats all nonpositive recvfrom results
+         * alike: end this Update's batch, retain socket for the next Update.
+         * This client owner differs from the media session's receiveCycle. */
+        if (result <= 0) break;
+        IHS_Client *previousDispatch = IHS_ClientDispatchOwner;
+        IHS_ClientDispatchOwner = client;
+        base->callbacks.received(base, &packet->address, &packet->buffer);
+        IHS_ClientDispatchOwner = previousDispatch;
+        IHS_BufferClear(&packet->buffer, false);
+    }
+    IHS_BufferClear(&packet->buffer, false);
+    IHS_BaseLock(base);
+    client->receiveBatchActive = false;
+    ++client->receiveGeneration;
+    bool update = !base->interrupted && !atomic_load(&client->deferAuthorization);
+    IHS_BaseUnlock(base);
+    /* Original manager Update drains input before checking due sends. Deferred
+     * owners do this after draining their published callback queue instead. */
+    if (update) ClientUpdateAfterReceive(client);
+    IHS_BaseLock(base);
+    while (!base->interrupted) {
+        uint64_t now = IHS_TimerNow();
+        if (now >= due) break;
+        IHS_CondWaitTimeout(client->receiveWake, base->lock, (uint32_t)(due - now));
+    }
+    bool running = !base->interrupted;
+    IHS_BaseUnlock(base);
+    return running;
 }

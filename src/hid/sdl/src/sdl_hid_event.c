@@ -71,12 +71,13 @@ static void HIDSDLBuildWireState(const IHS_HIDStateSDL *internal, uint8_t *wire,
 }
 
 bool IHS_HIDFlushSDLGameControllers(IHS_Session *session) {
-    /* Input temporarily disabled by the host: submit nothing. States keep
-     * evolving (SDL events keep flowing); on re-enable the next delta covers
-     * the whole gap against the host's intact delta chain. */
-    if (!IHS_SessionInputEnabled(session)) {
+    /* Original Generic generator still consumes and advances its local state
+     * when config field11 disables sending. The final HID wrapper suppresses
+     * publication; re-enable does not replay changes from the disabled period.
+     * Parent protocol §153 executes constructor/collect/filter/encode/delegate. */
+    if (!IHS_SessionStreaming(session)) {
         return false;
- }
+    }
     /* SendBuffer chooses delta or full according to encoded size. */
     IHS_HIDManager *manager = session->hidManager;
     bool queued = false;
@@ -106,8 +107,12 @@ bool IHS_HIDFlushSDLGameControllers(IHS_Session *session) {
                                     prevWire, curWire, wireLen);
         managed->reportActivityKnown = true;
         managed->reportActiveInput |= IHS_HIDSDLActiveInput(&device->states.current);
-        device->lastSubmitted = device->states.current;
-        device->lastSubmittedSeq++;
+        /* Keep the diagnostic for enabled submissions separate from the local
+         * processed baseline, which also advances when input is disabled. */
+        if (IHS_SessionInputEnabled(session)) {
+            device->lastSubmitted = device->states.current;
+            device->lastSubmittedSeq++;
+        }
         device->states.previous = device->states.current;
         IHS_HIDDeviceUnlock(managed->device);
         queued = true;

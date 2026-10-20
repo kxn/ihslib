@@ -43,6 +43,8 @@ static QueueNode *NodeFromItem(IHS_QueueItem *item);
 
 IHS_Queue *IHS_QueueCreate(size_t itemSize) {
     IHS_Queue *queue = calloc(1, sizeof(IHS_Queue));
+    if (!queue)
+        return NULL;
     queue->itemSize = itemSize;
     return queue;
 }
@@ -148,6 +150,8 @@ bool IHS_QueueIsEmpty(const IHS_Queue *queue) {
 IHS_QueueItem *IHS_QueueItemObtain(IHS_Queue *queue) {
     assert(queue != NULL);
     QueueNode *item = calloc(1, sizeof(QueueNode) + queue->itemSize);
+    if (!item)
+        return NULL;
     return ItemFromNode(item);
 }
 

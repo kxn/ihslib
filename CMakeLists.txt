@@ -18,6 +18,7 @@ endif ()
 option(IHSLIB_SANITIZE_ADDRESS "Link Address Sanitizer" OFF)
 option(IHSLIB_SANITIZE_UNDEFINED "Link Undefined Behavior Sanitizer" OFF)
 option(IHSLIB_SANITIZE_THREAD "Link Thread Sanitizer (mutually exclusive with address)" OFF)
+option(IHSLIB_DIAGNOSTICS "Collect raw HID diagnostic snapshots and platform debug output" OFF)
 
 find_package(PkgConfig REQUIRED)
 
@@ -61,6 +62,7 @@ if (NOT MBEDTLS_FOUND)
 endif ()
 
 add_library(ihslib)
+target_compile_definitions(ihslib PUBLIC IHSLIB_DIAGNOSTICS=$<BOOL:${IHSLIB_DIAGNOSTICS}>)
 add_subdirectory(src)
 
 target_include_directories(ihslib PUBLIC include PRIVATE src ${CMAKE_CURRENT_BINARY_DIR})
@@ -69,6 +71,7 @@ add_subdirectory(src/protobuf)
 target_link_libraries(ihslib PRIVATE ihs-protobuf m)
 
 add_subdirectory(src/platforms)
+target_compile_definitions(ihs-platforms PRIVATE IHSLIB_DIAGNOSTICS=$<BOOL:${IHSLIB_DIAGNOSTICS}>)
 target_include_directories(ihs-platforms PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(ihslib PRIVATE ihs-platforms)
 

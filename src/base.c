@@ -30,21 +30,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "crypto.h"
-#include "endianness.h"
 #include "ihs_buffer.h"
 #include "session/channels/ch_control.h"
 
 static void BaseWorker(IHS_Base *base);
-
-static void BaseUpdateSecretKey(IHS_Base *base, const uint8_t *secretKey);
 
 static bool initialized;
 
 void IHS_Init() {
     if (initialized)
         return;
+#if IHSLIB_DIAGNOSTICS
     IHS_ControlDiagnosticsInit();
+#endif
     initialized = true;
     IHS_TimerInit();
 }
@@ -53,7 +51,9 @@ void IHS_Quit() {
     if (!initialized)
         return;
     IHS_TimerQuit();
+#if IHSLIB_DIAGNOSTICS
     IHS_ControlDiagnosticsQuit();
+#endif
     initialized = false;
 }
 
@@ -63,6 +63,7 @@ void IHS_BaseInit(IHS_Base *base, const IHS_ClientConfig *config, IHS_BaseReceiv
     assert(initialized);
     memset(base, 0, sizeof(IHS_Base));
     atomic_init(&base->interrupted, false);
+    atomic_init(&base->callbacks.log, NULL);
     base->broadcast = broadcast;
     base->lock = IHS_MutexCreate();
     base->callbacks.received = recvCb;
@@ -71,13 +72,13 @@ void IHS_BaseInit(IHS_Base *base, const IHS_ClientConfig *config, IHS_BaseReceiv
     strncpy(base->deviceName, config->deviceName ? config->deviceName : "IHSLib",
             sizeof(base->deviceName) - 1);
     base->deviceName[sizeof(base->deviceName) - 1] = '\0';
-    BaseUpdateSecretKey(base, config->secretKey);
+    memcpy(base->secretKey, config->secretKey, sizeof(base->secretKey));
 }
 
 void IHS_BaseSetSecretKey(IHS_Base *base, const uint8_t *secretKey) {
     assert(base != NULL);
     IHS_BaseLock(base);
-    BaseUpdateSecretKey(base, secretKey);
+    memcpy(base->secretKey, secretKey, sizeof(base->secretKey));
     IHS_BaseUnlock(base);
 }
 
@@ -88,23 +89,9 @@ void IHS_BaseGetSecretKey(IHS_Base *base, uint8_t *secretKey) {
     IHS_BaseUnlock(base);
 }
 
-/**
- * The device token, SymmetricEncrypt(u64le device ID), is derived from the secret key.
- */
-static void BaseUpdateSecretKey(IHS_Base *base, const uint8_t *secretKey) {
-    memcpy(base->secretKey, secretKey, sizeof(base->secretKey));
-    uint8_t in[8];
-    size_t deviceTokenLen = sizeof(base->deviceToken);
-    IHS_WriteUInt64LE(in, base->deviceId);
-    IHS_CryptoSymmetricEncrypt(in, 8, base->secretKey, sizeof(base->secretKey), base->deviceToken,
-                               &deviceTokenLen);
-}
-
 void IHS_BaseSetLogFunction(IHS_Base *base, IHS_LogFunction *logFunction) {
     assert(base != NULL);
-    IHS_BaseLock(base);
-    base->callbacks.log = logFunction;
-    IHS_BaseUnlock(base);
+    atomic_store_explicit(&base->callbacks.log, logFunction, memory_order_release);
 }
 
 void IHS_BaseSetRunCallbacks(IHS_Base *base, const IHS_BaseRunCallbacks *callbacks, void *context) {
@@ -117,9 +104,7 @@ void IHS_BaseSetRunCallbacks(IHS_Base *base, const IHS_BaseRunCallbacks *callbac
 
 void IHS_BaseLog(IHS_Base *base, IHS_LogLevel level, const char *tag, const char *fmt, ...) {
     assert(base != NULL);
-    IHS_BaseLock(base);
-    IHS_LogFunction *log = base->callbacks.log;
-    IHS_BaseUnlock(base);
+    IHS_LogFunction *log = atomic_load_explicit(&base->callbacks.log, memory_order_acquire);
     if (!log)
         return;
     char buf[4096];
@@ -152,15 +137,33 @@ const char *IHS_LogLevelName(IHS_LogLevel level) {
 bool IHS_BaseStartWorker(IHS_Base *base, const char *name) {
     assert(base != NULL);
     IHS_BaseLock(base);
-    if (base->worker != NULL || base->started || base->interrupted) {
+    bool external = base->transport.receive != NULL;
+    if (base->worker != NULL || base->socket != NULL ||
+        (external && (base->started || base->interrupted))) {
         IHS_BaseUnlock(base);
         return false;
     }
+    /* Official discovery BStart reports failed BInit before becoming active.
+     * Resolve local resources before returning success to either owner. */
+    IHS_UDPSocket *socket = external ? NULL : IHS_UDPSocketOpen(base->broadcast);
+    if (!external && !socket) {
+        IHS_BaseUnlock(base);
+        return false;
+    }
+    base->socket = socket;
+    base->transportActive = external;
     base->worker = IHS_ThreadCreate((IHS_ThreadFunction *)BaseWorker, name, base);
-    base->started = base->worker != NULL;
+    if (!base->worker) {
+        base->socket = NULL;
+        base->transportActive = false;
+        if (socket) IHS_UDPSocketClose(socket);
+        IHS_BaseUnlock(base);
+        return false;
+    }
+    base->started = true;
     IHS_BaseLog(base, IHS_LogLevelInfo, "Worker", "Worker thread %s created", name);
     IHS_BaseUnlock(base);
-    return base->started;
+    return true;
 }
 
 void IHS_BaseInterruptWorker(IHS_Base *base) {
@@ -215,42 +218,38 @@ void IHS_BaseUnlock(IHS_Base *base) {
 
 static void BaseWorker(IHS_Base *base) {
     assert(base != NULL);
-    const bool external = base->transport.receive != NULL;
-    IHS_UDPSocket *socket = external ? NULL : IHS_UDPSocketOpen(base->broadcast);
     IHS_BaseLock(base);
-    base->socket = socket;
-    base->transportActive = external;
+    IHS_UDPSocket *socket = base->socket;
     IHS_BaseUnlock(base);
     if (base->callbacks.run && base->callbacks.run->initialized) {
         base->callbacks.run->initialized(base, base->callbackContexts.run);
     }
     IHS_UDPPacket recv;
-    IHS_BufferInit(&recv.buffer, 2048, 2048);
+    size_t receiveCapacity = base->callbacks.run && base->callbacks.run->receiveCycle
+                                 ? IHS_STREAM_UDP_RECV_CAPACITY
+                                 : 2048;
+    if (base->callbacks.run && base->callbacks.run->receiveCapacity)
+        receiveCapacity = base->callbacks.run->receiveCapacity;
+    if (base->transportActive && base->transport.receiveCapacity)
+        receiveCapacity = base->transport.receiveCapacity;
+    IHS_BufferInit(&recv.buffer, receiveCapacity, receiveCapacity);
     for (;;) {
         IHS_BaseLock(base);
         bool interrupted = base->interrupted;
         IHS_BaseUnlock(base);
         if (interrupted)
             break;
+        if (base->callbacks.run && base->callbacks.run->receiveCycle) {
+            if (!base->callbacks.run->receiveCycle(base, base->callbackContexts.run, &recv))
+                break;
+            continue;
+        }
         if (base->callbacks.run && base->callbacks.run->update)
             base->callbacks.run->update(base, base->callbackContexts.run);
         if (base->interrupted)
             break;
         int ret;
-        if (external) {
-            IHS_BufferEnsureMaxSize(&recv.buffer, 2048);
-            ret = base->transport.receive(base->transportContext,
-                IHS_BufferPointer(&recv.buffer), 2048, 10000);
-            if (ret > 2048)
-                ret = -1;
-            if (ret > 0) {
-                recv.buffer.size = (size_t)ret;
-                recv.address = base->transportPeer;
-            }
-        } else {
-            ret = IHS_UDPSocketReceive(socket, &recv);
-        }
-        if (ret < 0) {
+        if ((ret = IHS_UDPSocketReceive(socket, &recv)) < 0) {
             break;
         }
         if (ret) {
@@ -259,12 +258,6 @@ static void BaseWorker(IHS_Base *base) {
         IHS_BufferClear(&recv.buffer, false);
     }
     IHS_BufferClear(&recv.buffer, true);
-    /* A failed provider must also stop the send worker before finalized joins
-     * it. Close the send gate while context and all dependencies are alive. */
-    IHS_BaseLock(base);
-    base->interrupted = true;
-    base->transportActive = false;
-    IHS_BaseUnlock(base);
     if (base->callbacks.run && base->callbacks.run->finalized) {
         base->callbacks.run->finalized(base, base->callbackContexts.run);
     }
@@ -274,7 +267,9 @@ static void BaseWorker(IHS_Base *base) {
     // (each send takes the lock for its full duration).
     IHS_BaseLock(base);
     base->socket = NULL;
+    /* Finalized closes the IHS transport and may send its one goodbye. Keep
+     * either backend alive until those producers have stopped and joined. */
+    base->transportActive = false;
     IHS_BaseUnlock(base);
-    if (socket)
-        IHS_UDPSocketClose(socket);
+    if (socket) IHS_UDPSocketClose(socket);
 }

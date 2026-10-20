@@ -30,27 +30,36 @@
 #include "ihs_thread.h"
 #include "protobuf/remoteplay.pb-c.h"
 #include "session/frame.h"
+#include "session/fec.h"
 #include "session/window.h"
+#include "session/unreliable.h"
 
 typedef struct IHS_SessionDataFrameHeader {
+    bool timestampsLocal, receivedRecorded; /* local metadata, not data-header bytes */
     uint16_t id;
     uint32_t timestamp;
     uint16_t inputMark;
     uint32_t inputRecvTimestamp;
-    uint32_t sendTimestamp, receiveTimestamp; /* transport metadata, not header bytes */
+    uint32_t sendTimestamp, receiveTimestamp, receiveBegin; /* local transport metadata */
 } IHS_SessionDataFrameHeader;
 
 typedef struct IHS_SessionChannelData {
     IHS_SessionChannel base;
-    IHS_SessionPacketsWindow *window;
-    IHS_Mutex *windowLock;
+    IHS_UnreliableChannel *receive; /* borrowed from the connection */
+    IHS_Mutex *windowLock; /* consumer FIFO lock; transport has receive->lock */
     IHS_Cond *windowCond;
+    bool decoderWakePending; /* windowLock: auto-reset decoder event, not a cond signal. */
 
     IHS_Thread *worker;
     atomic_bool interrupted;
+    bool callerStarted, discardFrames; /* Startup completes before publishing an audio endpoint. */
     IHS_Mutex *lock;
 
-    uint32_t lastPacketTimestamp;
+    /* All accepted complete payloads cross to the decoder worker through this
+     * bounded FIFO. Transport windows and FEC groups belong to the connection. */
+    struct IHS_FECFrameNode *fecHead, *fecTail;
+    size_t fecQueuedBytes, fecQueuedCount, fecQueueLimit;
+    unsigned fecQueueCapacity;
 } IHS_SessionChannelData;
 
 typedef struct IHS_SessionChannelDataClass {
@@ -62,6 +71,12 @@ typedef struct IHS_SessionChannelDataClass {
                       IHS_Buffer *body);
 
     void (*stop)(struct IHS_SessionChannel *channel);
+
+    /* Decoder OnThink runs after the input FIFO is empty. Return milliseconds
+     * until the next think, or UINT32_MAX to wait for input. */
+    uint32_t (*think)(struct IHS_SessionChannel *channel);
+
+    bool startOnCaller; /* Start on lifecycle actor; stop only after worker join/purge. */
 } IHS_SessionChannelDataClass;
 
 #define IHS_SESSION_DATA_FRAME_HEADER_SIZE 12
@@ -82,3 +97,29 @@ void IHS_SessionChannelDataStopped(IHS_SessionChannel *channel);
 
 size_t IHS_SessionChannelDataFrameHeaderParse(IHS_SessionDataFrameHeader *header,
                                               const IHS_Buffer *data);
+
+/* Internal protocol step, serialized by receive->lock. UINT32_MAX means wait for
+ * more input; otherwise retry after waitTicks. Ready packets transfer to caller. */
+bool IHS_SessionChannelDataBuildFeedback(IHS_SessionChannelData *, uint32_t now,
+                                         IHS_SessionPacket *, uint32_t *waitTicks);
+
+/* Source OnDataPacket: latch offset/record receive sampling before decoder handoff. */
+void IHS_SessionChannelDataPrepareFrame(IHS_SessionChannel *, IHS_SessionFrame *);
+
+/* Transfer an ordered, reassembled complete frame to the decoder worker. */
+void IHS_SessionChannelDataReceiveReliableFrame(IHS_SessionChannel *, IHS_SessionFrame *);
+
+/* RX batch-end protocol update, independent of decoder progress. */
+void IHS_SessionChannelDataUpdateAt(IHS_SessionChannelData *, uint32_t tick);
+/* Decoder FIFO polling only. Hold windowLock; missing is always zero. */
+bool IHS_SessionChannelDataPollLocked(IHS_SessionChannelData *, IHS_SessionFrame *, uint16_t *missing);
+/* RX owner, outside Base/state locks: exclude and join decoder, purge only its
+ * complete-frame FIFO. Connection receive windows/FEC groups stay alive. */
+void IHS_SessionChannelDataJoinAndPurge(IHS_SessionChannelData *, bool restarting);
+void IHS_SessionChannelDataRestartWorker(IHS_SessionChannelData *);
+
+/* Complete-frame consumer used by the data worker, outside windowLock. */
+void IHS_SessionChannelDataReceiveFrame(IHS_SessionChannelData *, IHS_SessionFrame *);
+
+/* Decoder step after all currently queued complete inputs have been consumed. */
+uint32_t IHS_SessionChannelDataThink(IHS_SessionChannel *);

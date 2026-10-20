@@ -80,3 +80,7 @@ void IHS_TimerTaskStopOwned(IHS_Timer *timer, IHS_TimerTask **owner);
  * visited. It may request deferred Stop, but must not destroy the task/timer. */
 bool IHS_TimerTaskVisitOwned(IHS_Timer *timer, IHS_TimerTask **owner,
     void (*visit)(IHS_TimerTask *task, void *context), void *context);
+/* Serialize an operation with publication/removal too. Unlike VisitOwned the
+ * visitor runs with task=NULL for an empty slot, while holding the timer lock. */
+void IHS_TimerTaskVisitSlot(IHS_Timer *timer, IHS_TimerTask **owner,
+    void (*visit)(IHS_TimerTask *task, void *context), void *context);

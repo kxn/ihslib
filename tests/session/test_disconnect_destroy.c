@@ -14,20 +14,10 @@
  * version 3 of the License, or (at your option) any later version.
  */
 
-// Regression test for the DisconnectTimerEnd UAF (commit c516f06).
-//
-// Without the fix, IHS_SessionChannelDiscoveryDisconnect schedules a timer task,
-// and IHS_SessionDestroy frees the discovery channel before the timer is stopped.
-// The timer thread eventually fires DisconnectTimerEnd on the freed channel,
-// writing through `discoveryChannel->disconnectTimerTask` and calling
-// OnDisconnect on the freed channel + session.
-//
-// An owned timer makes duplicate requests idempotent; OnDiscoveryDeinit clears
-// that owner and runs its end callback while the channel is still valid.
-//
-// This test exercises both the immediate destroy path (no time for the timer to
-// fire) and a destroy-after-brief-sleep path (timer is mid-execution). Run under
-// Valgrind to catch any heap-use-after-free.
+// Regression coverage for repeated close, immediate destruction and worker join.
+// The old DisconnectTimerEnd UAF path (c516f06) no longer has a timer: official
+// Client::Disconnect attempts one goodbye and closes. Preserve destruction
+// coverage while ordinary feedback timers and workers may still be active.
 
 #include <unistd.h>
 #include <assert.h>
@@ -44,22 +34,17 @@ static void test_destroy_immediately_after_disconnect(void) {
     IHS_Session *session = IHS_TestSessionCreate();
     IHS_SessionChannel *discovery = IHS_SessionChannelFor(session, IHS_SessionChannelIdDiscovery);
     IHS_SessionChannelDiscoveryDisconnect(discovery);
-    /* Duplicate stop requests must share one timer, not overwrite its owner. */
+    /* Duplicate stop requests must be idempotent. */
     IHS_SessionChannelDiscoveryDisconnect(discovery);
-    // No sleep: race the destroy against the timer thread's first poll. The fix
-    // (StopOwned in OnDiscoveryDeinit) removes the task before Destroy frees
-    // the channel.
+    // Destroy immediately after close, without relying on a timer callback.
     IHS_SessionDestroy(session);
 }
 
-static void test_destroy_after_timer_starts_firing(void) {
+static void test_destroy_after_brief_yield(void) {
     IHS_Session *session = IHS_TestSessionCreate();
     IHS_SessionChannel *discovery = IHS_SessionChannelFor(session, IHS_SessionChannelIdDiscovery);
     IHS_SessionChannelDiscoveryDisconnect(discovery);
-    // Sleep long enough for the timer thread to enter TaskExecute. The timer thread
-    // polls every ~1 ms; 20 ms guarantees at least one fire of DisconnectTimerRun
-    // (which would otherwise reschedule every 100 ms). StopOwned must still
-    // remove the task cleanly under contention with the worker thread.
+    // Allow normal background feedback work before destruction.
     usleep(20 * 1000);
     IHS_SessionDestroy(session);
 }
@@ -68,8 +53,7 @@ static void test_threaded_disconnect_without_host_ack(void) {
     IHS_Session *session = IHS_TestSessionCreate();
     assert(IHS_SessionConnect(session));
 
-    // Let the receive/send workers initialize before asking the normal graceful
-    // disconnect path to exhaust its bounded StopRequest and transport timers.
+    // Exercise close/join with no peer response. Generic cleanup sends no 129.
     usleep(20 * 1000);
     alarm(4);
     IHS_SessionDisconnect(session);
@@ -108,7 +92,7 @@ int main(void) {
         test_destroy_immediately_after_disconnect();
     }
     for (int i = 0; i < 5; ++i) {
-        test_destroy_after_timer_starts_firing();
+        test_destroy_after_brief_yield();
     }
     test_threaded_disconnect_without_host_ack();
     IHS_Quit();

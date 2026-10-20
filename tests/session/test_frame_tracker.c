@@ -31,6 +31,53 @@ static IHS_FrameOutcome displayed(uint64_t serial) {
     return (IHS_FrameOutcome){.result = IHS_VideoFrameResultDisplayed,
         .completionUs = 1000, .presentationSerial = serial};
 }
+static void admitted_input_ownership(void) {
+    IHS_FrameTracker *t = IHS_FrameTrackerCreate(9);
+    assert(t && IHS_FrameTrackerOpenEpoch(t, 1));
+    IHS_FrameReceive receive = {.firstReceiveUs = 100, .lastReceiveUs = 100};
+    IHS_FrameTicket *first, *next, *jump, *abandoned;
+    assert(IHS_FrameTrackerBeginInput(t, 1, 0, &receive, &first) == IHS_FrameBeginOK);
+    IHS_FrameTicketSetVideoTimestamp(first, 1000);
+    assert(IHS_FrameTicketVideoDecodeStage(first, false));
+    assert(!IHS_FrameTicketAbandonInput(first));
+    assert(IHS_FrameTrackerBeginInput(t, 1, 0, &receive, &next) == IHS_FrameBeginOK);
+    assert(first != next && IHS_FrameTicketIdentity(first).receiveSerial !=
+                                IHS_FrameTicketIdentity(next).receiveSerial);
+    IHS_FrameTicketSetVideoTimestamp(next, 2000);
+    uint32_t timestamp;
+    assert(IHS_FrameTicketVideoTimestamp(first, &timestamp) && timestamp == 1000);
+    IHS_FrameOutcome outcome = displayed(1);
+    assert(IHS_FrameTicketComplete(first, &outcome));
+    assert(!IHS_FrameTicketAbandonInput(first));
+    assert(IHS_FrameTrackerBeginInput(t, 1, 32768, &receive, &jump) == IHS_FrameBeginOK);
+    assert(IHS_FrameTrackerBeginInput(t, 1, 40000, &receive, &abandoned) == IHS_FrameBeginOK);
+    assert(IHS_FrameTicketAbandonInput(abandoned));
+    assert(!IHS_FrameTicketComplete(abandoned, &outcome));
+    IHS_TrackedFrame frames[8];
+    size_t count = IHS_FrameTrackerCopyStats(t, frames, 8);
+    assert(count == 3);
+    unsigned completed = 0;
+    for (size_t n = 0; n < count; ++n) {
+        assert(frames[n].identity.frameId != 40000);
+        if (frames[n].statsComplete) {
+            assert(frames[n].identity.receiveSerial == IHS_FrameTicketIdentity(first).receiveSerial);
+            ++completed;
+        }
+    }
+    assert(completed == 1 && IHS_FrameTicketComplete(next, &outcome));
+    IHS_FrameTicket *repeated;
+    assert(IHS_FrameTrackerBeginInput(t, 1, 0, &receive, &repeated) == IHS_FrameBeginOK);
+    assert(repeated != first && repeated != next);
+    IHS_FrameTicketRelease(abandoned);
+    IHS_FrameTrackerCloseEpoch(t, 1);
+    assert(IHS_FrameTrackerBeginInput(t, 1, 0, &receive, &abandoned) == IHS_FrameBeginClosed && !abandoned);
+    IHS_FrameTrackerClose(t);
+    assert(!IHS_FrameTicketComplete(jump, &outcome));
+    IHS_FrameTicketRelease(first);
+    IHS_FrameTicketRelease(next);
+    IHS_FrameTicketRelease(jump);
+    IHS_FrameTicketRelease(repeated);
+}
 static void identity_and_expiry(void) {
     IHS_FrameTracker *t = IHS_FrameTrackerCreate(1);
     assert(t && IHS_FrameTrackerOpenEpoch(t, 1));
@@ -75,18 +122,63 @@ static void capacity(void) {
     for (unsigned i = 0; i < IHS_FRAME_TRACKER_CAPACITY; ++i) tickets[i] = begin(t, 1, i, 0);
     IHS_FrameIdentity old = IHS_FrameTicketIdentity(tickets[0]);
     IHS_FrameReceive receive = {0};
-    IHS_FrameTicket *next;
-    assert(IHS_FrameTrackerBegin(t, 1, 256, &receive, &next) == IHS_FrameBeginCapacity);
-    IHS_TrackedFrame frames[IHS_FRAME_TRACKER_CAPACITY];
-    assert(IHS_FrameTrackerSettle(t, 10, 10, frames, IHS_FRAME_TRACKER_CAPACITY) == IHS_FRAME_TRACKER_CAPACITY);
-    assert(IHS_FrameTrackerBegin(t, 1, 256, &receive, &next) == IHS_FrameBeginCapacity);
+    IHS_FrameTicket *extra;
+#ifdef IHS_TEST_ALLOC_FAILURE
+    failAllocation = 1;
+    assert(IHS_FrameTrackerBegin(t, 1, 256, &receive, &extra) == IHS_FrameBeginCapacity);
+    assert(!extra && IHS_FrameTrackerStorageCapacity(t) == IHS_FRAME_TRACKER_CAPACITY);
+#endif
+    extra = begin(t, 1, 256, 0);
+    assert(IHS_FrameTrackerStorageCapacity(t) == 2 * IHS_FRAME_TRACKER_CAPACITY);
+    for (unsigned i = 0; i < IHS_FRAME_TRACKER_CAPACITY; ++i) {
+        assert(extra != tickets[i]);
+        assert(IHS_FrameTicketIdentity(tickets[i]).frameId == i);
+    }
+    IHS_TrackedFrame frames[IHS_FRAME_TRACKER_CAPACITY + 1];
+    assert(IHS_FrameTrackerSettle(t, 10, 10, frames, IHS_FRAME_TRACKER_CAPACITY + 1) == IHS_FRAME_TRACKER_CAPACITY + 1);
+    IHS_FrameTicket *more = begin(t, 1, 257, 11);
+    assert(more != tickets[0]); /* An expired external reference still cannot move/reuse. */
     IHS_FrameTicketRelease(tickets[0]);
-    next = begin(t, 1, 256, 11);
+    IHS_FrameTicket *next = begin(t, 1, 258, 11);
     IHS_FrameIdentity fresh = IHS_FrameTicketIdentity(next);
-    assert(fresh.slotVersion > old.slotVersion && fresh.receiveSerial > old.receiveSerial);
-    for (unsigned i = 1; i < IHS_FRAME_TRACKER_CAPACITY; ++i) IHS_FrameTicketRelease(tickets[i]);
+    assert(next == tickets[0] && fresh.slotVersion > old.slotVersion && fresh.receiveSerial > old.receiveSerial);
     IHS_FrameTrackerClose(t);
+    assert(IHS_FrameTicketIdentity(extra).frameId == 256);
+    for (unsigned i = 1; i < IHS_FRAME_TRACKER_CAPACITY; ++i) IHS_FrameTicketRelease(tickets[i]);
+    IHS_FrameTicketRelease(extra);
+    IHS_FrameTicketRelease(more);
     IHS_FrameTicketRelease(next);
+}
+static void collected_reuse_requires_an_immutable_snapshot(void) {
+    IHS_FrameTracker *t = IHS_FrameTrackerCreate(5);
+    assert(t && IHS_FrameTrackerOpenEpoch(t, 1));
+    IHS_FrameTicket *tickets[512];
+    for (unsigned i = 0; i < 256; ++i) tickets[i] = begin(t, 1, i, 0);
+    IHS_FrameIdentity old = IHS_FrameTicketIdentity(tickets[0]);
+    IHS_FrameOutcome result = displayed(1);
+    assert(IHS_FrameTicketComplete(tickets[0], &result));
+    IHS_TrackedFrame *rows = calloc(512, sizeof(*rows));
+    assert(rows && IHS_FrameTrackerCopyStats(t, rows, 512) == 256);
+    IHS_FrameTicketRelease(tickets[0]);
+    tickets[256] = begin(t, 1, 256, 0);
+    /* Snapshot was copied while the writer still held a reference. Reuse must
+     * wait for another immutable snapshot; grow without moving any live ticket. */
+    assert(tickets[256] != tickets[0] && IHS_FrameTrackerStorageCapacity(t) == 512);
+    for (unsigned i = 257; i < 512; ++i) tickets[i] = begin(t, 1, i, 0);
+    assert(IHS_FrameTrackerCopyStats(t, rows, 512) == 512);
+    IHS_FrameTicket *fresh = begin(t, 1, 512, 0);
+    assert(fresh == tickets[0] && IHS_FrameTicketIdentity(fresh).slotVersion > old.slotVersion);
+    assert(IHS_FrameTrackerStorageCapacity(t) == 512);
+    IHS_FrameTicket *overflow = begin(t, 1, 513, 0);
+    assert(IHS_FrameTrackerStorageCapacity(t) == 768);
+    for (unsigned i = 1; i < 512; ++i)
+        assert(IHS_FrameTicketIdentity(tickets[i]).frameId == i);
+    IHS_FrameTrackerClose(t);
+    for (unsigned i = 1; i < 512; ++i) IHS_FrameTicketRelease(tickets[i]);
+    IHS_FrameTicketRelease(fresh);
+    assert(IHS_FrameTicketIdentity(overflow).frameId == 513);
+    IHS_FrameTicketRelease(overflow);
+    free(rows);
 }
 typedef struct race {
     pthread_barrier_t barrier;
@@ -180,7 +272,9 @@ int main(void) {
     allocation_failures();
 #endif
     identity_and_expiry();
+    admitted_input_ownership();
     capacity();
+    collected_reuse_requires_an_immutable_snapshot();
     competing_completions();
     close_while_claimed();
     return 0;
