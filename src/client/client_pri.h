@@ -73,7 +73,7 @@ struct IHS_Client {
     unsigned authorizationDispatching;
     IHS_Timer *timers;
     IHS_Cond *receiveWake;
-    uint64_t receiveGeneration;
+    uint64_t receiveGeneration, receiveUpdatedGeneration;
     bool receiveBatchActive;
     IHS_TimerTask *discoveryTimer;
     uint32_t discoveryInterval;
@@ -139,4 +139,5 @@ bool IHS_ClientStreamingAuthorizationCallback(IHS_Client *, const IHS_SocketAddr
         CMsgRemoteClientBroadcastHeader *, ProtobufCMessage *);
 void IHS_ClientStreamingUpdate(IHS_Client *);
 bool IHS_ClientDiscoveryBeginCycle(IHS_Client *);
+void IHS_ClientDiscoveryUpdate(IHS_Client *);
 void IHS_ClientDiscoveryEndCycle(IHS_Client *);

@@ -149,6 +149,39 @@ void IHS_ClientSetAuthorizationDeferred(IHS_Client *client, bool deferred) {
     atomic_store_explicit(&client->deferAuthorization, deferred, memory_order_release);
 }
 
+/* Original manager Update sends RequestStatus (@798ab0) before a due
+ * SendStartStreamingRequest (@798c74). Hold one timer owner across both stages
+ * so the standalone timer cannot finish a discovery cycle between them. */
+static void ClientUpdateVisit(IHS_TimerTask *unused, void *opaque) {
+    (void)unused;
+    IHS_Client *client = opaque;
+    IHS_BaseLock(&client->base);
+    bool ready = !client->base.interrupted && !client->receiveBatchActive &&
+                 !client->authorizationCount && !client->authorizationDispatching;
+    bool fresh = client->receiveUpdatedGeneration != client->receiveGeneration;
+    if (ready && fresh) client->receiveUpdatedGeneration = client->receiveGeneration;
+    IHS_BaseUnlock(&client->base);
+    if (!ready) return;
+    if (!fresh) {
+        /* Preserve the deferred API's initial-send behavior after publication
+         * between reads. StreamingAdvance itself rejects stale retries. This
+         * is not a new manager Update/reentry scope. */
+        IHS_ClientStreamingUpdate(client);
+        return;
+    }
+    IHS_Client *previousDispatch = IHS_ClientDispatchOwner;
+    IHS_ClientDispatchOwner = client;
+    IHS_ClientDiscoveryUpdate(client);
+    IHS_ClientStreamingUpdate(client);
+    /* A late nested refresh applies to the next Update, since discovery has
+     * already run. Resolve the current slot again: a callback may Stop it. */
+    IHS_ClientDiscoveryEndCycle(client);
+    IHS_ClientDispatchOwner = previousDispatch;
+}
+static void ClientUpdateAfterReceive(IHS_Client *client) {
+    IHS_TimerTaskVisitSlot(client->timers, &client->discoveryTimer, ClientUpdateVisit, client);
+}
+
 size_t IHS_ClientPumpAuthorization(IHS_Client *client, size_t budget) {
     if (!client) return 0;
     size_t dispatched = 0;
@@ -189,8 +222,7 @@ size_t IHS_ClientPumpAuthorization(IHS_Client *client, size_t budget) {
     /* Original Update processes inbound packets before due sends. A bounded
      * pump which leaves queued work must not retry an already-obsolete phase. */
     if (budget && drained && atomic_load_explicit(&client->deferAuthorization, memory_order_acquire))
-        IHS_ClientStreamingUpdate(client);
-    if (budget && drained) IHS_ClientDiscoveryEndCycle(client);
+        ClientUpdateAfterReceive(client);
     return dispatched;
 }
 
@@ -464,8 +496,7 @@ static bool ClientReceiveCycle(IHS_Base *base, void *context, IHS_UDPPacket *pac
     IHS_BaseUnlock(base);
     /* Original manager Update drains input before checking due sends. Deferred
      * owners do this after draining their published callback queue instead. */
-    if (update) IHS_ClientStreamingUpdate(client);
-    IHS_ClientDiscoveryEndCycle(client);
+    if (update) ClientUpdateAfterReceive(client);
     IHS_BaseLock(base);
     while (!base->interrupted) {
         uint64_t now = IHS_TimerNow();

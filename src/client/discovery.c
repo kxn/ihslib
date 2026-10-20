@@ -35,6 +35,7 @@
 typedef IHS_DiscoveryContext DiscoveryContext;
 static uint64_t DiscoveryTimerRun(int runCount, DiscoveryContext *context);
 static bool DiscoveryBroadcast(IHS_Client *client);
+static void DiscoveryRoundUpdate(DiscoveryContext *context);
 
 static void DestroyDiscovery(void *opaque) {
     DiscoveryContext *context = opaque;
@@ -275,10 +276,24 @@ bool IHS_ClientDiscoveryBeginCycle(IHS_Client *client) {
     IHS_TimerTaskVisitSlot(client->timers, &client->discoveryTimer, BeginDiscovery, &begin);
     return begin.allowed;
 }
+static void UpdateDiscovery(IHS_TimerTask *task, void *opaque) {
+    (void)opaque;
+    DiscoveryContext *context = IHS_TimerTaskGetContext(task);
+    if (context->rounds) DiscoveryRoundUpdate(context);
+}
+void IHS_ClientDiscoveryUpdate(IHS_Client *client) {
+    IHS_TimerTaskVisitOwned(client->timers, &client->discoveryTimer, UpdateDiscovery, NULL);
+}
 static void EndDiscovery(IHS_TimerTask *task, void *opaque) {
     (void)opaque;
     DiscoveryContext *context = IHS_TimerTaskGetContext(task);
-    if (context->rounds) (void)DiscoveryTimerRun(0, context);
+    IHS_Client *client = context->client;
+    IHS_BaseLock(&client->base);
+    if (context->rounds && context->cycleActive) {
+        context->cycleActive = false;
+        IHS_CondSignal(client->receiveWake);
+    }
+    IHS_BaseUnlock(&client->base);
 }
 void IHS_ClientDiscoveryEndCycle(IHS_Client *client) {
     IHS_TimerTaskVisitOwned(client->timers, &client->discoveryTimer, EndDiscovery, NULL);
@@ -326,45 +341,53 @@ void IHS_ClientDiscoveryCallback(IHS_Client *client, const IHS_SocketAddress *ad
     }
 }
 
+/* Only the shared receive-update owner calls this stage. Timer visitors may
+ * retain/retire the task, but cannot race the later streaming stage. */
+static void DiscoveryRoundUpdate(DiscoveryContext *context) {
+    IHS_Client *client = context->client;
+    IHS_BaseLock(&client->base);
+    bool ready = !client->base.interrupted && !client->receiveBatchActive &&
+                 !client->authorizationCount && !client->authorizationDispatching;
+    if (ready && context->cycleActive && context->receiveGeneration != client->receiveGeneration) {
+        context->receiveGeneration = client->receiveGeneration;
+        if (client->discoveryTargetsChanged) {
+            context->full = 0;
+            client->discoveryTargetsChanged = false;
+        }
+        int64_t now = (int64_t)time(NULL);
+        bool send = false;
+        if (now >= context->full) {
+            context->full = now + 12 + IHS_DiscoveryRandomInt(&context->random, 1, 5);
+            context->fast = now + IHS_DiscoveryRandomInt(&context->random, 1, 3);
+            context->tries = 1;
+            ++client->discoverySeq;
+            send = true;
+        } else if (context->tries <= 2 && now >= context->fast) {
+            ++context->tries;
+            context->fast = now + IHS_DiscoveryRandomInt(&context->random, 4, 7);
+            send = true;
+        }
+        if (send) RequestStatus(context);
+    }
+    IHS_BaseUnlock(&client->base);
+}
+
 static uint64_t DiscoveryTimerRun(int runCount, DiscoveryContext *context) {
     (void)runCount;
     IHS_Client *client = context->client;
-    /* Timer visitor -> Base, matching the streaming due-send lock order.
-     * Full reads and deferred callbacks must finish before an automatic
-     * broadcast can replace the discovery descriptor. */
     IHS_BaseLock(&client->base);
     if (client->base.interrupted) {
         IHS_BaseUnlock(&client->base);
         return 0;
     }
-    bool ready = !client->receiveBatchActive && !client->authorizationCount &&
-                 !client->authorizationDispatching;
-    bool fresh = context->receiveGeneration != client->receiveGeneration;
     bool done = false;
-    if (ready && fresh && (!context->rounds || context->cycleActive)) {
-        context->receiveGeneration = client->receiveGeneration;
-        if (context->rounds) {
-            if (client->discoveryTargetsChanged) {
-                context->full = 0;
-                client->discoveryTargetsChanged = false;
-            }
-            int64_t now = (int64_t)time(NULL);
-            bool send = false;
-            if (now >= context->full) {
-                context->full = now + 12 + IHS_DiscoveryRandomInt(&context->random, 1, 5);
-                context->fast = now + IHS_DiscoveryRandomInt(&context->random, 1, 3);
-                context->tries = 1;
-                ++client->discoverySeq;
-                send = true;
-            } else if (context->tries <= 2 && now >= context->fast) {
-                ++context->tries;
-                context->fast = now + IHS_DiscoveryRandomInt(&context->random, 4, 7);
-                send = true;
-            }
-            if (send) RequestStatus(context);
-            context->cycleActive = false;
-            IHS_CondSignal(client->receiveWake);
-        } else {
+    if (!context->rounds) {
+        /* Explicit interval/one-shot API keeps its separate monotonic policy. */
+        bool ready = !client->receiveBatchActive && !client->authorizationCount &&
+                     !client->authorizationDispatching;
+        bool fresh = context->receiveGeneration != client->receiveGeneration;
+        if (ready && fresh) {
+            context->receiveGeneration = client->receiveGeneration;
             uint64_t now = IHS_TimerNow();
             if (!context->hasSent || now >= context->nextSend) {
                 DiscoveryBroadcast(client);
@@ -375,8 +398,6 @@ static uint64_t DiscoveryTimerRun(int runCount, DiscoveryContext *context) {
         }
     }
     IHS_BaseUnlock(&client->base);
-    /* Official watcher scheduling is 100ms; interval=0 remains a one-shot.
-     * Wall seconds decide rounds; monotonic time only drives the watcher. */
     return done ? 0 : 100;
 }
 
