@@ -362,16 +362,18 @@ static bool CreateAuthorizationRequest(IHS_Client *client, IHS_SteamUniverse uni
         return false;
     }
     protobuf_c_message_pack(&ticket.base, ticketBytes);
-    bool tokenReady = IHS_ClientCreateDeviceToken(client, secret, storage->token);
-    memset(secret, 0, sizeof(secret));
-    if (!tokenReady) {
-        memset(ticketBytes, 0, sizeof(ticketBytes));
-        return false;
-    }
+    /* Original BCreateAuthorizationRequest @79c848 calls RSA before the
+     * @79c860 device token. A failed token must not skip the RSA caller. */
     int crypto = IHS_CryptoRSAEncrypt(ticketBytes, ticketLen, pubKey, pubKeyLen, storage->encrypted,
                                       &encryptedLen);
     memset(ticketBytes, 0, sizeof(ticketBytes));
-    if (crypto)
+    if (crypto) {
+        memset(secret, 0, sizeof(secret));
+        return false;
+    }
+    bool tokenReady = IHS_ClientCreateDeviceToken(client, secret, storage->token);
+    memset(secret, 0, sizeof(secret));
+    if (!tokenReady)
         return false;
     IHS_AuthorizationKeyExchangeMaskedKey(&flow->keyExchange, storage->authKey);
     CMsgRemoteDeviceAuthorizationRequest *request = &storage->message;
