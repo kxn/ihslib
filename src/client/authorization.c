@@ -77,6 +77,7 @@ static void ClearServicePairing(IHS_Client *client) {
     }
     IHS_BaseLock(&client->base);
     client->servicePairing = false;
+    client->serviceAwaitingPin = false;
     client->lastLaunchId = 0;
     memset(&client->lastLaunchHost, 0, sizeof(client->lastLaunchHost));
     client->lastLaunchAuthorizing = client->lastLaunchHasTicket = false;
@@ -87,6 +88,54 @@ bool IHS_ClientAuthorizationServiceActive(IHS_Client *client) {
     bool active = client->servicePairing;
     IHS_BaseUnlock(&client->base);
     return active;
+}
+unsigned IHS_ClientHandshakePhase(IHS_Client *client) {
+    IHS_BaseLock(&client->base);
+    unsigned phase = client->servicePairing          ? (client->serviceAwaitingPin ? 2 : 3)
+                     : !client->lastLaunchId         ? 1
+                     : client->lastLaunchHasTicket   ? 6
+                     : client->lastLaunchAuthorizing ? 4
+                                                     : 5;
+    IHS_BaseUnlock(&client->base);
+    return phase;
+}
+bool IHS_ClientHandshakeFail(IHS_Client *client, IHS_AuthorizationResult result) {
+    if (IHS_ClientHandshakePhase(client) == 1)
+        return false;
+    IHS_BaseLock(&client->base);
+    IHS_HostInfo host = client->lastLaunchHost;
+    bool service = client->servicePairing;
+    IHS_BaseUnlock(&client->base);
+    if (client->callbacks.authorization && client->callbacks.authorization->failed)
+        client->callbacks.authorization->failed(client, &host, result,
+                                                client->callbackContexts.authorization);
+    if (service)
+        IHS_ClientAuthorizationCancel(client);
+    else {
+        IHS_ClientStreamingCancel(client);
+        IHS_ClientAuthorizationCancel(client);
+    }
+    return true;
+}
+bool IHS_ClientAuthorizationAwaitService(IHS_Client *client) {
+    IHS_TimerTaskStopOwned(client->timers, &client->taskHandles.authorization);
+    IHS_TimerTaskStopOwned(client->timers, &client->taskHandles.streaming);
+    IHS_AuthorizationState *state = calloc(1, sizeof(*state));
+    if (!state)
+        return false;
+    state->client = client;
+    state->service = true;
+    IHS_BaseLock(&client->base);
+    state->host = client->lastLaunchHost;
+    state->requestId = client->lastLaunchId;
+    client->servicePairing = client->serviceAwaitingPin = true;
+    IHS_BaseUnlock(&client->base);
+    if (IHS_TimerTaskStartOwned(client->timers, &client->taskHandles.authorization,
+                                AuthorizationRequestTimer, AuthorizationRequestCleanup, 0, state))
+        return true;
+    ClearServicePairing(client);
+    free(state);
+    return false;
 }
 
 void IHS_ClientAuthorizationSendCancel(IHS_Client *client, const IHS_HostInfo *host) {
@@ -134,6 +183,7 @@ bool IHS_ClientAuthorizationRequest(IHS_Client *client, const IHS_HostInfo *host
     }
     IHS_BaseLock(&client->base);
     client->servicePairing = false;
+    client->serviceAwaitingPin = false;
     IHS_BaseUnlock(&client->base);
     if (!IHS_TimerTaskStartOwned(client->timers, &client->taskHandles.authorization,
             AuthorizationRequestTimer, AuthorizationRequestCleanup, 0, state)) {
@@ -206,6 +256,15 @@ static void AuthorizationResponseVisit(IHS_TimerTask *task, void *context) {
                   resp->has_auth_key ? resp->auth_key.len : 0,
                   resp->has_device_token ? resp->device_token.len : 0);
     if (state->terminal) {
+        if (resp->has_auth_key)
+            IHS_ClientAuthorizationConfirm(client, *response->address, header->client_id,
+                                           k_ERemoteDeviceAuthorizationCanceled);
+        return;
+    }
+    IHS_BaseLock(&client->base);
+    bool awaitingPin = state->service && client->serviceAwaitingPin;
+    IHS_BaseUnlock(&client->base);
+    if (awaitingPin) {
         if (resp->has_auth_key)
             IHS_ClientAuthorizationConfirm(client, *response->address, header->client_id,
                                            k_ERemoteDeviceAuthorizationCanceled);
@@ -451,6 +510,7 @@ bool IHS_ClientAuthorizationPrepareService(IHS_Client *client, IHS_SteamUniverse
         client->lastLaunchHost = currentHost;
         client->lastLaunchHasTicket = client->lastLaunchAuthorizing = false;
         client->servicePairing = true;
+        client->serviceAwaitingPin = false;
         IHS_BaseUnlock(&client->base);
         ok = IHS_TimerTaskStartOwned(client->timers, &client->taskHandles.authorization,
                                      AuthorizationRequestTimer, AuthorizationRequestCleanup, 0,

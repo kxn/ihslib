@@ -128,7 +128,11 @@ static void CancelCurrentLaunch(IHS_TimerTask *task, void *context) {
     IHS_BaseUnlock(&client->base);
     /* Original Stop sends with its current identity/state, then clears it.
      * Keep the timer owner across both stages, including an already-empty slot. */
-    if (id) {
+    const IHS_ClientRoutingCallbacks *route = client->callbacks.routing;
+    IHS_HostInfo visible;
+    bool usable = !route || !route->host ||
+                  route->host(client, host.clientId, &visible, client->callbackContexts.routing);
+    if (id && usable) {
         if (authorizing)
             IHS_ClientAuthorizationSendCancel(client, &host);
         else
@@ -140,6 +144,7 @@ static void CancelCurrentLaunch(IHS_TimerTask *task, void *context) {
         client->canceled[i].host = host;
         client->canceled[i].requestId = id;
         client->lastLaunchId = 0;
+        memset(&client->lastLaunchHost, 0, sizeof(client->lastLaunchHost));
     }
     client->lastLaunchHasTicket = client->lastLaunchAuthorizing = false;
     IHS_BaseUnlock(&client->base);
@@ -159,6 +164,7 @@ bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
         IHS_TimerTaskStopOwned(client->timers, &client->taskHandles.authorization);
         IHS_BaseLock(&client->base);
         client->servicePairing = false; /* Replacement, not CancelPairing/Stop. */
+        client->serviceAwaitingPin = false;
         IHS_BaseUnlock(&client->base);
     }
     IHS_BaseLock(&client->base);

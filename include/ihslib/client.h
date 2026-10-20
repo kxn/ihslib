@@ -337,6 +337,17 @@ bool IHS_ClientAuthorizationRequest(IHS_Client *client, const IHS_HostInfo *host
 bool IHS_ClientAuthorizationPrepareService(IHS_Client *, IHS_SteamUniverse, const char *pin,
                                            uint8_t **body, size_t *size);
 bool IHS_ClientAuthorizationServiceActive(IHS_Client *);
+/** Unified routed stream/service manager phase (1 idle, 2 awaiting service
+ * PIN, 3 service authorization, 4 known authorization, 5 stream request,
+ * 6 accepted ticket). Legacy standalone AuthorizationRequest is independent. */
+unsigned IHS_ClientHandshakePhase(IHS_Client *);
+/** StartPairing's state2 entry. Retires private transaction owners without
+ * sending cancel or changing the current secret/cache/selected ID. */
+bool IHS_ClientAuthorizationAwaitService(IHS_Client *);
+/** Original StopStreaming(error): idle is a no-op; otherwise notify before
+ * cancel/clear. Used by service failure/disconnect callbacks, including late
+ * service failures while a known-host transaction is active. */
+bool IHS_ClientHandshakeFail(IHS_Client *, IHS_AuthorizationResult);
 
 bool IHS_ClientAuthorizationCancel(IHS_Client *client);
 
