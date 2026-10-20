@@ -2,8 +2,10 @@
 
 #include "common.h"
 
-/** An already-established, message-preserving datagram connection. The upper
- * IHS protocol still owns its encryption, packet IDs, ACK/NACK and retries.
+/** A message-preserving datagram connection. A provider may still be finding
+ * its route: reject sends for the existing retry policy and return empty reads
+ * until data arrives, reserving terminal failure for a failed/closed provider.
+ * The upper IHS protocol still owns its encryption, packet IDs, ACK/NACK and retries.
  * In particular, an SNS provider must use unreliable messages, not a reliable
  * byte stream. See nsteamlink STEAM_REMOTE_PLAY_NETWORKING sections 8.9/12.3.
  *
