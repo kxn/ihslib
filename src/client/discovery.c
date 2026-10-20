@@ -64,9 +64,13 @@ bool IHS_ClientStopDiscovery(IHS_Client *client) {
     bool present = false;
     IHS_TimerTaskVisitOwned(client->timers, &client->discoveryTimer, DiscoveryPresent, &present);
     IHS_TimerTaskStopOwned(client->timers, &client->discoveryTimer);
-    IHS_BaseLock(&client->base);
-    IHS_CondSignal(client->receiveWake);
-    IHS_BaseUnlock(&client->base);
+    /* An absent task is a no-op: do not acquire the receive owner or wake it.
+     * A retired active cycle may be waiting for its deferred completion. */
+    if (present) {
+        IHS_BaseLock(&client->base);
+        IHS_CondSignal(client->receiveWake);
+        IHS_BaseUnlock(&client->base);
+    }
     return present;
 }
 
