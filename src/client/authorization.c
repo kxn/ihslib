@@ -129,6 +129,7 @@ bool IHS_ClientAuthorizationAwaitService(IHS_Client *client) {
     state->host = client->lastLaunchHost;
     state->requestId = client->lastLaunchId;
     client->servicePairing = client->serviceAwaitingPin = true;
+    client->streamingHandedOff = false;
     IHS_BaseUnlock(&client->base);
     if (IHS_TimerTaskStartOwned(client->timers, &client->taskHandles.authorization,
                                 AuthorizationRequestTimer, AuthorizationRequestCleanup, 0, state))
@@ -175,6 +176,9 @@ bool IHS_ClientAuthorizationRequest(IHS_Client *client, const IHS_HostInfo *host
     IHS_AuthorizationState *state = calloc(1, sizeof(IHS_AuthorizationState));
     if (!state) return false;
     state->client = client;
+    IHS_BaseLock(&client->base);
+    client->streamingHandedOff = false;
+    IHS_BaseUnlock(&client->base);
     state->host = *host;
     state->requestId = IHS_CryptoRandomUInt32();
     if (!IHS_ClientAuthorizationFlowInit(&state->flow, pin)) {
@@ -505,6 +509,7 @@ bool IHS_ClientAuthorizationPrepareService(IHS_Client *client, IHS_SteamUniverse
     if (!pin || strlen(pin) != 4)
         return false;
     IHS_BaseLock(&client->base);
+    client->streamingHandedOff = false;
     uint32_t currentId = client->lastLaunchId;
     IHS_HostInfo currentHost = client->lastLaunchHost;
     bool previousService = client->servicePairing;

@@ -66,6 +66,7 @@ struct IHS_Client {
     uint32_t lastLaunchId;
     bool lastLaunchAuthorizing;
     bool lastLaunchHasTicket; /* Successful reply retains explicit-cancel ownership. */
+    bool streamingHandedOff;  /* Polled ordinary launcher retired handshake ingress. */
     bool servicePairing;      /* Service state2/3, under Base; private flow owned by auth task. */
     bool serviceAwaitingPin;  /* State2, same current ID/secret/cache, no auth admission. */
     IHS_AuthorizationCache authorizationCache;

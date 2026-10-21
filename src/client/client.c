@@ -583,6 +583,10 @@ static void ClientProcessPacket(IHS_Base *base, const IHS_SocketAddress *address
     case k_ERemoteDeviceStreamingCancelRequest:
     case k_ERemoteDeviceProofRequest:
     case k_ERemoteDeviceProofResponse:
+        IHS_BaseLock(base);
+        bool handedOff = client->streamingHandedOff;
+        IHS_BaseUnlock(base);
+        if (handedOff) break; /* The ordinary launcher's handshake owner ended. */
         if (deferred) {
             IHS_BaseLock(base);
             if (client->authorizationCount < 32) {

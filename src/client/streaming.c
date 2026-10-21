@@ -180,6 +180,44 @@ bool IHS_ClientStreamingCancel(IHS_Client *client) {
     return context.canceled;
 }
 
+typedef struct {
+    IHS_Client *client;
+    bool completed;
+} StreamingHandoffContext;
+static void HandoffCurrentLaunch(IHS_TimerTask *task, void *context) {
+    StreamingHandoffContext *handoff = context;
+    IHS_Client *client = handoff->client;
+    IHS_StreamingState *state = task ? IHS_TimerTaskGetContext(task) : NULL;
+    IHS_BaseLock(&client->base);
+    bool ready = client->polled && !client->updating && !client->base.interrupted &&
+                 !client->authorizationCount && !client->authorizationDispatching &&
+                 !client->receiveBatchActive && client->lastLaunchHasTicket &&
+                 client->lastLaunchId && !client->servicePairing && state && state->ticket &&
+                 !state->request.networkTest;
+    if (ready) {
+        client->streamingHandedOff = true;
+        free(client->authorizationCache.key);
+        client->authorizationCache.key = NULL;
+        client->authorizationCache.keyLen = 0;
+        client->authorizationCache.result = k_ERemoteDeviceAuthorizationFailed;
+        client->lastLaunchId = 0;
+        memset(&client->lastLaunchHost, 0, sizeof(client->lastLaunchHost));
+        client->lastLaunchHasTicket = client->lastLaunchAuthorizing = false;
+    }
+    IHS_BaseUnlock(&client->base);
+    if (!ready) return;
+    state->terminal = true;
+    IHS_TimerTaskStopOwned(client->timers, &client->taskHandles.streaming);
+    handoff->completed = true;
+}
+bool IHS_ClientStreamingHandoff(IHS_Client *client) {
+    if (!client) return false;
+    StreamingHandoffContext handoff = {.client = client};
+    IHS_TimerTaskVisitSlot(client->timers, &client->taskHandles.streaming, HandoffCurrentLaunch,
+                           &handoff);
+    return handoff.completed;
+}
+
 bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
                                 const IHS_StreamingRequest *request) {
     bool wasService = IHS_ClientAuthorizationServiceActive(client);
@@ -217,6 +255,7 @@ bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
         IHS_BaseUnlock(&client->base);
     } while (collision);
     IHS_BaseLock(&client->base);
+    client->streamingHandedOff = false;
     client->lastLaunchId = state->requestId;
     client->lastLaunchHost = *host;
     client->lastLaunchHasTicket = client->lastLaunchAuthorizing = false;

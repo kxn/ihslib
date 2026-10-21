@@ -392,7 +392,16 @@ bool IHS_ClientStreamingRequest(IHS_Client *client, const IHS_HostInfo *host,
  * preserving a bounded late-response/host record. */
 bool IHS_ClientStreamingCancel(IHS_Client *client);
 
-/** Stop waiting after consuming the ticket. Keep the ID available for explicit
- * Cancel; replacement Request retires it without cancellation (RE §124).
- * Handshake ownership remains alive for late authorization/Proof messages. */
+/** Mark the manager's accepted ticket without retiring its ID/private owner
+ * (RE §124). Network tests retain it; an ordinary launcher calls Handoff at
+ * the outer Qt-exit boundary, before creating its SDK/media owner. */
 void IHS_ClientStreamingEstablished(IHS_Client *client);
+
+/** Ordinary-player handoff after a complete polled ClientUpdate: retire an
+ * accepted handshake and manager-lifetime recent-key cache without sending
+ * cancellation, leaving discovery and persisted pairing identities active.
+ * Later handshake frames are ignored until a new explicit StreamingRequest,
+ * AuthorizationRequest or service-pairing action. Network tests must retain
+ * their state6 owner and must not call this API. Returns false outside this
+ * polled/accepted-ticket boundary; no threaded/deferred handoff is implied. */
+bool IHS_ClientStreamingHandoff(IHS_Client *client);
