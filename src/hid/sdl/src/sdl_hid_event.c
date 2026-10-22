@@ -25,6 +25,8 @@
 
 #include "ihslib/hid/sdl.h"
 
+#include <math.h>
+
 #include "hid/manager.h"
 
 #include <stdlib.h> /* SDL2 pulled this in transitively; SDL3 does not */
@@ -319,6 +321,12 @@ bool IHS_HIDSDLInjectSensor(IHS_Session *session, SDL_JoystickID joystickId,
     }
     IHS_HIDManagedDevice *managed = IHS_HIDManagerDeviceByJoystickID(session->hidManager, joystickId);
     if (managed == NULL || !IHS_HIDDeviceIsSDL(managed->device)) {
+        static bool logged_missing;
+        if (!logged_missing) {
+            logged_missing = true;
+            IHS_SessionLog(session, IHS_LogLevelWarn, "HID.SDL",
+                           "sensor inject: no managed SDL device for joystick %d", (int) joystickId);
+        }
         return false;
     }
     IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) managed->device;
@@ -345,10 +353,24 @@ bool IHS_HIDSDLInjectSensor(IHS_Session *session, SDL_JoystickID joystickId,
     if (sensor_log) {
         device->sensorEnableLogged = sensor_requested;
     }
+    uint32_t state_flags = device->states.current.flags;
+    int16_t state_gyro[3] = {device->states.current.gyro[0], device->states.current.gyro[1],
+                             device->states.current.gyro[2]};
     IHS_HIDDeviceUnlock(managed->device);
     if (sensor_log) {
         IHS_SessionLog(session, IHS_LogLevelWarn, "HID.SDL", "host sensor enable=%d",
                        sensor_requested ? 1 : 0);
+    }
+    if (gyro != NULL) {
+        static bool logged_motion;
+        float motion = fabsf(gyro[0]) + fabsf(gyro[1]) + fabsf(gyro[2]);
+        if (!logged_motion && motion > 0.1f) {
+            logged_motion = true;
+            IHS_SessionLog(session, IHS_LogLevelWarn, "HID.SDL",
+                           "sensor inject motion=%.3f flags=0x%x wire_gyro=%d,%d,%d",
+                           (double) motion, state_flags, state_gyro[0], state_gyro[1],
+                           state_gyro[2]);
+        }
     }
     return changed;
 }
