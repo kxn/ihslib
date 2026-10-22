@@ -183,6 +183,9 @@ static void HandleSetLED(IHS_HIDDeviceSDL *sdl, const LEDCommand *led) {
 }
 
 static void HandleSetSensorEnabled(IHS_HIDDeviceSDL *sdl, const ByteCommand *byte) {
+    /* The SDL Switch backend stubs this call; the native sensor source is
+     * started by the platform. Record the host request for diagnostics. */
+    sdl->sensorEnableRequested = byte->value != 0;
     SDL_SetGamepadSensorEnabled(sdl->controller, SDL_SENSOR_ACCEL, byte->value);
     SDL_SetGamepadSensorEnabled(sdl->controller, SDL_SENSOR_GYRO, byte->value);
 }

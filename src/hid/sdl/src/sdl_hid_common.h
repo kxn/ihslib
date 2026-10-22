@@ -59,6 +59,10 @@ typedef struct IHS_HIDDeviceSDL {
      * receive thread (SDL_RumbleGamepad there deadlocks against
      * SDL_PollEvent on the media thread — verified on hardware). */
     IHS_Buffer pendingWrites;
+    /** Last host COMMAND_SET_SENSOR_ENABLED value; logged on the media thread
+     * by IHS_HIDSDLInjectSensor so a receive-thread log cannot deadlock. */
+    bool sensorEnableRequested;
+    bool sensorEnableLogged;
 } IHS_HIDDeviceSDL;
 
 /** Apply queued host device-write commands (rumble etc.). Must be called

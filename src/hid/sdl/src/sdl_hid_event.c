@@ -340,7 +340,16 @@ bool IHS_HIDSDLInjectSensor(IHS_Session *session, SDL_JoystickID joystickId,
             changed |= IHS_HIDReportSDLSetAccel(&device->states.current, accel);
         }
     }
+    bool sensor_requested = device->sensorEnableRequested;
+    bool sensor_log = sensor_requested != device->sensorEnableLogged;
+    if (sensor_log) {
+        device->sensorEnableLogged = sensor_requested;
+    }
     IHS_HIDDeviceUnlock(managed->device);
+    if (sensor_log) {
+        IHS_SessionLog(session, IHS_LogLevelWarn, "HID.SDL", "host sensor enable=%d",
+                       sensor_requested ? 1 : 0);
+    }
     return changed;
 }
 
