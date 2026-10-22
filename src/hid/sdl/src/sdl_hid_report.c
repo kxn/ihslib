@@ -62,7 +62,8 @@ bool IHS_HIDReportSDLSetAxis(IHS_HIDStateSDL *report, SDL_GamepadAxis axis, int1
 }
 
 bool IHS_HIDReportSDLSetAccel(IHS_HIDStateSDL *report, const float accel[3]) {
-    bool changed = false;
+    bool changed = (report->flags & 0x4u) == 0;
+    report->flags |= 0x4u; /* official OnSensorEvent: accel-present bit */
     for (int i = 0; i < 3; i++) {
         int16_t newValue = (int16_t) RemapValClamped(accel[i], -19.6133f, 19.6133f, -32768.0f, 32767.0f);
         if (report->accel[i] == newValue) {
@@ -75,7 +76,8 @@ bool IHS_HIDReportSDLSetAccel(IHS_HIDStateSDL *report, const float accel[3]) {
 }
 
 bool IHS_HIDReportSDLSetGyro(IHS_HIDStateSDL *report, const float gyro[3]) {
-    bool changed = false;
+    bool changed = (report->flags & 0x2u) == 0;
+    report->flags |= 0x2u; /* official OnSensorEvent: gyro-present bit */
     for (int i = 0; i < 3; i++) {
         int16_t newValue = (int16_t) RemapValClamped(gyro[i], -34.90659f, 34.90659f, -32768.0f, 32767.0f);
         if (report->gyro[i] == newValue) {
@@ -83,6 +85,19 @@ bool IHS_HIDReportSDLSetGyro(IHS_HIDStateSDL *report, const float gyro[3]) {
         }
         report->gyro[i] = newValue;
         changed = true;
+    }
+    return changed;
+}
+
+bool IHS_HIDReportSDLClearSensors(IHS_HIDStateSDL *report) {
+    bool changed = (report->flags & 0x6u) != 0;
+    report->flags &= ~0x6u;
+    for (int i = 0; i < 3; i++) {
+        if (report->gyro[i] != 0 || report->accel[i] != 0) {
+            changed = true;
+        }
+        report->gyro[i] = 0;
+        report->accel[i] = 0;
     }
     return changed;
 }

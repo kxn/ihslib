@@ -312,6 +312,38 @@ static bool HandleSensorEvent(IHS_HIDManager *manager, const SDL_GamepadSensorEv
     return changed;
 }
 
+bool IHS_HIDSDLInjectSensor(IHS_Session *session, SDL_JoystickID joystickId,
+                            const float gyro[3], const float accel[3]) {
+    if (session == NULL || session->hidManager == NULL) {
+        return false;
+    }
+    IHS_HIDManagedDevice *managed = IHS_HIDManagerDeviceByJoystickID(session->hidManager, joystickId);
+    if (managed == NULL || !IHS_HIDDeviceIsSDL(managed->device)) {
+        return false;
+    }
+    IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) managed->device;
+    assert(device != NULL);
+    IHS_HIDDeviceLock(managed->device);
+    if (managed->closed) {
+        IHS_HIDDeviceUnlock(managed->device);
+        return false;
+    }
+    bool changed;
+    if (gyro == NULL && accel == NULL) {
+        changed = IHS_HIDReportSDLClearSensors(&device->states.current);
+    } else {
+        changed = false;
+        if (gyro != NULL) {
+            changed |= IHS_HIDReportSDLSetGyro(&device->states.current, gyro);
+        }
+        if (accel != NULL) {
+            changed |= IHS_HIDReportSDLSetAccel(&device->states.current, accel);
+        }
+    }
+    IHS_HIDDeviceUnlock(managed->device);
+    return changed;
+}
+
 void IHS_HIDSDLApplyPendingWrites(IHS_Session *session) {
     /* Apply host device-write commands (rumble etc.) queued by the receive
      * thread. MUST run on the thread that owns SDL/libnx-hid (the one calling

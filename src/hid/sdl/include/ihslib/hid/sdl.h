@@ -103,6 +103,22 @@ typedef struct IHS_HIDSDLLastSubmitted {
 bool IHS_HIDSDLGetLastSubmittedReport(IHS_Session *session, IHS_HIDSDLLastSubmitted *out);
 
 /**
+ * Inject an out-of-band IMU sample for one open SDL gamepad. Platforms whose
+ * SDL backend does not surface controller sensors (Nintendo Switch) sample the
+ * native HID API and call this once per frame. Values use SDL's sensor units:
+ * gyro in radians/second and acceleration in metres/second², already mapped to
+ * SDL's controller frame. The sample is merged into the canonical state and
+ * reaches the wire through the normal 8 ms delta/full flush.
+ *
+ * Passing gyro=NULL and accel=NULL clears the IMU fields and presence flags
+ * without disturbing buttons or sticks.
+ *
+ * @return true if the canonical state changed
+ */
+bool IHS_HIDSDLInjectSensor(IHS_Session *session, SDL_JoystickID joystickId,
+                            const float gyro[3], const float accel[3]);
+
+/**
  * Flush pending input deltas for all open SDL game controllers whose host has
  * started input reports: one masked-delta report per device carrying every
  * state change since the previous flush. This is the per-frame send path;

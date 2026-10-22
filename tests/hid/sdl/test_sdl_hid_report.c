@@ -23,7 +23,9 @@
  *
  */
 #include <assert.h>
+#include <string.h>
 #include "hid/sdl/src/sdl_hid_report.h"
+#include "hid/sdl/src/sdl_hid_common.h"
 
 int main() {
     IHS_HIDStateSDL report;
@@ -58,6 +60,52 @@ int main() {
     assert(report.accel[0] == accelBefore[0]);
     assert(report.accel[1] == accelBefore[1]);
     assert(report.accel[2] == accelBefore[2]);
+    // Official OnSensorEvent sets these presence bits; the host uses them to
+    // decide whether the IMU fields in the RAW report are meaningful.
+    assert((report.flags & 0x6u) == 0x6u);
+
+    // Wire layout from the official Linux 1.3.9.258 client:
+    //   flags u32 @12, version @27 (nonzero = RAW), gyro s16[3] @28,
+    //   accel s16[3] @34. The packer must not zero that area.
+    uint8_t wire[72];
+    memset(wire, 0xa5, sizeof(wire));
+    IHS_HIDReportSDLPackWire(wire, sizeof(wire), &report);
+    uint32_t wireFlags;
+    memcpy(&wireFlags, wire + 12, sizeof(wireFlags));
+    assert(wireFlags == 0x6u);
+    assert(wire[27] == 3);
+    int16_t wireGyro[3], wireAccel[3];
+    memcpy(wireGyro, wire + 28, sizeof(wireGyro));
+    memcpy(wireAccel, wire + 34, sizeof(wireAccel));
+    assert(wireGyro[0] == report.gyro[0] && wireGyro[1] == report.gyro[1] &&
+           wireGyro[2] == report.gyro[2]);
+    assert(wireAccel[0] == report.accel[0] && wireAccel[1] == report.accel[1] &&
+           wireAccel[2] == report.accel[2]);
+    for (size_t i = 48; i < sizeof(wire); i++) {
+        assert(wire[i] == 0);
+    }
+
+    // A 28-byte ENCODED-sized packet still carries the version byte but no IMU.
+    uint8_t shortWire[28];
+    memset(shortWire, 0xa5, sizeof(shortWire));
+    IHS_HIDReportSDLPackWire(shortWire, sizeof(shortWire), &report);
+    assert(shortWire[27] == 3);
+    // Clearing sensors must remove the bits without disturbing a button.
+    assert(IHS_HIDReportSDLSetButton(&report, SDL_CONTROLLER_BUTTON_A, true));
+    assert(IHS_HIDReportSDLClearSensors(&report));
+    assert((report.flags & 0x6u) == 0);
+    assert(report.buttons != 0);
+
+    // Pin the official fixed-point scale: +/-2 g and +/-2000 dps map to the
+    // full s16 range, so 1 g and 1000 dps are ~16384 counts.
+    IHS_HIDStateSDL scale;
+    IHS_HIDReportSDLInit(&scale);
+    const float one_g[3] = {9.80665f, 0.0f, 0.0f};
+    const float one_kdps[3] = {17.45329f, 0.0f, 0.0f}; /* 1000 deg/s in rad/s */
+    IHS_HIDReportSDLSetAccel(&scale, one_g);
+    IHS_HIDReportSDLSetGyro(&scale, one_kdps);
+    assert(scale.accel[0] >= 16382 && scale.accel[0] <= 16386);
+    assert(scale.gyro[0] >= 16382 && scale.gyro[0] <= 16386);
 
     return 0;
 }

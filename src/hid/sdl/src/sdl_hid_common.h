@@ -94,19 +94,39 @@ static inline size_t IHS_HIDDeviceSDLWireReportLength(const IHS_HIDManagedDevice
 
 /** Pack the internal SDL state into the official Generic Gamepad wire
  * format: RAW mode of HIDDeviceSDLGamepadStateV2_t (byte 27 = version 3).
- * Layout: axes 6×s16 @0, flags u32 @12 (0), buttons bitfield @16
+ * Layout: axes 6×s16 @0, flags u32 @12, buttons bitfield @16
  * (SDL_GamepadButton positions, official OnButtonEvent 0x754034), version
- * byte @27, IMU/touch area beyond. */
+ * byte @27, gyro s16[3] @28, accel s16[3] @34, touch @40.
+ *
+ * The official client's OnSensorEvent (Linux 1.3.9.258, 0x269740) writes
+ * gyro at +0x1c with flags bit 0x2 and accel at +0x22 with flags bit 0x4;
+ * BInjectGamepadStateGenericGamepad (0x2dac70) copies the whole 56-byte
+ * state when byte 27 is nonzero. The previous packer zeroed this area, so
+ * every sensor sample was discarded even on platforms where SDL delivered
+ * SDL_CONTROLLERSENSORUPDATE. */
+#define IHS_HID_SDL_STATE_IMU_OFFSET 28u
+#define IHS_HID_SDL_STATE_IMU_BYTES  20u /* gyro, accel, touch, tail padding */
+
 static inline void IHS_HIDReportSDLPackWire(uint8_t *dest, size_t len,
                                             const IHS_HIDStateSDL *state) {
     memset(dest, 0, len);
     memcpy(dest, state->axes, len < sizeof(state->axes) ? len : sizeof(state->axes));
+    if (len >= 16) {
+        memcpy(dest + 12, &state->flags, sizeof(state->flags));
+    }
     if (len >= 18) {
         dest[16] = (uint8_t) (state->buttons & 0xff);
         dest[17] = (uint8_t) ((state->buttons >> 8) & 0xff);
     }
     if (len >= 28) {
         dest[27] = 3;
+    }
+    if (len > IHS_HID_SDL_STATE_IMU_OFFSET) {
+        size_t imu_len = len - IHS_HID_SDL_STATE_IMU_OFFSET;
+        if (imu_len > IHS_HID_SDL_STATE_IMU_BYTES) {
+            imu_len = IHS_HID_SDL_STATE_IMU_BYTES;
+        }
+        memcpy(dest + IHS_HID_SDL_STATE_IMU_OFFSET, &state->gyro, imu_len);
     }
 }
 

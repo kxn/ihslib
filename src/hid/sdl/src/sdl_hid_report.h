@@ -56,4 +56,7 @@ bool IHS_HIDReportSDLSetAccel(IHS_HIDStateSDL *report, const float accel[3]);
 
 bool IHS_HIDReportSDLSetGyro(IHS_HIDStateSDL *report, const float gyro[3]);
 
+/** Clear only the IMU fields and their presence flags, leaving buttons/sticks. */
+bool IHS_HIDReportSDLClearSensors(IHS_HIDStateSDL *report);
+
 bool IHS_HIDReportSDLClear(IHS_HIDStateSDL *report);
