@@ -59,8 +59,13 @@ static void InitialRequestVisit(IHS_TimerTask *task, void *unused) {
 
 static void SetAuthorizing(IHS_StreamingState *state, bool value) {
     state->authorizing = value;
+    /* A matching Unauthorized after Success returns the same request owner to
+     * authorization. Its old ticket must not suppress authorization retries or
+     * the response visitor. Already handed-off media has independent ownership. */
+    if (value) state->ticket = false;
     IHS_BaseLock(&state->client->base);
     state->client->lastLaunchAuthorizing = value;
+    if (value) state->client->lastLaunchHasTicket = false;
     IHS_BaseUnlock(&state->client->base);
 }
 static void ClearLaunch(IHS_StreamingState *state) {
