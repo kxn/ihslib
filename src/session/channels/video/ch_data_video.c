@@ -660,7 +660,11 @@ static void CheckPartialOverflow(IHS_SessionChannel *channel) {
         return;
     int32_t span = (int32_t)(tail->timestamp - head->timestamp);
     if (span > 9830) {
-        IHS_SessionChannelDataLost(channel);
+        /* Original CheckOverflow still updates recovery state outside phase6,
+         * but its Client::SendDataLost (Linux 0x31f7f0) checks Streaming. An
+         * entered decoder batch can reach this check after transport Stop. */
+        if (IHS_SessionStreaming(channel->session))
+            IHS_SessionChannelDataLost(channel);
         videoCh->states.syncingBacklog = true;
         videoCh->states.lastRecoveryRequest = IHS_SessionPacketTimestamp();
     }
@@ -668,7 +672,9 @@ static void CheckPartialOverflow(IHS_SessionChannel *channel) {
      * +412 is the member offset, not a timestamp increment. Keep the signed
      * 32-bit subtraction used by the reference, including at ID wrap. */
     int32_t frameSpan = (int32_t)tail->frameId - (int32_t)head->frameId + 1;
-    if (frameSpan >= videoCh->states.overflowFrameSpan) {
+    /* SendVideoOverflow 0x31f740 checks phase6 separately. Re-read after
+     * DataLost: delivery may have retired the client in between the sends. */
+    if (frameSpan >= videoCh->states.overflowFrameSpan && IHS_SessionStreaming(channel->session)) {
         CStreamVideoOverflowMsg message = CSTREAM_VIDEO_OVERFLOW_MSG__INIT;
         PROTOBUF_C_SET_VALUE(message, first_frame_id, head->frameId);
         PROTOBUF_C_SET_VALUE(message, last_frame_id, tail->frameId);
