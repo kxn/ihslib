@@ -602,10 +602,16 @@ static void InfoFromHID(CHIDDeviceInfo *info, const IHS_HIDDeviceInfo *hid) {
     PROTOBUF_C_P_SET_VALUE(info, is_generic_gamepad, true);
     PROTOBUF_C_P_SET_VALUE(info, ostype, IHS_SteamOSTypeLinux);
 
-    // Expect 0x8043ff
+    // Baseline 0x8343ff (motion capability is separate).
     IHS_HIDDeviceCaps capsBits = IHS_HID_CAP_ABXY | IHS_HID_CAP_DPAD | IHS_HID_CAP_LSTICK | IHS_HID_CAP_RSTICK |
                                  IHS_HID_CAP_STICKBTNS | IHS_HID_CAP_SHOULDERS | IHS_HID_CAP_TRIGGERS |
                                  IHS_HID_CAP_BACK | IHS_HID_CAP_START | IHS_HID_CAP_GUIDE | IHS_HID_CAP_MISC_1 |
                                  IHS_HID_CAP_XINPUT_OR_HIDAPI | IHS_HID_CAP_UNK_3 | IHS_HID_CAP_UNK_4;
+#if defined(__SWITCH__)
+    /* libnx supplies the normal gyro slot even though SDL's Switch backend
+     * does not expose SDL sensors. Capability 0x800 enables the host source;
+     * sample presence/freshness is a separate RAW report contract (section 21). */
+    capsBits |= IHS_HID_CAP_UNK_1;
+#endif
     PROTOBUF_C_P_SET_VALUE(info, caps_bits, capsBits);
 }

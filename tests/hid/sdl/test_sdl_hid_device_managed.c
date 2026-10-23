@@ -44,6 +44,51 @@
 
 static bool SupportsManaged();
 
+static void TestSensorEvents(IHS_Session *session, SDL_JoystickID id, IHS_HIDDevice *base) {
+    IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *)base;
+    SDL_Event event = {0};
+    event.type = SDL_CONTROLLERSENSORUPDATE;
+    event.csensor.which = id;
+    event.csensor.sensor = SDL_SENSOR_GYRO;
+    event.csensor.timestamp = 100;
+#if SDL_VERSION_ATLEAST(2, 26, 0)
+    event.csensor.timestamp_us = 100000;
+#endif
+    event.csensor.data[0] = 1.0f;
+    assert(IHS_HIDHandleSDLEvent(session, &event));
+    assert(device->states.current.flags == 0x402);
+    assert(device->states.current.eventTimestampUs == 100000);
+#if SDL_VERSION_ATLEAST(2, 26, 0)
+    assert(device->states.current.gyroTimestamp100ns == 1000000);
+#endif
+    // Model a completed flush, then deliver identical gyro at a later time.
+    device->states.previous = device->states.current;
+    event.csensor.timestamp = 104;
+#if SDL_VERSION_ATLEAST(2, 26, 0)
+    event.csensor.timestamp_us = 104000;
+#endif
+    assert(IHS_HIDHandleSDLEvent(session, &event));
+    event.csensor.sensor = SDL_SENSOR_ACCEL;
+    event.csensor.data[0] = 9.80665f;
+    assert(IHS_HIDHandleSDLEvent(session, &event));
+    assert(device->states.current.flags == 0x406); // pending gyro survives accel
+    device->states.previous = device->states.current;
+    event.csensor.data[0] = 9.0f;
+    assert(IHS_HIDHandleSDLEvent(session, &event));
+    assert(device->states.current.flags == 6); // already submitted gyro not replayed
+    assert(device->states.current.gyroTimestamp100ns == 0);
+    const float gyro[] = {1, 2, 3}, accel[] = {0, 9.80665f, 0};
+    assert(IHS_HIDSDLInjectSensor(session, id, gyro, accel));
+    uint32_t tick = device->states.current.gyroTimestamp100ns;
+    device->states.previous = device->states.current;
+    SDL_Delay(1);
+    assert(IHS_HIDSDLInjectSensor(session, id, gyro, accel));
+    assert(device->states.current.flags == 0x406);
+    assert(device->states.current.gyroTimestamp100ns != tick);
+    assert(IHS_HIDSDLInjectSensor(session, id, NULL, NULL));
+    assert(device->states.current.flags == 0);
+}
+
 int main(int argc, char *argv[]) {
     (void) argc;
     (void) argv;
@@ -101,6 +146,8 @@ int main(int argc, char *argv[]) {
 
     assert(IHS_HIDManagerDeviceByJoystickID(manager, id) == managed);
     assert(IHS_HIDManagerDeviceByJoystickID(manager, 99999) == NULL);
+
+    TestSensorEvents(session, id, device);
 
     const static uint8_t maxRumble[21] = {0x1, 0xff, 0xff, 0xff, 0xff, 0x88, 0x13,};
     IHS_HIDDeviceWrite(device, maxRumble, 21);

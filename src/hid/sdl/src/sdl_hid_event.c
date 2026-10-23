@@ -25,6 +25,8 @@
 
 #include "ihslib/hid/sdl.h"
 
+#include <math.h>
+
 #include "hid/manager.h"
 
 #include <stdlib.h> /* SDL2 pulled this in transitively; SDL3 does not */
@@ -40,6 +42,14 @@ static bool HandleCAxisEvent(IHS_HIDManager *manager, const SDL_GamepadAxisEvent
 
 static bool HandleSensorEvent(IHS_HIDManager *manager, const SDL_GamepadSensorEvent *event);
 
+static uint64_t SensorClockNs(void) {
+    uint64_t counter = SDL_GetPerformanceCounter();
+    uint64_t frequency = SDL_GetPerformanceFrequency();
+    /* Split the conversion to avoid multiplying the uptime by a billion. */
+    return (counter / frequency) * UINT64_C(1000000000) +
+           (counter % frequency) * UINT64_C(1000000000) / frequency;
+}
+
 /* Convert internal state to the Generic Gamepad wire format. The host parser
  * (libmain BParseGamepadStateGenericGamepad @0x7d089c) is dual-mode, selected
  * by byte 27: 0 = ENCODED (28-byte axes+button-bytes), nonzero = RAW (the
@@ -48,13 +58,15 @@ static bool HandleSensorEvent(IHS_HIDManager *manager, const SDL_GamepadSensorEv
  * parse step sets state byte 27 to 3 (0x7d0a50), and Pack's RAW path then
  * memcpy's the whole struct (0x7cfd8c).
  *
- * RAW layout used by this generic SDL provider (IMU/touch are not implemented):
+ * RAW layout used by this generic SDL provider:
  *   wire[0..11]  = 6 × s16 axes (LX, LY, RX, RY, LT, RT)
- *   wire[12..15] = flags u32 (0; only the version<=2 compat fixup touches it)
+ *   wire[12..15] = flags u32 (0x2 gyro, 0x4 accel, 0x400 fresh normal sample)
  *   wire[16..19] = buttons u32 bitfield at SDL button positions
  *   wire[20..26] = zero
  *   wire[27]     = version byte, 3 (RAW selector; skips the <=2 flags fixup)
- *   wire[28..71] = IMU/touch area, zeroed by this provider
+ *   wire[28..39] = gyro/accel s16[3]
+ *   wire[48..55] = event time (us), sensor time (100ns), both u32
+ *   wire[56..71] = unused secondary sensor slot, zero
  *
  * Button bit positions are SDL_GamepadButton values directly (official
  * OnButtonEvent 0x754034 writes `1 << ev->button` into the +16 bitfield) —
@@ -275,6 +287,7 @@ static bool HandleCButtonEvent(IHS_HIDManager *manager, const SDL_GamepadButtonE
     if (managed->closed) { IHS_HIDDeviceUnlock(managed->device); return false; }
     bool changed = IHS_HIDReportSDLSetButton(&device->states.current, event->button,
                                              event->down);
+    if (changed) IHS_HIDReportSDLBeginInput(&device->states.current, &device->states.previous);
     IHS_HIDDeviceUnlock(managed->device);
     return changed;
 }
@@ -289,6 +302,7 @@ static bool HandleCAxisEvent(IHS_HIDManager *manager, const SDL_GamepadAxisEvent
     IHS_HIDDeviceLock(managed->device);
     if (managed->closed) { IHS_HIDDeviceUnlock(managed->device); return false; }
     bool changed = IHS_HIDReportSDLSetAxis(&device->states.current, event->axis, event->value);
+    if (changed) IHS_HIDReportSDLBeginInput(&device->states.current, &device->states.previous);
     IHS_HIDDeviceUnlock(managed->device);
     return changed;
 }
@@ -305,10 +319,93 @@ static bool HandleSensorEvent(IHS_HIDManager *manager, const SDL_GamepadSensorEv
     bool changed = false;
     if (event->sensor == SDL_SENSOR_ACCEL) {
         changed = IHS_HIDReportSDLSetAccel(&device->states.current, event->data);
+        if (changed) IHS_HIDReportSDLBeginInput(&device->states.current, &device->states.previous);
     } else if (event->sensor == SDL_SENSOR_GYRO) {
         changed = IHS_HIDReportSDLSetGyro(&device->states.current, event->data);
+        uint64_t eventNs, sensorNs;
+#ifdef IHSLIB_HID_SDL2
+        eventNs = (uint64_t)event->timestamp * UINT64_C(1000000);
+#if SDL_VERSION_ATLEAST(2, 26, 0)
+        sensorNs = event->timestamp_us * UINT64_C(1000);
+#else
+        sensorNs = 0;
+#endif
+#else
+        eventNs = event->timestamp;
+        sensorNs = event->sensor_timestamp;
+#endif
+        if (!sensorNs) sensorNs = SensorClockNs();
+        changed |= IHS_HIDReportSDLSetSensorTime(&device->states.current, eventNs, sensorNs);
     }
     IHS_HIDDeviceUnlock(managed->device);
+    return changed;
+}
+
+bool IHS_HIDSDLInjectSensor(IHS_Session *session, SDL_JoystickID joystickId,
+                            const float gyro[3], const float accel[3]) {
+    if (session == NULL || session->hidManager == NULL) {
+        return false;
+    }
+    IHS_HIDManagedDevice *managed = IHS_HIDManagerDeviceByJoystickID(session->hidManager, joystickId);
+    if (managed == NULL || !IHS_HIDDeviceIsSDL(managed->device)) {
+        static bool logged_missing;
+        if (!logged_missing) {
+            logged_missing = true;
+            IHS_SessionLog(session, IHS_LogLevelWarn, "HID.SDL",
+                           "sensor inject: no managed SDL device for joystick %d", (int) joystickId);
+        }
+        return false;
+    }
+    IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) managed->device;
+    assert(device != NULL);
+    IHS_HIDDeviceLock(managed->device);
+    if (managed->closed) {
+        IHS_HIDDeviceUnlock(managed->device);
+        return false;
+    }
+    bool changed;
+    if (gyro == NULL && accel == NULL) {
+        changed = IHS_HIDReportSDLClearSensors(&device->states.current);
+    } else {
+        changed = false;
+        if (gyro != NULL) {
+            changed |= IHS_HIDReportSDLSetGyro(&device->states.current, gyro);
+            /* libnx injection has no SDL event timestamp. Use one monotonic
+             * observation time for both domains; do not fabricate a rate. */
+            uint64_t nowNs = SensorClockNs();
+            changed |= IHS_HIDReportSDLSetSensorTime(&device->states.current, nowNs, nowNs);
+        }
+        if (accel != NULL) {
+            changed |= IHS_HIDReportSDLSetAccel(&device->states.current, accel);
+            if (gyro == NULL && changed) {
+                IHS_HIDReportSDLBeginInput(&device->states.current, &device->states.previous);
+            }
+        }
+    }
+    bool sensor_requested = device->sensorEnableRequested;
+    bool sensor_log = sensor_requested != device->sensorEnableLogged;
+    if (sensor_log) {
+        device->sensorEnableLogged = sensor_requested;
+    }
+    uint32_t state_flags = device->states.current.flags;
+    int16_t state_gyro[3] = {device->states.current.gyro[0], device->states.current.gyro[1],
+                             device->states.current.gyro[2]};
+    IHS_HIDDeviceUnlock(managed->device);
+    if (sensor_log) {
+        IHS_SessionLog(session, IHS_LogLevelWarn, "HID.SDL", "host sensor enable=%d",
+                       sensor_requested ? 1 : 0);
+    }
+    if (gyro != NULL) {
+        static bool logged_motion;
+        float motion = fabsf(gyro[0]) + fabsf(gyro[1]) + fabsf(gyro[2]);
+        if (!logged_motion && motion > 0.1f) {
+            logged_motion = true;
+            IHS_SessionLog(session, IHS_LogLevelWarn, "HID.SDL",
+                           "sensor inject motion=%.3f flags=0x%x wire_gyro=%d,%d,%d",
+                           (double) motion, state_flags, state_gyro[0], state_gyro[1],
+                           state_gyro[2]);
+        }
+    }
     return changed;
 }
 

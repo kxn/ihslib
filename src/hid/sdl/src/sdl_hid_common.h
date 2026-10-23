@@ -59,6 +59,10 @@ typedef struct IHS_HIDDeviceSDL {
      * receive thread (SDL_RumbleGamepad there deadlocks against
      * SDL_PollEvent on the media thread — verified on hardware). */
     IHS_Buffer pendingWrites;
+    /** Last host COMMAND_SET_SENSOR_ENABLED value; logged on the media thread
+     * by IHS_HIDSDLInjectSensor so a receive-thread log cannot deadlock. */
+    bool sensorEnableRequested;
+    bool sensorEnableLogged;
 } IHS_HIDDeviceSDL;
 
 /** Apply queued host device-write commands (rumble etc.). Must be called
@@ -94,19 +98,37 @@ static inline size_t IHS_HIDDeviceSDLWireReportLength(const IHS_HIDManagedDevice
 
 /** Pack the internal SDL state into the official Generic Gamepad wire
  * format: RAW mode of HIDDeviceSDLGamepadStateV2_t (byte 27 = version 3).
- * Layout: axes 6×s16 @0, flags u32 @12 (0), buttons bitfield @16
+ * Layout: axes 6×s16 @0, flags u32 @12, buttons bitfield @16
  * (SDL_GamepadButton positions, official OnButtonEvent 0x754034), version
- * byte @27, IMU/touch area beyond. */
+ * byte @27, gyro s16[3] @28, accel s16[3] @34, touch @40.
+ *
+ * RAW V3 normal sensor samples also require flags 0x400 (freshness), an
+ * event timestamp @48 in microseconds and sensor timestamp @52 in 100ns.
+ * See nsteamlink docs/OFFICIAL_INPUT_RE.md section 21, pinned Windows host.
+ */
+#define IHS_HID_SDL_STATE_IMU_OFFSET 28u
+#define IHS_HID_SDL_STATE_IMU_BYTES  28u /* normal IMU, touch, event/sensor times */
+
 static inline void IHS_HIDReportSDLPackWire(uint8_t *dest, size_t len,
                                             const IHS_HIDStateSDL *state) {
     memset(dest, 0, len);
     memcpy(dest, state->axes, len < sizeof(state->axes) ? len : sizeof(state->axes));
+    if (len >= 16) {
+        memcpy(dest + 12, &state->flags, sizeof(state->flags));
+    }
     if (len >= 18) {
         dest[16] = (uint8_t) (state->buttons & 0xff);
         dest[17] = (uint8_t) ((state->buttons >> 8) & 0xff);
     }
     if (len >= 28) {
         dest[27] = 3;
+    }
+    if (len > IHS_HID_SDL_STATE_IMU_OFFSET) {
+        size_t imu_len = len - IHS_HID_SDL_STATE_IMU_OFFSET;
+        if (imu_len > IHS_HID_SDL_STATE_IMU_BYTES) {
+            imu_len = IHS_HID_SDL_STATE_IMU_BYTES;
+        }
+        memcpy(dest + IHS_HID_SDL_STATE_IMU_OFFSET, &state->gyro, imu_len);
     }
 }
 

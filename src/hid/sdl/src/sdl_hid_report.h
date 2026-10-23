@@ -27,6 +27,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #include <SDL3/SDL_gamepad.h>
 
@@ -40,9 +41,25 @@ typedef struct __attribute__((__packed__)) IHS_HIDReportSDL {
     int16_t accel[3];
     int16_t touch[2];
     uint8_t padding2[4];
+    uint32_t eventTimestampUs;
+    uint32_t gyroTimestamp100ns;
 } IHS_HIDStateSDL;
 
-_Static_assert(sizeof(IHS_HIDStateSDL) == 48, "");
+_Static_assert(sizeof(IHS_HIDStateSDL) == 56, "");
+_Static_assert(offsetof(IHS_HIDStateSDL, eventTimestampUs) == 0x30, "RAW event time");
+_Static_assert(offsetof(IHS_HIDStateSDL, gyroTimestamp100ns) == 0x34, "RAW gyro time");
+
+#define IHS_HID_SDL_GYRO_PRESENT 0x2u
+#define IHS_HID_SDL_ACCEL_PRESENT 0x4u
+#define IHS_HID_SDL_SENSOR_FRESH 0x400u
+
+/** Record a sample's time independently of its quantized values. Wire time
+ * units follow Steam's SDL3 producer (event ns/1000, sensor ns/100). */
+bool IHS_HIDReportSDLSetSensorTime(IHS_HIDStateSDL *report, uint64_t eventNs,
+                                  uint64_t sensorNs);
+
+/** A button/axis/accel-only event must not replay an already submitted gyro. */
+void IHS_HIDReportSDLBeginInput(IHS_HIDStateSDL *report, const IHS_HIDStateSDL *previous);
 
 bool IHS_HIDReportSDLInit(IHS_HIDStateSDL *report);
 
@@ -55,5 +72,8 @@ bool IHS_HIDReportSDLSetAxis(IHS_HIDStateSDL *report, SDL_GamepadAxis axis, int1
 bool IHS_HIDReportSDLSetAccel(IHS_HIDStateSDL *report, const float accel[3]);
 
 bool IHS_HIDReportSDLSetGyro(IHS_HIDStateSDL *report, const float gyro[3]);
+
+/** Clear only the IMU fields and their presence flags, leaving buttons/sticks. */
+bool IHS_HIDReportSDLClearSensors(IHS_HIDStateSDL *report);
 
 bool IHS_HIDReportSDLClear(IHS_HIDStateSDL *report);
