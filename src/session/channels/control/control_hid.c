@@ -607,5 +607,12 @@ static void InfoFromHID(CHIDDeviceInfo *info, const IHS_HIDDeviceInfo *hid) {
                                  IHS_HID_CAP_STICKBTNS | IHS_HID_CAP_SHOULDERS | IHS_HID_CAP_TRIGGERS |
                                  IHS_HID_CAP_BACK | IHS_HID_CAP_START | IHS_HID_CAP_GUIDE | IHS_HID_CAP_MISC_1 |
                                  IHS_HID_CAP_XINPUT_OR_HIDAPI | IHS_HID_CAP_UNK_3 | IHS_HID_CAP_UNK_4;
+#if defined(NSL_SWITCH_HOST_CAPS)
+    /* The host's switch_pro/generic VDFs declare controller_caps=0x8B4BFF.
+     * Our baseline is 0x8343FF; the missing bits are 0x800 (Gyro UI) and
+     * 0x80000 (not named by ihslib). Add exactly those for one controlled
+     * test; do not add the 0x400 state flag. */
+    capsBits |= IHS_HID_CAP_UNK_1 | 0x00080000u;
+#endif
     PROTOBUF_C_P_SET_VALUE(info, caps_bits, capsBits);
 }

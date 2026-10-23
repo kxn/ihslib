@@ -132,6 +132,16 @@ static inline void IHS_HIDReportSDLPackWire(uint8_t *dest, size_t len,
         }
         memcpy(dest + IHS_HID_SDL_STATE_IMU_OFFSET, &state->gyro, imu_len);
     }
+#ifdef NSL_HID_ALT_SENSOR_LAYOUT
+    /* Host CGenericGamepadControllerAbstraction slot 0 (flags 0x800) reads
+     * gyro at state+0x38 and accel at state+0x3e. Keep the normal +0x1c/+0x22
+     * copy for slot 1 and add the alternate layout for slot 0. */
+    if (len >= 0x44) {
+        memcpy(dest + 0x38, &state->gyro, sizeof(state->gyro));
+        memcpy(dest + 0x3e, &state->accel, sizeof(state->accel));
+        dest[13] |= 0x08; /* flags bit 0x800 */
+    }
+#endif
 }
 
 /* BFilterGamepadState 0x7bc5e8..0x7bc6a4, without local overlays. */

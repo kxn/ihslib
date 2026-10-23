@@ -76,8 +76,18 @@ bool IHS_HIDReportSDLSetAccel(IHS_HIDStateSDL *report, const float accel[3]) {
 }
 
 bool IHS_HIDReportSDLSetGyro(IHS_HIDStateSDL *report, const float gyro[3]) {
-    bool changed = (report->flags & 0x2u) == 0;
-    report->flags |= 0x2u; /* official OnSensorEvent: gyro-present bit */
+#if defined(NSL_HID_GYRO_FLAG_800)
+    /* Host builder 0x1386796f0: slot 0 (flags 0x800) reads gyro at +0x38. */
+    const uint32_t gyro_flags = 0x802u;
+#elif defined(NSL_HID_GYRO_FLAG_400)
+    /* Host builder 0x1386796f0: slot 1 (flags 0x400) reads gyro at +0x1c,
+     * which is the layout ihslib already writes. */
+    const uint32_t gyro_flags = 0x402u;
+#else
+    const uint32_t gyro_flags = 0x2u;
+#endif
+    bool changed = (report->flags & gyro_flags) != gyro_flags;
+    report->flags |= gyro_flags;
     for (int i = 0; i < 3; i++) {
         int16_t newValue = (int16_t) RemapValClamped(gyro[i], -34.90659f, 34.90659f, -32768.0f, 32767.0f);
         if (report->gyro[i] == newValue) {
@@ -90,8 +100,8 @@ bool IHS_HIDReportSDLSetGyro(IHS_HIDStateSDL *report, const float gyro[3]) {
 }
 
 bool IHS_HIDReportSDLClearSensors(IHS_HIDStateSDL *report) {
-    bool changed = (report->flags & 0x6u) != 0;
-    report->flags &= ~0x6u;
+    bool changed = (report->flags & 0x806u) != 0;
+    report->flags &= ~0x806u;
     for (int i = 0; i < 3; i++) {
         if (report->gyro[i] != 0 || report->accel[i] != 0) {
             changed = true;
