@@ -10,3 +10,8 @@ target_link_libraries("${IHSTEST_TARGET}" PRIVATE ihslib-hid-sdl ihs-test-sessio
 
 ihs_add_test(hid_sdl_report test_sdl_hid_report.c)
 target_link_libraries("${IHSTEST_TARGET}" PRIVATE ihslib-hid-sdl ihs-test-session ${SDL2_LIBRARIES})
+add_executable(ihs-gyro-wire-oracle gyro_wire_oracle.c)
+target_include_directories(ihs-gyro-wire-oracle PRIVATE ${TEST_INCLUDES})
+target_link_libraries(ihs-gyro-wire-oracle PRIVATE ihslib-hid-sdl ihslib ${SDL2_LIBRARIES})
+target_compile_options(ihs-gyro-wire-oracle PRIVATE -UNDEBUG -Wall -Wextra)
+add_test(NAME hid_gyro_wire_oracle COMMAND ihs-gyro-wire-oracle)

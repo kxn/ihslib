@@ -72,7 +72,7 @@ int main() {
     IHS_HIDReportSDLPackWire(wire, sizeof(wire), &report);
     uint32_t wireFlags;
     memcpy(&wireFlags, wire + 12, sizeof(wireFlags));
-    assert(wireFlags == 0x6u);
+    assert(wireFlags == 0x406u);
     assert(wire[27] == 3);
     int16_t wireGyro[3], wireAccel[3];
     memcpy(wireGyro, wire + 28, sizeof(wireGyro));
@@ -81,7 +81,7 @@ int main() {
            wireGyro[2] == report.gyro[2]);
     assert(wireAccel[0] == report.accel[0] && wireAccel[1] == report.accel[1] &&
            wireAccel[2] == report.accel[2]);
-    for (size_t i = 48; i < sizeof(wire); i++) {
+    for (size_t i = 56; i < sizeof(wire); i++) {
         assert(wire[i] == 0);
     }
 
@@ -93,7 +93,7 @@ int main() {
     // Clearing sensors must remove the bits without disturbing a button.
     assert(IHS_HIDReportSDLSetButton(&report, SDL_CONTROLLER_BUTTON_A, true));
     assert(IHS_HIDReportSDLClearSensors(&report));
-    assert((report.flags & 0x6u) == 0);
+    assert((report.flags & 0x406u) == 0);
     assert(report.buttons != 0);
 
     // Pin the official fixed-point scale: +/-2 g and +/-2000 dps map to the
@@ -106,6 +106,26 @@ int main() {
     IHS_HIDReportSDLSetGyro(&scale, one_kdps);
     assert(scale.accel[0] >= 16382 && scale.accel[0] <= 16386);
     assert(scale.gyro[0] >= 16382 && scale.gyro[0] <= 16386);
+
+    // Identical angular velocity at a new time is still a new sensor sample.
+    assert(IHS_HIDReportSDLSetSensorTime(&scale, 100000000, 100000000));
+    IHS_HIDStateSDL submitted = scale;
+    assert(IHS_HIDReportSDLSetSensorTime(&scale, 104000000, 104000000));
+    IHS_HIDReportSDLBeginInput(&scale, &submitted);
+    assert(scale.flags & IHS_HID_SDL_SENSOR_FRESH); // keep unsubmitted IMU
+    submitted = scale;
+    IHS_HIDReportSDLBeginInput(&scale, &submitted);
+    assert(!(scale.flags & IHS_HID_SDL_SENSOR_FRESH)); // no stale replay
+    assert(scale.gyroTimestamp100ns == 0);
+    assert(submitted.gyroTimestamp100ns == 1040000); // delta baseline untouched
+    // Full 32-bit timestamp domains wrap independently; no signed arithmetic.
+    IHS_HIDReportSDLSetSensorTime(&scale, UINT64_C(4294967300) * 1000,
+                                 UINT64_C(4294967300) * 100);
+    assert(scale.eventTimestampUs == 4 && scale.gyroTimestamp100ns == 4);
+    IHS_HIDReportSDLPackWire(wire, sizeof(wire), &scale);
+    uint32_t times[2];
+    memcpy(times, wire + 48, sizeof(times));
+    assert(times[0] == 4 && times[1] == 4);
 
     return 0;
 }

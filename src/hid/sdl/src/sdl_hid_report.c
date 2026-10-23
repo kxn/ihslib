@@ -76,16 +76,10 @@ bool IHS_HIDReportSDLSetAccel(IHS_HIDStateSDL *report, const float accel[3]) {
 }
 
 bool IHS_HIDReportSDLSetGyro(IHS_HIDStateSDL *report, const float gyro[3]) {
-#if defined(NSL_HID_GYRO_FLAG_800)
-    /* Host builder 0x1386796f0: slot 0 (flags 0x800) reads gyro at +0x38. */
-    const uint32_t gyro_flags = 0x802u;
-#elif defined(NSL_HID_GYRO_FLAG_400)
-    /* Host builder 0x1386796f0: slot 1 (flags 0x400) reads gyro at +0x1c,
-     * which is the layout ihslib already writes. */
-    const uint32_t gyro_flags = 0x402u;
-#else
-    const uint32_t gyro_flags = 0x2u;
-#endif
+    /* RAW V3: presence plus this report's normal-slot freshness. Confirmed
+     * through the Windows remote full/delta decoder and Generic builder;
+     * see nsteamlink docs/OFFICIAL_INPUT_RE.md section 21. */
+    const uint32_t gyro_flags = IHS_HID_SDL_GYRO_PRESENT | IHS_HID_SDL_SENSOR_FRESH;
     bool changed = (report->flags & gyro_flags) != gyro_flags;
     report->flags |= gyro_flags;
     for (int i = 0; i < 3; i++) {
@@ -99,9 +93,29 @@ bool IHS_HIDReportSDLSetGyro(IHS_HIDStateSDL *report, const float gyro[3]) {
     return changed;
 }
 
+bool IHS_HIDReportSDLSetSensorTime(IHS_HIDStateSDL *report, uint64_t eventNs,
+                                  uint64_t sensorNs) {
+    uint32_t event = (uint32_t)(eventNs / 1000u);
+    uint32_t sensor = (uint32_t)(sensorNs / 100u);
+    bool changed = report->eventTimestampUs != event || report->gyroTimestamp100ns != sensor;
+    report->eventTimestampUs = event;
+    report->gyroTimestamp100ns = sensor;
+    return changed;
+}
+
+void IHS_HIDReportSDLBeginInput(IHS_HIDStateSDL *report, const IHS_HIDStateSDL *previous) {
+    /* Keep a sample that has not yet been flushed. The previous snapshot must
+     * stay byte-for-byte identical to the last delta baseline. */
+    if (report->gyroTimestamp100ns == previous->gyroTimestamp100ns) {
+        report->flags &= ~IHS_HID_SDL_SENSOR_FRESH;
+        report->gyroTimestamp100ns = 0;
+    }
+}
+
 bool IHS_HIDReportSDLClearSensors(IHS_HIDStateSDL *report) {
-    bool changed = (report->flags & 0x806u) != 0;
-    report->flags &= ~0x806u;
+    bool changed = (report->flags & 0x406u) != 0 || report->gyroTimestamp100ns != 0;
+    report->flags &= ~0x406u;
+    report->gyroTimestamp100ns = 0;
     for (int i = 0; i < 3; i++) {
         if (report->gyro[i] != 0 || report->accel[i] != 0) {
             changed = true;

@@ -102,14 +102,12 @@ static inline size_t IHS_HIDDeviceSDLWireReportLength(const IHS_HIDManagedDevice
  * (SDL_GamepadButton positions, official OnButtonEvent 0x754034), version
  * byte @27, gyro s16[3] @28, accel s16[3] @34, touch @40.
  *
- * The official client's OnSensorEvent (Linux 1.3.9.258, 0x269740) writes
- * gyro at +0x1c with flags bit 0x2 and accel at +0x22 with flags bit 0x4;
- * BInjectGamepadStateGenericGamepad (0x2dac70) copies the whole 56-byte
- * state when byte 27 is nonzero. The previous packer zeroed this area, so
- * every sensor sample was discarded even on platforms where SDL delivered
- * SDL_CONTROLLERSENSORUPDATE. */
+ * RAW V3 normal sensor samples also require flags 0x400 (freshness), an
+ * event timestamp @48 in microseconds and sensor timestamp @52 in 100ns.
+ * See nsteamlink docs/OFFICIAL_INPUT_RE.md section 21, pinned Windows host.
+ */
 #define IHS_HID_SDL_STATE_IMU_OFFSET 28u
-#define IHS_HID_SDL_STATE_IMU_BYTES  20u /* gyro, accel, touch, tail padding */
+#define IHS_HID_SDL_STATE_IMU_BYTES  28u /* normal IMU, touch, event/sensor times */
 
 static inline void IHS_HIDReportSDLPackWire(uint8_t *dest, size_t len,
                                             const IHS_HIDStateSDL *state) {
@@ -132,16 +130,6 @@ static inline void IHS_HIDReportSDLPackWire(uint8_t *dest, size_t len,
         }
         memcpy(dest + IHS_HID_SDL_STATE_IMU_OFFSET, &state->gyro, imu_len);
     }
-#ifdef NSL_HID_ALT_SENSOR_LAYOUT
-    /* Host CGenericGamepadControllerAbstraction slot 0 (flags 0x800) reads
-     * gyro at state+0x38 and accel at state+0x3e. Keep the normal +0x1c/+0x22
-     * copy for slot 1 and add the alternate layout for slot 0. */
-    if (len >= 0x44) {
-        memcpy(dest + 0x38, &state->gyro, sizeof(state->gyro));
-        memcpy(dest + 0x3e, &state->accel, sizeof(state->accel));
-        dest[13] |= 0x08; /* flags bit 0x800 */
-    }
-#endif
 }
 
 /* BFilterGamepadState 0x7bc5e8..0x7bc6a4, without local overlays. */
