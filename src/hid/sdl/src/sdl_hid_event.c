@@ -177,6 +177,22 @@ bool IHS_HIDRefreshSDLGameControllers(IHS_Session *session) {
     return IHS_SessionHIDSendReport(session);
 }
 
+bool IHS_HIDSDLInputReady(IHS_Session *session, SDL_JoystickID joystickId) {
+    if (!session || !session->hidManager || !IHS_SessionStreaming(session) ||
+        !IHS_SessionInputEnabled(session))
+        return false;
+    IHS_HIDManagedDevice *managed =
+        IHS_HIDManagerDeviceByJoystickID(session->hidManager, joystickId);
+    if (!managed || !IHS_HIDDeviceIsSDL(managed->device))
+        return false;
+    /* Same lookup -> per-device lock -> closed check as HandleCButtonEvent.
+     * Deferred device destruction keeps the looked-up slot alive. */
+    IHS_HIDDeviceLock(managed->device);
+    bool ready = !managed->closed && managed->reportHolder.reportLength >= 28;
+    IHS_HIDDeviceUnlock(managed->device);
+    return ready;
+}
+
 bool IHS_HIDSDLGetLastSubmittedReport(IHS_Session *session, IHS_HIDSDLLastSubmitted *out) {
     if (session == NULL || session->hidManager == NULL || out == NULL) {
         return false;

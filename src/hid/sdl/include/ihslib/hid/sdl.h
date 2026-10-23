@@ -102,6 +102,10 @@ typedef struct IHS_HIDSDLLastSubmitted {
 
 bool IHS_HIDSDLGetLastSubmittedReport(IHS_Session *session, IHS_HIDSDLLastSubmitted *out);
 
+/** Whether this joystick has an open RAW report subscription and the session
+ * currently permits input. Readiness only: no report/ACK/host action is implied. */
+bool IHS_HIDSDLInputReady(IHS_Session *session, SDL_JoystickID joystickId);
+
 /**
  * Inject an out-of-band IMU sample for one open SDL gamepad. Platforms whose
  * SDL backend does not surface controller sensors (Nintendo Switch) sample the
