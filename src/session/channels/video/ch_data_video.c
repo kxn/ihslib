@@ -81,6 +81,15 @@ typedef struct IHS_SessionChannelVideo {
     IHS_Mutex *stateMutex;
 } IHS_SessionChannelVideo;
 
+static void SendVideoDataLost(IHS_SessionChannel *channel) {
+    /* Client::SendDataLost (Linux 1.3.32 @0x31f7f0) tests phase6 at
+     * delivery, including errors returned by an already-entered decode batch
+     * after Stop. This is a client feedback gate, not the connection/window
+     * sender's contract: do not suppress generic transport recovery here. */
+    if (IHS_SessionStreaming(channel->session))
+        IHS_SessionChannelDataLost(channel);
+}
+
 static void ChannelVideoInit(IHS_SessionChannel *channel, const void *config);
 
 static void ChannelVideoDeinit(IHS_SessionChannel *channel);
@@ -356,12 +365,12 @@ static void DataReceived(IHS_SessionChannel *channel, const IHS_SessionDataFrame
     uint32_t now = IHS_SessionPacketTimestamp();
     if ((videoCh->states.waitingKeyFrame || videoCh->states.syncingBacklog) &&
         (int32_t)(now - videoCh->states.lastRecoveryRequest) > 6553) {
-        IHS_SessionChannelDataLost(channel);
+        SendVideoDataLost(channel);
         videoCh->states.lastRecoveryRequest = now;
     }
     if (!videoCh->states.waitingKeyFrame && vhead.sequence != videoCh->states.expectedSequence) {
         if (!videoCh->states.syncingBacklog) {
-            IHS_SessionChannelDataLost(channel);
+            SendVideoDataLost(channel);
             videoCh->states.lastRecoveryRequest = now;
         }
         videoCh->states.waitingKeyFrame = true;
@@ -529,7 +538,7 @@ void IHS_SessionVideoHandlePendingReset(IHS_Session *session) {
     }
     if (!DataStart(ch) || session->base.interrupted || session->transport.detached) return;
     IHS_SessionChannelDataRestartWorker(&video->base);
-    IHS_SessionChannelDataLost(ch);
+    SendVideoDataLost(ch);
 }
 
 static size_t VideoFrameHeaderParse(IHS_VideoFrameHeader *header, const uint8_t *data) {
@@ -619,7 +628,7 @@ static void AddPartialFrame(IHS_SessionChannelVideo *channel, uint16_t frameId, 
         DiscardPending(channel);
         channel->states.waitingKeyFrame = true;
         channel->states.lastRecoveryRequest = IHS_SessionPacketTimestamp();
-        IHS_SessionChannelDataLost(&channel->base.base);
+        SendVideoDataLost(&channel->base.base);
         return;
     }
     IHS_VideoPartialFrame *cur = NULL;
@@ -663,8 +672,7 @@ static void CheckPartialOverflow(IHS_SessionChannel *channel) {
         /* Original CheckOverflow still updates recovery state outside phase6,
          * but its Client::SendDataLost (Linux 0x31f7f0) checks Streaming. An
          * entered decoder batch can reach this check after transport Stop. */
-        if (IHS_SessionStreaming(channel->session))
-            IHS_SessionChannelDataLost(channel);
+        SendVideoDataLost(channel);
         videoCh->states.syncingBacklog = true;
         videoCh->states.lastRecoveryRequest = IHS_SessionPacketTimestamp();
     }
@@ -761,7 +769,7 @@ static bool ApplyDecodeFeedback(IHS_SessionChannelVideo *video,
         !IHS_SessionClientConfigDisableHardware(video->base.base.session)) return false;
     if (result & IHS_StreamVideoSubmitReset) atomic_store(&video->resetRequested, true);
     if (result & IHS_StreamVideoSubmitReportLost)
-        IHS_SessionChannelDataLost(&video->base.base);
+        SendVideoDataLost(&video->base.base);
     return true;
 }
 
