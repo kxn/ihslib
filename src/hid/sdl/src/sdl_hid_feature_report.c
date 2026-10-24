@@ -164,7 +164,15 @@ int IHS_HIDDeviceSDLGetFeatureReport(IHS_HIDDevice *device, const uint8_t *repor
                         controllerType = k_ControllerTypeSwitchJoyConPair;
                         break;
                     default:
+#if defined(__SWITCH__)
+                        /* devkitPro SDL2 does not expose the built-in pad as
+                         * SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO (type=0), but the
+                         * host identity pair is 057e:2009. Report the matching
+                         * Steam controller type instead of UnknownNonSteam. */
+                        controllerType = k_ControllerTypeSwitchProController;
+#else
                         controllerType = k_ControllerTypeUnknownNonSteamController;
+#endif
                         break;
                 }
             }

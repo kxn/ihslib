@@ -147,6 +147,19 @@ static bool EnumerationGetInfo(IHS_Enumeration *enumeration, IHS_HIDDeviceInfo *
         info->product_id = 0;
         info->product_version = 0;
     }
+#if defined(__SWITCH__)
+    /* devkitPro SDL's built-in Switch pad uses a name-based GUID
+     * (000038f8"Switch Cont"), so the standard VID/PID parser above always
+     * fails and the host would see 0000:0000. Official clients report a real
+     * controller identity together with is_generic_gamepad=true; restore the
+     * Nintendo Switch Pro Controller IDs so the host can type the pad while
+     * the wire format stays Generic RAW V3. */
+    info->vendor_id = 0x057e;
+    info->product_id = 0x2009;
+    info->product_version = 0x0001;
+    strncpy(gce->temp.product_string, "Nintendo Switch Pro Controller", 63);
+    gce->temp.product_string[63] = '\0';
+#endif
     info->path = gce->temp.path;
     info->product_string = gce->temp.product_string;
     return true;
