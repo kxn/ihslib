@@ -55,10 +55,14 @@ typedef struct IHS_HIDDeviceSDL {
     IHS_HIDStateSDL lastSubmitted;
     uint64_t lastSubmittedSeq;
     /** Host DeviceWrite commands queued on the session receive thread and
-     * applied on the flush thread: SDL gamepad calls must stay off the
+     * applied on the SDL/media thread: SDL gamepad calls must stay off the
      * receive thread (SDL_RumbleGamepad there deadlocks against
      * SDL_PollEvent on the media thread — verified on hardware). */
     IHS_Buffer pendingWrites;
+    int (*output)(SDL_JoystickID, const uint8_t *, size_t, uint64_t, void *);
+    void *outputContext;
+    uint64_t outputRejected;
+    uint64_t outputQueued, outputApplied, outputQueueDropped;
     /** Last host COMMAND_SET_SENSOR_ENABLED value; logged on the media thread
      * by IHS_HIDSDLInjectSensor so a receive-thread log cannot deadlock. */
     bool sensorEnableRequested;
@@ -66,8 +70,9 @@ typedef struct IHS_HIDDeviceSDL {
 } IHS_HIDDeviceSDL;
 
 /** Apply queued host device-write commands (rumble etc.). Must be called
- * with the device lock HELD, from the flush thread only. */
+ * with the device lock HELD, from the SDL/media thread only. */
 void IHS_HIDDeviceSDLApplyPendingWrites(IHS_HIDDeviceSDL *sdl);
+void IHS_HIDProviderSDLConfigureOutput(IHS_HIDProvider *provider, IHS_HIDDeviceSDL *device);
 
 #define IHS_HID_SDL_BASE_REPORT_LEN ((size_t) sizeof(IHS_HIDStateSDL))
 #define IHS_HID_SDL_WIRE_REPORT_MAX 72U

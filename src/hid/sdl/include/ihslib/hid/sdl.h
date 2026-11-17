@@ -48,6 +48,14 @@ typedef struct IHS_HIDProviderSDLJoystickIDMapping {
     SDL_JoystickID (*instanceId)(int index, void *context);
 
     SDL_Gamepad *(*controller)(int index, void *context);
+
+    /** Optional native output handler for 0x01 rumble and 0x0d effects.
+     * Invoked ONLY by ApplyPendingWrites on the SDL/media thread. The buffer
+     * is borrowed until return; received_ns uses CLOCK_MONOTONIC. Configuration
+     * writes continue through SDL. Set before opening devices; NULL uses SDL.
+     * Negative return reports rejection; never retried through another backend. */
+    int (*output)(SDL_JoystickID joystickId, const uint8_t *command, size_t size,
+                  uint64_t received_ns, void *context);
 } IHS_HIDProviderSDLDeviceList;
 
 IHS_HIDProvider *IHS_HIDProviderSDLCreateManaged();
@@ -136,3 +144,9 @@ bool IHS_HIDFlushSDLGameControllers(IHS_Session *session);
  * thread that owns SDL (the SDL_PollEvent thread) — never from the session
  * receive thread, and not needed on the flush thread. */
 void IHS_HIDSDLApplyPendingWrites(IHS_Session *session);
+
+/** Counters describe local acceptance/application, never an actuator ACK. */
+typedef struct IHS_HIDSDLOutputStats {
+    uint64_t queued, applied, rejected, queueDropped, pendingBytes;
+} IHS_HIDSDLOutputStats;
+void IHS_HIDSDLGetOutputStats(IHS_Session *session, IHS_HIDSDLOutputStats *out);

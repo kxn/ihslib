@@ -75,13 +75,13 @@ static const IHS_HIDDeviceClass DeviceClass = {
 };
 
 IHS_HIDDevice *IHS_HIDDeviceSDLCreate(IHS_HIDProvider *provider, SDL_Gamepad *controller, bool managed) {
-    (void) provider;
     IHS_HIDDeviceSDL *device = (IHS_HIDDeviceSDL *) IHS_HIDDeviceCreate(&DeviceClass);
     SDL_Joystick *joystick = SDL_GetGamepadJoystick(controller);
     device->controllerManaged = managed;
     device->instanceId = SDL_GetJoystickID(joystick);
     device->controller = controller;
     device->playerIndex = -1;
+    IHS_HIDProviderSDLConfigureOutput(provider, device);
     return (IHS_HIDDevice *) device;
 }
 

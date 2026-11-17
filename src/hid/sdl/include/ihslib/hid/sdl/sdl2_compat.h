@@ -47,6 +47,7 @@ typedef SDL_ControllerSensorEvent SDL_GamepadSensorEvent;
 #define SDL_CloseGamepad SDL_GameControllerClose
 #define SDL_RumbleGamepad SDL_GameControllerRumble
 #define SDL_RumbleGamepadTriggers SDL_GameControllerRumbleTriggers
+#define SDL_SendGamepadEffect(gamepad, data, size) (SDL_GameControllerSendEffect(gamepad, data, size) == 0)
 #define SDL_SetGamepadLED SDL_GameControllerSetLED
 #define SDL_SetGamepadSensorEnabled SDL_GameControllerSetSensorEnabled
 #define SDL_GetJoystickID SDL_JoystickInstanceID

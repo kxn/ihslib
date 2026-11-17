@@ -127,6 +127,14 @@ static IHS_HIDDevice *ProviderOpenDevice(IHS_HIDProvider *provider, const char *
     return IHS_HIDDeviceSDLCreate(provider, controller, sdlProvider->managed);
 }
 
+void IHS_HIDProviderSDLConfigureOutput(IHS_HIDProvider *provider, IHS_HIDDeviceSDL *device) {
+    HIDProviderSDL *sdl = (HIDProviderSDL *)provider;
+    if (sdl && sdl->deviceList) {
+        device->output = sdl->deviceList->output;
+        device->outputContext = sdl->deviceListContext;
+    }
+}
+
 static bool ProviderHasChange(IHS_HIDProvider *provider) {
     (void) provider;
     return false;

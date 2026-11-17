@@ -25,6 +25,7 @@
 
 #include "sdl_hid_common.h"
 #include "session/session_pri.h"
+#include <time.h>
 
 typedef enum WriteCommandType {
     COMMAND_RUMBLE = 0x01,
@@ -34,6 +35,7 @@ typedef enum WriteCommandType {
     COMMAND_SET_REQUESTED_REPORT_VERSION = 0x09,
     COMMAND_SET_PS5_RUMBLE = 0x0a,
     COMMAND_SET_PLAYER_INDEX = 0x0b,
+    COMMAND_SEND_EFFECT = 0x0d,
 } WriteCommandType;
 
 typedef struct __attribute__((__packed__)) {
@@ -61,11 +63,27 @@ typedef struct __attribute__((__packed__)) {
 
 _Static_assert(sizeof(ByteCommand) * 8 == 16, "");
 
+/* Official CHIDDeviceSDLGamepad::Write accepts a 69-byte effect envelope:
+ * 0x0d, little-endian u32 length, 64 payload bytes. See OFFICIAL_INPUT_RE §22.
+ * Validate before queueing; never trust the embedded length at drain time. */
+typedef struct __attribute__((__packed__)) {
+    uint8_t type;
+    uint8_t length[4];
+    uint8_t data[64];
+} EffectCommand;
+_Static_assert(sizeof(EffectCommand) == 69, "effect wire size");
+
+static uint32_t EffectLength(const EffectCommand *effect) {
+    return (uint32_t)effect->length[0] | (uint32_t)effect->length[1] << 8 |
+           (uint32_t)effect->length[2] << 16 | (uint32_t)effect->length[3] << 24;
+}
+
 typedef union __attribute__((__packed__))  WriteCommand {
     WriteCommandType type: 8;
     RumbleCommand rumble;
     LEDCommand led;
     ByteCommand byte;
+    EffectCommand effect;
 } WriteCommand;
 
 static void HandleRumble(IHS_HIDDeviceSDL *sdl, const RumbleCommand *rumble);
@@ -92,6 +110,8 @@ static size_t WriteCommandLength(uint8_t type) {
         case COMMAND_SET_PS5_RUMBLE:
         case COMMAND_SET_PLAYER_INDEX:
             return sizeof(ByteCommand);
+        case COMMAND_SEND_EFFECT:
+            return sizeof(EffectCommand);
         default:
             return 0;
     }
@@ -102,36 +122,64 @@ static size_t WriteCommandLength(uint8_t type) {
  * applied by IHS_HIDDeviceSDLApplyPendingWrites on the media thread, alongside SDL event processing. */
 int IHS_HIDDeviceSDLWrite(IHS_HIDDevice *device, const uint8_t *data, size_t dataLen) {
     IHS_HIDDeviceSDL *sdl = (IHS_HIDDeviceSDL *) device;
-    if (dataLen < sizeof(uint8_t)) {
+    if (!data || dataLen < sizeof(uint8_t)) {
         return -1;
     }
     size_t commandLen = WriteCommandLength(data[0]);
     if (commandLen == 0 || dataLen < commandLen) {
         return -1;
     }
+    if (data[0] == COMMAND_SEND_EFFECT &&
+        (dataLen != sizeof(EffectCommand) ||
+         EffectLength((const EffectCommand *)data) > 64)) {
+        return -1;
+    }
     IHS_HIDDeviceLock(device);
-    if (sdl->pendingWrites.size + commandLen > 512) {
+    if (sdl->pendingWrites.size + sizeof(uint64_t) + commandLen > 512) {
+        ++sdl->outputQueueDropped;
         IHS_HIDDeviceUnlock(device);
-        IHS_HIDDeviceLog(device, IHS_LogLevelWarn, "HID.SDL",
-                         "Write queue overflow, dropping command %u", data[0]);
         return -1; /* No command was accepted, including configuration writes. */
     }
+    struct timespec now;
+    uint64_t received = clock_gettime(CLOCK_MONOTONIC, &now) == 0
+        ? (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec : 0;
+    IHS_BufferAppendMem(&sdl->pendingWrites, (const uint8_t *)&received, sizeof(received));
     IHS_BufferAppendMem(&sdl->pendingWrites, data, commandLen);
+    ++sdl->outputQueued;
     IHS_HIDDeviceUnlock(device);
     return 0;
 }
 
 /* Called with the device lock HELD (media thread): apply queued commands. */
 void IHS_HIDDeviceSDLApplyPendingWrites(IHS_HIDDeviceSDL *sdl) {
-    while (sdl->pendingWrites.size >= sizeof(uint8_t)) {
-        const uint8_t *data = IHS_BufferPointer(&sdl->pendingWrites);
+    while (sdl->pendingWrites.size >= sizeof(uint64_t) + 1) {
+        const uint8_t *record = IHS_BufferPointer(&sdl->pendingWrites);
+        uint64_t received;
+        memcpy(&received, record, sizeof(received));
+        const uint8_t *data = record + sizeof(received);
         size_t commandLen = WriteCommandLength(data[0]);
-        if (commandLen == 0 || sdl->pendingWrites.size < commandLen) {
+        if (commandLen == 0 || sdl->pendingWrites.size < sizeof(received) + commandLen) {
             IHS_BufferClear(&sdl->pendingWrites, false); /* corrupt tail */
             return;
         }
         const WriteCommand *command = (const WriteCommand *) data;
+        ++sdl->outputApplied;
+        if (sdl->output && (data[0] == COMMAND_RUMBLE || data[0] == COMMAND_SEND_EFFECT)) {
+            if (sdl->output(sdl->instanceId, data, commandLen, received,
+                            sdl->outputContext) < 0)
+                ++sdl->outputRejected;
+            IHS_BufferOffsetBy(&sdl->pendingWrites, (int)(sizeof(received) + commandLen));
+            continue;
+        }
         switch (command->type) {
+            case COMMAND_SEND_EFFECT: {
+                uint32_t length = EffectLength(&command->effect);
+                if (length <= sizeof(command->effect.data)) {
+                    if (!SDL_SendGamepadEffect(sdl->controller, command->effect.data, (int)length))
+                        ++sdl->outputRejected;
+                }
+                break;
+            }
             case COMMAND_RUMBLE: {
                 HandleRumble(sdl, &command->rumble);
                 break;
@@ -163,7 +211,7 @@ void IHS_HIDDeviceSDLApplyPendingWrites(IHS_HIDDeviceSDL *sdl) {
             default:
                 break;
         }
-        IHS_BufferOffsetBy(&sdl->pendingWrites, (int) commandLen);
+        IHS_BufferOffsetBy(&sdl->pendingWrites, (int)(sizeof(received) + commandLen));
     }
     IHS_BufferClear(&sdl->pendingWrites, false);
 }

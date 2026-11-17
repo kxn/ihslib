@@ -445,3 +445,27 @@ void IHS_HIDSDLApplyPendingWrites(IHS_Session *session) {
     }
     free(snapshot);
 }
+
+void IHS_HIDSDLGetOutputStats(IHS_Session *session, IHS_HIDSDLOutputStats *out) {
+    memset(out, 0, sizeof(*out));
+    if (!session || !session->hidManager)
+        return;
+    size_t count;
+    IHS_HIDManagedDevice **snapshot = IHS_HIDManagerSnapshotOpenDevices(session->hidManager, &count);
+    for (size_t i = 0; i < count; ++i) {
+        IHS_HIDManagedDevice *managed = snapshot[i];
+        if (!IHS_HIDDeviceIsSDL(managed->device))
+            continue;
+        IHS_HIDDeviceLock(managed->device);
+        if (!managed->closed) {
+            IHS_HIDDeviceSDL *sdl = (IHS_HIDDeviceSDL *)managed->device;
+            out->queued += sdl->outputQueued;
+            out->applied += sdl->outputApplied;
+            out->rejected += sdl->outputRejected;
+            out->queueDropped += sdl->outputQueueDropped;
+            out->pendingBytes += sdl->pendingWrites.size;
+        }
+        IHS_HIDDeviceUnlock(managed->device);
+    }
+    free(snapshot);
+}

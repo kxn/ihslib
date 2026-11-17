@@ -333,9 +333,9 @@ static void HandleDeviceWrite(IHS_SessionChannel *channel, IHS_HIDManager *manag
                        message->request_id, cmd->device);
         return;
     }
-    int ret = IHS_HIDDeviceWrite(managed->device, cmd->data.data, cmd->data.len);
-    IHS_SessionLog(channel->session, IHS_LogLevelInfo, "HID", "Message %u: Write(id=%u) => %d", message->request_id,
-                   cmd->device, ret);
+    /* High-rate effects must not backpressure input/rendering through logs.
+     * SDL output acceptance, queue loss and rejection are queryable counters. */
+    IHS_HIDDeviceWrite(managed->device, cmd->data.data, cmd->data.len);
 }
 
 static void HandleDeviceRead(IHS_SessionChannel *channel, IHS_HIDManager *manager, const CHIDMessageToRemote *message) {
