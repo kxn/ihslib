@@ -160,6 +160,12 @@ struct IHS_HIDDeviceClass {
      */
     int (*poll)(IHS_HIDDevice *device);
 
+    /** Optional write path with CLOCK_MONOTONIC entry time captured before
+     * waiting for device ownership. Invoked under the same lock as write.
+     * When provided, takes precedence over write. Recompile class providers. */
+    int (*writeTimed)(IHS_HIDDevice *device, const uint8_t *data, size_t dataLen,
+                      uint64_t received_ns);
+
 };
 
 struct IHS_HIDProvider {

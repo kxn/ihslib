@@ -25,7 +25,6 @@
 
 #include "sdl_hid_common.h"
 #include "session/session_pri.h"
-#include <time.h>
 
 typedef enum WriteCommandType {
     COMMAND_RUMBLE = 0x01,
@@ -120,7 +119,8 @@ static size_t WriteCommandLength(uint8_t type) {
 /* Called on the session receive thread: queue ONLY. SDL gamepad calls here
  * deadlock against SDL_PollEvent on the media thread; the commands are
  * applied by IHS_HIDDeviceSDLApplyPendingWrites on the media thread, alongside SDL event processing. */
-int IHS_HIDDeviceSDLWrite(IHS_HIDDevice *device, const uint8_t *data, size_t dataLen) {
+int IHS_HIDDeviceSDLWrite(IHS_HIDDevice *device, const uint8_t *data, size_t dataLen,
+                         uint64_t received) {
     IHS_HIDDeviceSDL *sdl = (IHS_HIDDeviceSDL *) device;
     if (!data || dataLen < sizeof(uint8_t)) {
         return -1;
@@ -134,15 +134,14 @@ int IHS_HIDDeviceSDLWrite(IHS_HIDDevice *device, const uint8_t *data, size_t dat
          EffectLength((const EffectCommand *)data) > 64)) {
         return -1;
     }
+    /* The generic entry captures received before DeviceBegin waits for the
+     * owner-held lock, retaining drain/activation latency in the evidence. */
     IHS_HIDDeviceLock(device);
     if (sdl->pendingWrites.size + sizeof(uint64_t) + commandLen > 512) {
         ++sdl->outputQueueDropped;
         IHS_HIDDeviceUnlock(device);
         return -1; /* No command was accepted, including configuration writes. */
     }
-    struct timespec now;
-    uint64_t received = clock_gettime(CLOCK_MONOTONIC, &now) == 0
-        ? (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec : 0;
     IHS_BufferAppendMem(&sdl->pendingWrites, (const uint8_t *)&received, sizeof(received));
     IHS_BufferAppendMem(&sdl->pendingWrites, data, commandLen);
     ++sdl->outputQueued;

@@ -23,6 +23,7 @@
  *
  */
 #include <assert.h>
+#include <time.h>
 #include "device.h"
 #include "manager.h"
 
@@ -68,8 +69,17 @@ static int DeviceEnd(IHS_HIDDevice *device, int result) {
 }
 
 int IHS_HIDDeviceWrite(IHS_HIDDevice *device, const uint8_t *data, size_t dataLen) {
-    assert(device->cls->write != NULL);
+    assert(device->cls->write != NULL || device->cls->writeTimed != NULL);
+    uint64_t received = 0;
+    if (device->cls->writeTimed) {
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+            return -1;
+        received = (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
+    }
     if (!DeviceBegin(device)) return -1;
+    if (device->cls->writeTimed)
+        return DeviceEnd(device, device->cls->writeTimed(device, data, dataLen, received));
     return DeviceEnd(device, device->cls->write(device, data, dataLen));
 }
 

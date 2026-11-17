@@ -150,7 +150,8 @@ IHS_HIDDevice *IHS_HIDDeviceSDLCreate(IHS_HIDProvider *provider, SDL_Gamepad *co
 
 bool IHS_HIDDeviceIsSDL(const IHS_HIDDevice *device);
 
-int IHS_HIDDeviceSDLWrite(IHS_HIDDevice *device, const uint8_t *data, size_t dataLen);
+int IHS_HIDDeviceSDLWrite(IHS_HIDDevice *device, const uint8_t *data, size_t dataLen,
+                         uint64_t received_ns);
 
 int IHS_HIDDeviceSDLGetFeatureReport(IHS_HIDDevice *device, const uint8_t *reportNumber, size_t reportNumberLen,
                                      IHS_Buffer *dest, size_t length);

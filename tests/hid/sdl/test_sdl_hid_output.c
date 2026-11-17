@@ -1,8 +1,10 @@
 #include <SDL2/SDL.h>
 #include <assert.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include "ihslib/hid/sdl.h"
 #include "hid/device.h"
 #include "hid/manager.h"
@@ -19,6 +21,32 @@ typedef struct fixture {
     uint8_t copied[69];
     size_t copied_size;
 } fixture;
+#ifdef IHS_TEST_CLOCK_WRAP
+static _Thread_local bool watch_clock;
+static atomic_bool clock_seen;
+static uint64_t entry_ns;
+int __real_clock_gettime(clockid_t clock, struct timespec *t);
+int __wrap_clock_gettime(clockid_t clock, struct timespec *t) {
+    int result = __real_clock_gettime(clock, t);
+    if (!result && clock == CLOCK_MONOTONIC && watch_clock) {
+        entry_ns = (uint64_t)t->tv_sec * 1000000000ull + (uint64_t)t->tv_nsec;
+        atomic_store(&clock_seen, true);
+    }
+    return result;
+}
+typedef struct writer {
+    IHS_HIDDevice *device;
+    const uint8_t *command;
+    int result;
+} writer;
+static void *write_while_owner_locked(void *p) {
+    writer *w = p;
+    watch_clock = true;
+    w->result = IHS_HIDDeviceWrite(w->device, w->command, 69);
+    watch_clock = false;
+    return NULL;
+}
+#endif
 static int device_count(void *p) { (void)p; return 1; }
 static int device_index(SDL_JoystickID id, void *p) { return ((fixture *)p)->id == id ? 0 : -1; }
 static SDL_JoystickID device_id(int index, void *p) { (void)index; return ((fixture *)p)->id; }
@@ -100,6 +128,26 @@ static void check(bool native) {
     IHS_HIDSDLGetOutputStats(session, &stats);
     assert(stats.rejected == 1);
     assert(!native || !f.effects);
+#ifdef IHS_TEST_CLOCK_WRAP
+    if (native) {
+        f.reject = false;
+        atomic_store(&clock_seen, false);
+        writer w = {.device = managed->device, .command = command};
+        pthread_t receiver;
+        IHS_HIDDeviceLock(managed->device);
+        assert(pthread_create(&receiver, NULL, write_while_owner_locked, &w) == 0);
+        for (unsigned i = 0; i < 500 && !atomic_load(&clock_seen); ++i) {
+            struct timespec pause = {.tv_nsec = 1000000};
+            nanosleep(&pause, NULL);
+        }
+        bool before_unlock = atomic_load(&clock_seen);
+        IHS_HIDDeviceUnlock(managed->device);
+        pthread_join(receiver, NULL);
+        assert(before_unlock && w.result == 0);
+        IHS_HIDSDLApplyPendingWrites(session);
+        assert(f.previous_ns == entry_ns);
+    }
+#endif
     IHS_SessionDestroy(session);
     IHS_HIDProviderSDLDestroy(provider);
     SDL_GameControllerClose(f.controller);
