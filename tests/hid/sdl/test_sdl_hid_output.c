@@ -10,6 +10,8 @@
 #include "hid/manager.h"
 #include "hid/provider.h"
 #include "test_session.h"
+#include "ihs_enumeration.h"
+#include "session/channels/ch_control.h"
 
 typedef struct fixture {
     SDL_GameController *controller;
@@ -17,11 +19,37 @@ typedef struct fixture {
     pthread_t owner;
     unsigned native_calls, effects;
     bool reject;
+    bool native_available;
     uint64_t previous_ns;
     uint8_t copied[69];
     size_t copied_size;
 } fixture;
 #ifdef IHS_TEST_CLOCK_WRAP
+static uint32_t advertised_caps;
+static uint16_t expected_vendor, expected_product;
+static unsigned advertisements;
+bool __real_IHS_SessionChannelControlSend(IHS_SessionChannel *, EStreamControlMessage,
+                                          const ProtobufCMessage *, int32_t);
+bool __wrap_IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamControlMessage type,
+                                          const ProtobufCMessage *message, int32_t packet_id) {
+    if (type != k_EStreamControlRemoteHID)
+        return __real_IHS_SessionChannelControlSend(channel, type, message, packet_id);
+    const CRemoteHIDMsg *wrapped = (const void *)message;
+    CHIDMessageFromRemote *hid = chidmessage_from_remote__unpack(NULL, wrapped->data.len, wrapped->data.data);
+    assert(hid);
+    if (hid->command_case != CHIDMESSAGE_FROM_REMOTE__COMMAND_UPDATE_DEVICE_LIST) {
+        chidmessage_from_remote__free_unpacked(hid, NULL);
+        return __real_IHS_SessionChannelControlSend(channel, type, message, packet_id);
+    }
+    assert(hid->update_device_list->n_devices == 1);
+    const CHIDDeviceInfo *device = hid->update_device_list->devices[0];
+    assert(device->is_generic_gamepad && device->vendor_id == expected_vendor &&
+           device->product_id == expected_product);
+    advertised_caps = device->caps_bits;
+    ++advertisements;
+    chidmessage_from_remote__free_unpacked(hid, NULL);
+    return true;
+}
 static _Thread_local bool watch_clock;
 static atomic_bool clock_seen;
 static uint64_t entry_ns;
@@ -53,6 +81,34 @@ static SDL_JoystickID device_id(int index, void *p) { (void)index; return ((fixt
 static SDL_GameController *device_controller(int index, void *p) {
     return index == 0 ? ((fixture *)p)->controller : NULL;
 }
+static bool native_capability(SDL_JoystickID id, void *p) {
+    fixture *f = p;
+    assert(id == f->id);
+    return f->native_available;
+}
+static void check_capability(IHS_HIDProvider *provider, IHS_Session *session, bool expected) {
+    IHS_Enumeration *enumeration = IHS_HIDProviderEnumerateDevices(provider);
+    IHS_HIDDeviceInfo info = {.native_haptic_pulse = !expected};
+    IHS_HIDProviderDeviceInfo(provider, enumeration, &info);
+    assert(info.native_haptic_pulse == expected);
+    IHS_EnumerationFree(enumeration);
+#ifdef IHS_TEST_CLOCK_WRAP
+    unsigned before = advertisements;
+    expected_vendor = info.vendor_id;
+    expected_product = info.product_id;
+    int previous_state = session->state.connectionState;
+    bool previous_input = session->state.streamingInput;
+    session->state.connectionState = IHS_SessionConnectionStateConnected;
+    session->state.streamingInput = true;
+    assert(IHS_SessionHIDNotifyDeviceChange(session));
+    assert(advertisements == before + 1);
+    assert(advertised_caps == (0x8343ffu | (expected ? 0x2000u : 0)));
+    session->state.connectionState = previous_state;
+    session->state.streamingInput = previous_input;
+#else
+    (void)session;
+#endif
+}
 static int native_output(SDL_JoystickID id, const uint8_t *bytes, size_t size,
                           uint64_t received, void *p) {
     fixture *f = p;
@@ -78,6 +134,7 @@ static void check(bool native) {
     fixture f = {.owner = pthread_self()};
     SDL_VirtualJoystickDesc desc = {.version = SDL_VIRTUAL_JOYSTICK_DESC_VERSION,
         .type = SDL_JOYSTICK_TYPE_GAMECONTROLLER, .naxes = 6, .nbuttons = 16,
+        .vendor_id = 0x057e, .product_id = 0x2009,
         .name = "IHS output fixture", .userdata = &f, .SendEffect = effect};
     int index = SDL_JoystickAttachVirtualEx(&desc);
     assert(index >= 0);
@@ -90,6 +147,11 @@ static void check(bool native) {
     IHS_HIDProvider *provider = IHS_HIDProviderSDLCreateUnmanaged(&list, &f);
     IHS_Session *session = IHS_TestSessionCreate();
     IHS_SessionHIDAddProvider(session, provider);
+    check_capability(provider, session, false); /* output alone is insufficient */
+    list.supportsNativeHaptics = native_capability;
+    check_capability(provider, session, false); /* unavailable backend */
+    f.native_available = true;
+    check_capability(provider, session, native); /* requires callback AND output */
     char path[48];
     snprintf(path, sizeof(path), "sdl://%d", f.id);
     IHS_HIDManagedDevice *managed = IHS_HIDManagerOpenDevice(session->hidManager, path);

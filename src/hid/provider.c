@@ -63,5 +63,6 @@ IHS_Enumeration *IHS_HIDProviderEnumerateDevices(IHS_HIDProvider *provider) {
 
 void IHS_HIDProviderDeviceInfo(IHS_HIDProvider *provider, IHS_Enumeration *enumeration,
                                IHS_HIDDeviceInfo *info) {
+    info->native_haptic_pulse = false;
     provider->cls->deviceInfo(provider, enumeration, info);
 }

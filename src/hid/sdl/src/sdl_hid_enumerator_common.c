@@ -27,6 +27,7 @@
 
 
 bool IHS_HIDDeviceSDLEnumerationGetInfo(IHS_Enumeration *enumeration, IHS_HIDDeviceInfo *info) {
+    info->native_haptic_pulse = false;
     const IHS_HIDDeviceSDLEnumerationClass *cls = (const IHS_HIDDeviceSDLEnumerationClass *) enumeration->cls;
     return cls->getInfo(enumeration, info);
 }

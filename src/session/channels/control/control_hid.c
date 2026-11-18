@@ -186,8 +186,11 @@ bool IHS_SessionHIDNotifyDeviceChange(IHS_Session *session) {
                 IHS_HIDDeviceInfo hid = { NULL };
                 IHS_HIDProviderDeviceInfo(provider, e, &hid);
                 InfoFromHID(&allDevices[numAllDevices], &hid);
-                IHS_SessionLog(session, IHS_LogLevelDebug, "HID", "Device found: %s, id=%04x:%04x, name=%s", hid.path,
-                               hid.vendor_id, hid.product_id, hid.product_string);
+                IHS_SessionLog(session, IHS_LogLevelDebug, "HID",
+                               "Device found: %s, id=%04x:%04x, name=%s caps=%08x nativePulse=%u", hid.path,
+                               hid.vendor_id, hid.product_id, hid.product_string,
+                               (unsigned)allDevices[numAllDevices].caps_bits,
+                               hid.native_haptic_pulse ? 1U : 0U);
                 numAllDevices++;
             }
         }
@@ -613,5 +616,9 @@ static void InfoFromHID(CHIDDeviceInfo *info, const IHS_HIDDeviceInfo *hid) {
      * sample presence/freshness is a separate RAW report contract (section 21). */
     capsBits |= IHS_HID_CAP_UNK_1;
 #endif
+    /* Backend opt-in, not an inference from Nintendo identity or SDL rumble.
+     * Original host config/pulse gate: OFFICIAL_INPUT_RE sections 22.10-22.12. */
+    if (hid->native_haptic_pulse)
+        capsBits |= IHS_HID_CAP_HAPTIC_PULSE;
     PROTOBUF_C_P_SET_VALUE(info, caps_bits, capsBits);
 }

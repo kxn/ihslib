@@ -56,6 +56,10 @@ typedef struct IHS_HIDProviderSDLJoystickIDMapping {
      * Negative return reports rejection; never retried through another backend. */
     int (*output)(SDL_JoystickID joystickId, const uint8_t *command, size_t size,
                   uint64_t received_ns, void *context);
+    /** Optional thread-safe snapshot query. Only used with output != NULL;
+     * must not call SDL/HID or activate devices on the enumeration thread.
+     * True advertises the host legacy pulse capability, not every haptic API. */
+    bool (*supportsNativeHaptics)(SDL_JoystickID joystickId, void *context);
 } IHS_HIDProviderSDLDeviceList;
 
 IHS_HIDProvider *IHS_HIDProviderSDLCreateManaged();

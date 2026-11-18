@@ -162,5 +162,7 @@ static bool EnumerationGetInfo(IHS_Enumeration *enumeration, IHS_HIDDeviceInfo *
 #endif
     info->path = gce->temp.path;
     info->product_string = gce->temp.product_string;
+    info->native_haptic_pulse = ue->list->output && ue->list->supportsNativeHaptics &&
+        ue->list->supportsNativeHaptics(instanceId, ue->listContext);
     return true;
 }

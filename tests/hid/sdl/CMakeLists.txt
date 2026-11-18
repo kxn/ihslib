@@ -21,4 +21,5 @@ target_link_libraries("${IHSTEST_TARGET}" PRIVATE ihslib-hid-sdl ihs-test-sessio
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_compile_definitions("${IHSTEST_TARGET}" PRIVATE IHS_TEST_CLOCK_WRAP=1)
     target_link_options("${IHSTEST_TARGET}" PRIVATE "-Wl,--wrap=clock_gettime")
+    target_link_options("${IHSTEST_TARGET}" PRIVATE "-Wl,--wrap=IHS_SessionChannelControlSend")
 endif()

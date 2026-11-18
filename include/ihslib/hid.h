@@ -56,6 +56,9 @@ typedef enum IHS_HIDDeviceCaps {
     IHS_HID_CAP_PADDLE_1 = 0x00000400 /*Paddle 1*/,
     IHS_HID_CAP_UNK_1 = 0x00000800 /*Gamepad uses this: PS4, PS5*/,
     IHS_HID_CAP_UNK_2 = 0x00001000 /*Gamepad uses this: PS4, PS5*/,
+    /* Enables the host's legacy pulse gate together with its haptics preference.
+     * Does not promise arbitrary waveforms or SimpleHapticEvent support. */
+    IHS_HID_CAP_HAPTIC_PULSE = 0x00002000,
     IHS_HID_CAP_XINPUT_OR_HIDAPI = 0x00004000 /*XInput and HIDAPI*/,
     IHS_HID_CAP_UNK_3 = 0x00010000 /*Gamepad uses this: PS4, PS5, Xbox Elite*/,
     IHS_HID_CAP_UNK_4 = 0x00020000 /*Gamepad uses this: PS4, PS5, Xbox Elite*/,
@@ -78,6 +81,9 @@ typedef struct IHS_HIDDeviceInfo {
     /** Device Product ID */
     uint16_t product_id;
     uint16_t product_version;
+    /** Explicit provider/backend support; false for ordinary SDL rumble.
+     * Providers and callers must be rebuilt with this extended structure. */
+    bool native_haptic_pulse;
 } IHS_HIDDeviceInfo;
 
 typedef struct IHS_HIDDeviceClass IHS_HIDDeviceClass;
