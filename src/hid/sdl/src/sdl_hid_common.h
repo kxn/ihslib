@@ -38,6 +38,8 @@
 #include "sdl_hid_report.h"
 #include "hid/manager.h"
 
+#define IHS_HID_SDL_OUTPUT_QUEUE_BYTES 8192u
+
 typedef struct IHS_HIDDeviceSDL {
     IHS_HIDDevice base;
     /**
@@ -60,7 +62,9 @@ typedef struct IHS_HIDDeviceSDL {
      * SDL_PollEvent on the media thread — verified on hardware). */
     IHS_Buffer pendingWrites;
     int (*output)(SDL_JoystickID, const uint8_t *, size_t, uint64_t, void *);
+    void (*outputDiscontinuity)(SDL_JoystickID, void *);
     void *outputContext;
+    bool outputGapPending;
     uint64_t outputRejected;
     uint64_t outputQueued, outputApplied, outputQueueDropped;
     /** Last host COMMAND_SET_SENSOR_ENABLED value; logged on the media thread

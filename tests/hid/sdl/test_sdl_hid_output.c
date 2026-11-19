@@ -17,7 +17,11 @@ typedef struct fixture {
     SDL_GameController *controller;
     SDL_JoystickID id;
     pthread_t owner;
-    unsigned native_calls, effects;
+    unsigned native_calls, effects, triggers, discontinuities;
+    unsigned prefix_received, expected_prefix;
+    bool check_prefix;
+    uint8_t events[512];
+    unsigned event_count;
     bool reject;
     bool native_available;
     uint64_t previous_ns;
@@ -119,7 +123,30 @@ static int native_output(SDL_JoystickID id, const uint8_t *bytes, size_t size,
     memcpy(f->copied, bytes, size);
     f->copied_size = size;
     ++f->native_calls;
+    assert(f->event_count < sizeof(f->events));
+    f->events[f->event_count++] = bytes[0];
+    if (f->check_prefix) {
+        assert(bytes[0] == 13 && size == 69 && bytes[6] == f->prefix_received);
+        ++f->prefix_received;
+    }
     return f->reject ? -1 : 0;
+}
+static void output_gap(SDL_JoystickID id, void *p) {
+    fixture *f = p;
+    assert(id == f->id && pthread_equal(f->owner, pthread_self()));
+    assert(f->check_prefix && f->prefix_received == f->expected_prefix);
+    assert(f->event_count < sizeof(f->events));
+    f->events[f->event_count++] = 0xff;
+    ++f->discontinuities;
+}
+static int rumble_triggers(void *p, Uint16 left, Uint16 right) {
+    fixture *f = p;
+    assert(pthread_equal(f->owner, pthread_self()));
+    if (!left && !right)
+        return 0; /* SDL stops the virtual actuator when closing the device. */
+    assert(left == 0x1234 && right == 0xabcd);
+    ++f->triggers;
+    return 0;
 }
 static int effect(void *p, const void *bytes, int size) {
     fixture *f = p;
@@ -128,14 +155,19 @@ static int effect(void *p, const void *bytes, int size) {
     memcpy(f->copied, bytes, (size_t)size);
     f->copied_size = (size_t)size;
     ++f->effects;
+    if (f->check_prefix) {
+        assert(size == 10 && ((const uint8_t *)bytes)[1] == f->prefix_received);
+        ++f->prefix_received;
+    }
     return f->reject ? -1 : 0;
 }
-static void check(bool native) {
+static void check(bool native, bool notify_gap) {
     fixture f = {.owner = pthread_self()};
     SDL_VirtualJoystickDesc desc = {.version = SDL_VIRTUAL_JOYSTICK_DESC_VERSION,
         .type = SDL_JOYSTICK_TYPE_GAMECONTROLLER, .naxes = 6, .nbuttons = 16,
         .vendor_id = 0x057e, .product_id = 0x2009,
-        .name = "IHS output fixture", .userdata = &f, .SendEffect = effect};
+        .name = "IHS output fixture", .userdata = &f, .SendEffect = effect,
+        .RumbleTriggers = rumble_triggers};
     int index = SDL_JoystickAttachVirtualEx(&desc);
     assert(index >= 0);
     f.controller = SDL_GameControllerOpen(index);
@@ -143,7 +175,8 @@ static void check(bool native) {
     f.id = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(f.controller));
     IHS_HIDProviderSDLDeviceList list = {.count = device_count, .index = device_index,
         .instanceId = device_id, .controller = device_controller,
-        .output = native ? native_output : NULL};
+        .output = native ? native_output : NULL,
+        .outputDiscontinuity = notify_gap ? output_gap : NULL};
     IHS_HIDProvider *provider = IHS_HIDProviderSDLCreateUnmanaged(&list, &f);
     IHS_Session *session = IHS_TestSessionCreate();
     IHS_SessionHIDAddProvider(session, provider);
@@ -167,6 +200,17 @@ static void check(bool native) {
     assert(native ? f.native_calls == 1 && !f.effects : f.effects == 1 && !f.native_calls);
     assert(f.copied_size == (native ? 69 : 10));
     assert(memcmp(f.copied, original + (native ? 0 : 5), f.copied_size) == 0);
+    const uint8_t triggers[21] = {6, 0x34, 0x12, 0xcd, 0xab, 10};
+    assert(IHS_HIDDeviceWrite(managed->device, triggers, sizeof(triggers)) == 0);
+    assert(!f.triggers && f.native_calls == (native ? 1u : 0u));
+    IHS_HIDSDLApplyPendingWrites(session);
+    if (native) {
+        assert(f.native_calls == 2 && !f.triggers && !f.effects);
+        assert(f.copied_size == 9 && !memcmp(f.copied, triggers, 9));
+        assert(f.events[1] == 6);
+    } else {
+        assert(f.triggers == 1 && !f.native_calls);
+    }
     memcpy(command, original, 69);
     assert(IHS_HIDDeviceWrite(managed->device, command, 68) == -1);
     command[1] = 65;
@@ -175,18 +219,44 @@ static void check(bool native) {
     assert(IHS_HIDDeviceWrite(managed->device, command, 69) == -1);
     memcpy(command, original, 69);
     unsigned accepted = 0;
-    while (IHS_HIDDeviceWrite(managed->device, command, 69) == 0)
+    f.check_prefix = true;
+    for (;;) {
+        command[6] = (uint8_t)accepted;
+        if (IHS_HIDDeviceWrite(managed->device, command, 69) < 0)
+            break;
         ++accepted;
-    assert(accepted && accepted < 8);
+    }
+    assert(accepted == 8192u / (69u + sizeof(uint64_t)));
+    f.expected_prefix = accepted;
+    assert(f.prefix_received == 0 && f.discontinuities == 0);
     IHS_HIDSDLOutputStats stats;
     IHS_HIDSDLGetOutputStats(session, &stats);
-    assert(stats.queueDropped == 1 && stats.pendingBytes);
+    assert(stats.queueDropped == 1 && stats.pendingBytes == accepted * (69u + sizeof(uint64_t)));
+    /* A small configuration write still fits after the rejected large write.
+     * Stateful backends must reject it until the owner observes the gap;
+     * callers without a gap callback retain their existing SDL behavior. */
+    const uint8_t player[2] = {0x0b, 1};
+    assert(IHS_HIDDeviceWrite(managed->device, player, sizeof(player)) == (notify_gap ? -1 : 0));
     IHS_HIDSDLApplyPendingWrites(session);
+    assert(f.prefix_received == accepted);
+    assert(f.discontinuities == (notify_gap ? 1u : 0u));
+    if (notify_gap)
+        assert(f.events[f.event_count - 1] == 0xff);
+    else
+        assert(SDL_GameControllerGetPlayerIndex(f.controller) == 1);
+    f.check_prefix = false;
     IHS_HIDSDLGetOutputStats(session, &stats);
-    assert(stats.queued == accepted + 1 && stats.applied == stats.queued && !stats.pendingBytes);
+    assert(stats.queued == accepted + 2 + (notify_gap ? 0u : 1u) &&
+           stats.applied == stats.queued && !stats.pendingBytes);
+    assert(stats.queueDropped == (notify_gap ? 2u : 1u));
+    IHS_HIDSDLApplyPendingWrites(session);
+    assert(f.discontinuities == (notify_gap ? 1u : 0u)); /* gap is consumed once */
     f.reject = true;
+    unsigned events_before = f.event_count;
     assert(IHS_HIDDeviceWrite(managed->device, command, 69) == 0);
     IHS_HIDSDLApplyPendingWrites(session);
+    if (native)
+        assert(f.event_count == events_before + 1 && f.events[events_before] == 13);
     IHS_HIDSDLGetOutputStats(session, &stats);
     assert(stats.rejected == 1);
     assert(!native || !f.effects);
@@ -218,9 +288,10 @@ static void check(bool native) {
 int main(void) {
     IHS_Init();
     assert(SDL_Init(SDL_INIT_GAMECONTROLLER) == 0);
-    check(false);
-    check(true);
+    check(false, false);
+    check(true, false);
+    check(true, true);
     SDL_Quit();
     IHS_Quit();
-    puts("PASS effect envelope bounds, ownership, FIFO, native dispatch, SDL fallback and overflow");
+    puts("PASS effect bounds, ownership, FIFO, trigger routing, SDL fallback, 8192-byte bound and ordered gaps");
 }

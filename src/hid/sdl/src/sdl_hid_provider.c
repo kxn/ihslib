@@ -131,6 +131,7 @@ void IHS_HIDProviderSDLConfigureOutput(IHS_HIDProvider *provider, IHS_HIDDeviceS
     HIDProviderSDL *sdl = (HIDProviderSDL *)provider;
     if (sdl && sdl->deviceList) {
         device->output = sdl->deviceList->output;
+        device->outputDiscontinuity = sdl->deviceList->outputDiscontinuity;
         device->outputContext = sdl->deviceListContext;
     }
 }

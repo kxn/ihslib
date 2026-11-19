@@ -137,11 +137,20 @@ int IHS_HIDDeviceSDLWrite(IHS_HIDDevice *device, const uint8_t *data, size_t dat
     /* The generic entry captures received before DeviceBegin waits for the
      * owner-held lock, retaining drain/activation latency in the evidence. */
     IHS_HIDDeviceLock(device);
-    if (sdl->pendingWrites.size + sizeof(uint64_t) + commandLen > 512) {
+    if (sdl->outputGapPending ||
+        sdl->pendingWrites.size + sizeof(uint64_t) + commandLen > IHS_HID_SDL_OUTPUT_QUEUE_BYTES) {
         ++sdl->outputQueueDropped;
+        /* Preserve the accepted prefix. A stateful backend must observe the
+         * loss before it can see any later commands, including small writes
+         * that would otherwise fit in the queue's remaining bytes. */
+        if (sdl->outputDiscontinuity)
+            sdl->outputGapPending = true;
         IHS_HIDDeviceUnlock(device);
         return -1; /* No command was accepted, including configuration writes. */
     }
+    /* DeviceOpened uses the historical 1024-byte buffer limit. The explicit
+     * queue bound above permits a fixed, bounded growth up to 8192 bytes. */
+    sdl->pendingWrites.maxCapacity = IHS_HID_SDL_OUTPUT_QUEUE_BYTES;
     IHS_BufferAppendMem(&sdl->pendingWrites, (const uint8_t *)&received, sizeof(received));
     IHS_BufferAppendMem(&sdl->pendingWrites, data, commandLen);
     ++sdl->outputQueued;
@@ -159,11 +168,14 @@ void IHS_HIDDeviceSDLApplyPendingWrites(IHS_HIDDeviceSDL *sdl) {
         size_t commandLen = WriteCommandLength(data[0]);
         if (commandLen == 0 || sdl->pendingWrites.size < sizeof(received) + commandLen) {
             IHS_BufferClear(&sdl->pendingWrites, false); /* corrupt tail */
-            return;
+            if (sdl->outputDiscontinuity)
+                sdl->outputGapPending = true;
+            break;
         }
         const WriteCommand *command = (const WriteCommand *) data;
         ++sdl->outputApplied;
-        if (sdl->output && (data[0] == COMMAND_RUMBLE || data[0] == COMMAND_SEND_EFFECT)) {
+        if (sdl->output && (data[0] == COMMAND_RUMBLE || data[0] == COMMAND_RUMBLE_TRIGGERS ||
+                           data[0] == COMMAND_SEND_EFFECT)) {
             if (sdl->output(sdl->instanceId, data, commandLen, received,
                             sdl->outputContext) < 0)
                 ++sdl->outputRejected;
@@ -213,6 +225,10 @@ void IHS_HIDDeviceSDLApplyPendingWrites(IHS_HIDDeviceSDL *sdl) {
         IHS_BufferOffsetBy(&sdl->pendingWrites, (int)(sizeof(received) + commandLen));
     }
     IHS_BufferClear(&sdl->pendingWrites, false);
+    if (sdl->outputGapPending) {
+        sdl->outputDiscontinuity(sdl->instanceId, sdl->outputContext);
+        sdl->outputGapPending = false;
+    }
 }
 
 void HandleRumble(IHS_HIDDeviceSDL *sdl, const RumbleCommand *rumble) {

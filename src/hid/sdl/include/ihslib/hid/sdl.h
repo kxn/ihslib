@@ -49,7 +49,8 @@ typedef struct IHS_HIDProviderSDLJoystickIDMapping {
 
     SDL_Gamepad *(*controller)(int index, void *context);
 
-    /** Optional native output handler for 0x01 rumble and 0x0d effects.
+    /** Optional native output handler for 0x01 rumble, 0x06 trigger rumble
+     * and 0x0d effects.
      * Invoked ONLY by ApplyPendingWrites on the SDL/media thread. The buffer
      * is borrowed until return; received_ns uses CLOCK_MONOTONIC. Configuration
      * writes continue through SDL. Set before opening devices; NULL uses SDL.
@@ -60,6 +61,15 @@ typedef struct IHS_HIDProviderSDLJoystickIDMapping {
      * must not call SDL/HID or activate devices on the enumeration thread.
      * True advertises the host legacy pulse capability, not every haptic API. */
     bool (*supportsNativeHaptics)(SDL_JoystickID joystickId, void *context);
+    /** Optional loss notification for stateful output backends. Invoked on
+     * the SDL/media owner, under the device lock, after all accepted commands
+     * preceding a queue overflow have been applied. Until this returns, later
+     * writes are rejected so they cannot cross the missing-command boundary.
+     * The backend must stop/invalidate state that depends on the missing data;
+     * the callback must not re-enter this device's SDK operations. Set before
+     * opening devices. NULL preserves the SDL backend's overflow behavior.
+     * Rebuild providers/callers when extending this structure. */
+    void (*outputDiscontinuity)(SDL_JoystickID joystickId, void *context);
 } IHS_HIDProviderSDLDeviceList;
 
 IHS_HIDProvider *IHS_HIDProviderSDLCreateManaged();
