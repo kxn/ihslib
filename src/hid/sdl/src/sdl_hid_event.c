@@ -301,8 +301,20 @@ static bool HandleCButtonEvent(IHS_HIDManager *manager, const SDL_GamepadButtonE
     assert(device != NULL);
     IHS_HIDDeviceLock(managed->device);
     if (managed->closed) { IHS_HIDDeviceUnlock(managed->device); return false; }
-    bool changed = IHS_HIDReportSDLSetButton(&device->states.current, event->button,
-                                             event->down);
+    SDL_GamepadButton button = event->button;
+    if (device->swapFaceButtons) {
+        /* The local Switch mapping uses the printed labels. Remote standard
+         * reports use positions: Nintendo B/A/Y/X are south/east/west/north.
+         * Normalize the stored state so full and delta reports agree. */
+        switch (button) {
+            case SDL_GAMEPAD_BUTTON_SOUTH: button = SDL_GAMEPAD_BUTTON_EAST; break;
+            case SDL_GAMEPAD_BUTTON_EAST: button = SDL_GAMEPAD_BUTTON_SOUTH; break;
+            case SDL_GAMEPAD_BUTTON_WEST: button = SDL_GAMEPAD_BUTTON_NORTH; break;
+            case SDL_GAMEPAD_BUTTON_NORTH: button = SDL_GAMEPAD_BUTTON_WEST; break;
+            default: break;
+        }
+    }
+    bool changed = IHS_HIDReportSDLSetButton(&device->states.current, button, event->down);
     if (changed) IHS_HIDReportSDLBeginInput(&device->states.current, &device->states.previous);
     IHS_HIDDeviceUnlock(managed->device);
     return changed;

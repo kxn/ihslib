@@ -30,6 +30,10 @@ typedef enum GetFeatureReportCommand {
     GetFeatureReportGetPowerLevel = 0x02,
     GetFeatureReportGetCaps = 0x04,
     GetFeatureReportGetSerial = 0x07,
+    GetFeatureReportGetFirmware = 0x0c,
+    GetFeatureReportGetSerialSuffix = 0x0e,
+    GetFeatureReportGetPowerState = 0x0f,
+    GetFeatureReportGetConnection = 0x10,
 } GetFeatureReportCommand;
 
 /**
@@ -69,9 +73,11 @@ typedef struct __attribute__((__packed__)) {
     bool valid;
     bool xinput;
     EControllerType controllerType: 32;
-    int32_t playerIndex: 32;
+    uint32_t playerFlags: 32;
     bool hid;
-    uint8_t pad[9];
+    uint32_t deviceClass: 32;
+    uint32_t capabilities: 32;
+    uint8_t driverData;
 } DeviceFeatureReport;
 
 _Static_assert(sizeof(DeviceFeatureReport) == 20, "");
@@ -103,23 +109,71 @@ static uint8_t JoystickPowerLevelByte(SDL_Joystick *joystick) {
     }
 }
 
+static bool GamepadWireless(SDL_Gamepad *controller) {
+#if SDL_MAJOR_VERSION >= 3
+    return SDL_GetGamepadConnectionState(controller) == SDL_JOYSTICK_CONNECTION_WIRELESS;
+#else
+    const SDL_GUID guid = SDL_GetJoystickGUID(SDL_GetGamepadJoystick(controller));
+    return guid.data[0] == 0x05 && guid.data[1] == 0;
+#endif
+}
+
 int IHS_HIDDeviceSDLGetFeatureReport(IHS_HIDDevice *device, const uint8_t *reportNumber, size_t reportNumberLen,
                                      IHS_Buffer *dest, size_t length) {
-    if (reportNumberLen < 1) return -1;
+    if (reportNumberLen < 1 || length < 1) return -1;
     IHS_HIDDeviceSDL *sdl = (IHS_HIDDeviceSDL *) device;
+    uint8_t payload[21] = {reportNumber[0]};
     switch (reportNumber[0]) {
+        case GetFeatureReportGetSerialSuffix:
         case GetFeatureReportGetSerial: {
-            IHS_BufferWriteMem(dest, 0, reportNumber, 1);
-            const char *serial = SDL_GetGamepadSerial(sdl->controller);
-            if (serial == NULL) serial = "";
-            IHS_BufferWriteMem(dest, 1, (const uint8_t *) serial, strlen(serial) + 1);
+            const bool synthetic = sdl->identity == IHS_HIDSdlIdentityDualSense &&
+                SDL_GetGamepadType(sdl->controller) != SDL_GAMEPAD_TYPE_PS5;
+            const char *serial = synthetic ? NULL : SDL_GetGamepadSerial(sdl->controller);
+            if (serial) {
+                const char *comma = strchr(serial, ',');
+                if (reportNumber[0] == GetFeatureReportGetSerialSuffix)
+                    serial = comma ? comma + 1 : NULL;
+                if (serial) {
+                    size_t size = strcspn(serial, ",");
+                    if (size > sizeof(payload) - 2) size = sizeof(payload) - 2;
+                    memcpy(payload + 1, serial, size);
+                }
+            }
+            break;
+        }
+        case GetFeatureReportGetFirmware: {
+            /* Official Generic report: ID, uint16 LE version, zero padding.
+             * A Switch-backed Sony profile has no Sony firmware version. */
+            uint16_t version = 0;
+            if (sdl->identity != IHS_HIDSdlIdentityDualSense ||
+                SDL_GetGamepadType(sdl->controller) == SDL_GAMEPAD_TYPE_PS5) {
+                version = SDL_GetGamepadFirmwareVersion(sdl->controller);
+            }
+            payload[1] = (uint8_t)version;
+            payload[2] = (uint8_t)(version >> 8);
             break;
         }
         case GetFeatureReportGetPowerLevel: {
             IHS_BufferWriteMem(dest, 0, reportNumber, 1);
             SDL_Joystick *joystick = SDL_GetGamepadJoystick(sdl->controller);
             uint8_t level = JoystickPowerLevelByte(joystick);
-            IHS_BufferWriteMem(dest, 1, &level, 1);
+            if (length >= 2) IHS_BufferWriteMem(dest, 1, &level, 1);
+            return 0;
+        }
+        case GetFeatureReportGetPowerState: {
+            int percent = -1;
+            SDL_PowerState state = SDL_GetJoystickPowerInfo(SDL_GetGamepadJoystick(sdl->controller), &percent);
+            payload[1] = GamepadWireless(sdl->controller);
+            payload[2] = (uint8_t)state;
+            payload[3] = (uint8_t)(percent < 0 ? 100 : percent);
+            break;
+        }
+        case GetFeatureReportGetConnection: {
+            SDL_GUID guid = SDL_GetJoystickGUID(SDL_GetGamepadJoystick(sdl->controller));
+            if (!IsXinputDevice(&guid)) {
+                /* Official 0x10 uses the GUID bus first, then SDL's state. */
+                payload[1] = guid.data[0] == 0x05 ? 2 : GamepadWireless(sdl->controller) ? 3 : 1;
+            }
             break;
         }
         case GetFeatureReportGetCaps: {
@@ -176,28 +230,41 @@ int IHS_HIDDeviceSDLGetFeatureReport(IHS_HIDDevice *device, const uint8_t *repor
                         break;
                 }
             }
+            if (sdl->identity == IHS_HIDSdlIdentityDualSense) {
+                controllerType = k_ControllerTypePS5Controller;
+                xinput = false;
+            }
             DeviceFeatureReport report = {
                     .valid = true,
                     .xinput = xinput,
-                    .playerIndex = playerIndex,
+                    /* Official Generic 0x04 packs the index in the low three
+                     * bits. A missing index (-1) encodes as 7, not all flags. */
+                    .playerFlags = 0x08u | ((uint32_t)playerIndex & 0x07u),
                     .controllerType = controllerType,
                     .hid = IsHIDAPIDevice(&guid),
             };
+            if (controllerType == k_ControllerTypePS5Controller) {
+                /* The Windows Generic driver replaces its enumeration caps
+                 * with this nonzero word when consuming the 0x04 response. */
+                report.deviceClass = 1; /* standard gamepad */
+                report.capabilities = IHS_HID_CAP_DUALSENSE_PROFILE;
+                report.driverData = guid.data[15];
+            }
             IHS_HIDDeviceLog(device, IHS_LogLevelDebug, "HID.SDL",
                              "FeatureCaps(xinput=%u, hid=%u, type=%d, player=%d, guid14=0x%02x)",
                              report.xinput ? 1U : 0U, report.hid ? 1U : 0U,
-                             (int)report.controllerType, (int)report.playerIndex,
+                             (int)report.controllerType, playerIndex,
                              (unsigned)guid.data[14]);
-            IHS_BufferWriteMem(dest, 0, reportNumber, 1);
-            IHS_BufferWriteMem(dest, 1, (const unsigned char *) &report, 20);
+            memcpy(payload + 1, &report, sizeof(report));
             break;
         }
         default: {
-            // Write an empty array
-            IHS_BufferFillMem(dest, 1, 0, 1);
+            // Official Generic fallback returns one zero byte.
+            IHS_BufferFillMem(dest, 0, 0, 1);
             return 0;
         }
     }
+    IHS_BufferWriteMem(dest, 0, payload, length < sizeof(payload) ? length : sizeof(payload));
     return 0;
 }
 

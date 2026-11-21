@@ -405,17 +405,26 @@ static void HandleDeviceGetFeatureReport(IHS_SessionChannel *channel, IHS_HIDMan
         return;
     }
 
-    IHS_Buffer str = IHS_BUFFER_INIT(cmd->length, 255);
+    if (cmd->length == 0 || cmd->length > UINT8_MAX || cmd->report_number.len == 0) {
+        SendRequestCodeResponse(channel, message->request_id, -1);
+        return;
+    }
+    IHS_Buffer str = IHS_BUFFER_INIT(UINT8_MAX, UINT8_MAX);
     int result = IHS_HIDDeviceGetFeatureReport(managed->device, cmd->report_number.data, cmd->report_number.len,
-                                               &str, cmd->length);
+                                              &str, cmd->length);
+    /* The provider returns status. Android Steam Link 0x7c6e14 / 0x7c73ac
+     * reports the byte count on the wire. Windows uses it as the read result. */
+    if (result >= 0) {
+        result = (int)(str.size < cmd->length ? str.size : cmd->length);
+    }
 
     CHIDMessageFromRemote__RequestResponse response = CHIDMESSAGE_FROM_REMOTE__REQUEST_RESPONSE__INIT;
     PROTOBUF_C_SET_VALUE(response, request_id, message->request_id);
     PROTOBUF_C_SET_VALUE(response, result, result);
-    if (result == 0) {
+    if (result > 0) {
         response.has_data = true;
         response.data.data = IHS_BufferPointer(&str);
-        response.data.len = str.size;
+        response.data.len = (size_t)result;
     }
     SendRequestResponse(channel, &response);
     IHS_SessionLog(channel->session, IHS_LogLevelVerbose, "HID",
@@ -616,6 +625,10 @@ static void InfoFromHID(CHIDDeviceInfo *info, const IHS_HIDDeviceInfo *hid) {
      * sample presence/freshness is a separate RAW report contract (section 21). */
     capsBits |= IHS_HID_CAP_UNK_1;
 #endif
+    if (hid->vendor_id == 0x054c && hid->product_id == 0x0ce6) {
+        capsBits = IHS_HID_CAP_DUALSENSE_PROFILE;
+        PROTOBUF_C_P_SET_VALUE(info, caps_bits2, 0);
+    }
     /* Backend opt-in, not an inference from Nintendo identity or SDL rumble.
      * Original host config/pulse gate: OFFICIAL_INPUT_RE sections 22.10-22.12. */
     if (hid->native_haptic_pulse)

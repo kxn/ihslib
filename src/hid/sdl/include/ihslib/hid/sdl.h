@@ -76,6 +76,18 @@ IHS_HIDProvider *IHS_HIDProviderSDLCreateManaged();
 
 IHS_HIDProvider *IHS_HIDProviderSDLCreateUnmanaged(const IHS_HIDProviderSDLDeviceList *list, void *listContext);
 
+typedef enum IHS_HIDSdlIdentity {
+    IHS_HIDSdlIdentityDefault,
+    IHS_HIDSdlIdentityDualSense,
+} IHS_HIDSdlIdentity;
+
+/** Configure an unmanaged pad before attaching the provider to a session.
+ * Change the profile only after the previous session is joined.
+ * For local SDL mappings based on Nintendo face labels, pass true for
+ * swapFaceButtons to restore the standard face positions in remote reports. */
+void IHS_HIDProviderSDLSetRemoteProfile(IHS_HIDProvider *provider, IHS_HIDSdlIdentity identity,
+                                       bool swapFaceButtons);
+
 void IHS_HIDProviderSDLDestroy(IHS_HIDProvider *provider);
 
 /**

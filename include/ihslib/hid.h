@@ -68,6 +68,9 @@ typedef enum IHS_HIDDeviceCaps {
     IHS_HID_CAP_MISC_1 = 0x00800000 /*Misc 1*/,
     IHS_HID_CAP_UNK_6 = 0x01000000,
     IHS_HID_CAP_UNK_7 = 0x02000000 /*Gamepad uses this: PS4, PS5*/,
+    /* Windows Steam's type 45 default and the Generic Sony layout bits.
+     * These describe the emulated controller, not USB/audio passthrough. */
+    IHS_HID_CAP_DUALSENSE_PROFILE = 0x02835bff,
 } IHS_HIDDeviceCaps;
 #pragma clang diagnostic pop
 

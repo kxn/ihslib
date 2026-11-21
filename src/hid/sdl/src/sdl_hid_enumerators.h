@@ -55,6 +55,7 @@ typedef struct GameControllerEnumeration {
 
 IHS_Enumeration *IHS_HIDDeviceSDLEnumerateManaged();
 
-IHS_Enumeration *IHS_HIDDeviceSDLEnumerateUnmanaged(const IHS_HIDProviderSDLDeviceList *list, void *listContext);
+IHS_Enumeration *IHS_HIDDeviceSDLEnumerateUnmanaged(const IHS_HIDProviderSDLDeviceList *list,
+                                                void *listContext, IHS_HIDSdlIdentity identity);
 
 bool IHS_HIDDeviceSDLEnumerationGetInfo(IHS_Enumeration *enumeration, IHS_HIDDeviceInfo *info);

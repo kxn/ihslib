@@ -139,17 +139,26 @@ static int DeviceVendorString(IHS_HIDDevice *device, IHS_Buffer *dest) {
 }
 
 static int DeviceProductString(IHS_HIDDevice *device, IHS_Buffer *dest) {
-    (void) device;
-    IHS_BufferWriteMem(dest, 0, (const unsigned char *) "", 1);
+    IHS_HIDDeviceSDL *sdl = (IHS_HIDDeviceSDL *)device;
+    const char *name = SDL_GetJoystickName(SDL_GetGamepadJoystick(sdl->controller));
+    if (sdl->identity == IHS_HIDSdlIdentityDualSense)
+        name = "DualSense Wireless Controller";
+#if defined(__SWITCH__)
+    else
+        name = "Nintendo Switch Pro Controller";
+#endif
+    if (name == NULL) name = "";
+    size_t size = strlen(name);
+    if (size > 254) size = 254;
+    if (size) IHS_BufferWriteMem(dest, 0, (const uint8_t *)name, size);
+    IHS_BufferFillMem(dest, size, 0, 1);
     return 0;
 }
 
 static int DeviceSerialNumber(IHS_HIDDevice *device, IHS_Buffer *dest) {
-    IHS_HIDDeviceSDL *sdl = (IHS_HIDDeviceSDL *) device;
-    const char *serial = SDL_GetGamepadSerial(sdl->controller);
-    if (serial != NULL) {
-        IHS_BufferWriteMem(dest, 0, (const unsigned char *) serial, strlen(serial));
-    }
+    (void)device;
+    /* Official Generic GetSerialNumberString is empty. Feature 0x07 is
+     * the separate SDL gamepad serial query. */
     IHS_BufferWriteMem(dest, 0, (const unsigned char *) "", 1);
     return 0;
 }

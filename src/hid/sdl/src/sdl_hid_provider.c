@@ -41,6 +41,8 @@ typedef struct HIDProviderSDL {
     bool managed;
     const IHS_HIDProviderSDLDeviceList *deviceList;
     void *deviceListContext;
+    IHS_HIDSdlIdentity identity;
+    bool swapFaceButtons;
 } HIDProviderSDL;
 
 static IHS_HIDProvider *ProviderAlloc(const IHS_HIDProviderClass *cls);
@@ -91,6 +93,15 @@ void IHS_HIDProviderSDLDestroy(IHS_HIDProvider *provider) {
     IHS_SessionHIDProviderDestroy(provider);
 }
 
+void IHS_HIDProviderSDLSetRemoteProfile(IHS_HIDProvider *provider, IHS_HIDSdlIdentity identity,
+                                       bool swapFaceButtons) {
+    HIDProviderSDL *sdl = (HIDProviderSDL *)provider;
+    if (sdl && !sdl->managed) {
+        sdl->identity = identity;
+        sdl->swapFaceButtons = swapFaceButtons;
+    }
+}
+
 static IHS_HIDProvider *ProviderAlloc(const IHS_HIDProviderClass *cls) {
     HIDProviderSDL *provider = calloc(1, sizeof(HIDProviderSDL));
     provider->base.cls = cls;
@@ -130,6 +141,8 @@ static IHS_HIDDevice *ProviderOpenDevice(IHS_HIDProvider *provider, const char *
 void IHS_HIDProviderSDLConfigureOutput(IHS_HIDProvider *provider, IHS_HIDDeviceSDL *device) {
     HIDProviderSDL *sdl = (HIDProviderSDL *)provider;
     if (sdl && sdl->deviceList) {
+        device->identity = sdl->identity;
+        device->swapFaceButtons = sdl->swapFaceButtons;
         device->output = sdl->deviceList->output;
         device->outputDiscontinuity = sdl->deviceList->outputDiscontinuity;
         device->outputContext = sdl->deviceListContext;
@@ -146,7 +159,8 @@ static IHS_Enumeration *ProviderEnumerate(IHS_HIDProvider *provider) {
     if (sdlProvider->managed) {
         return IHS_HIDDeviceSDLEnumerateManaged();
     } else {
-        return IHS_HIDDeviceSDLEnumerateUnmanaged(sdlProvider->deviceList, sdlProvider->deviceListContext);
+        return IHS_HIDDeviceSDLEnumerateUnmanaged(sdlProvider->deviceList, sdlProvider->deviceListContext,
+                                                sdlProvider->identity);
     }
 }
 

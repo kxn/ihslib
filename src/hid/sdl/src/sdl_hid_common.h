@@ -48,6 +48,8 @@ typedef struct IHS_HIDDeviceSDL {
     bool controllerManaged;
     SDL_JoystickID instanceId;
     SDL_Gamepad *controller;
+    IHS_HIDSdlIdentity identity;
+    bool swapFaceButtons;
     int playerIndex;
     struct {
         IHS_HIDStateSDL current;

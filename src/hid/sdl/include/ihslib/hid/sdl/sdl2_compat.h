@@ -14,6 +14,11 @@ typedef SDL_ControllerButtonEvent SDL_GamepadButtonEvent;
 typedef SDL_ControllerAxisEvent SDL_GamepadAxisEvent;
 typedef SDL_ControllerSensorEvent SDL_GamepadSensorEvent;
 
+#define SDL_GAMEPAD_BUTTON_SOUTH SDL_CONTROLLER_BUTTON_A
+#define SDL_GAMEPAD_BUTTON_EAST SDL_CONTROLLER_BUTTON_B
+#define SDL_GAMEPAD_BUTTON_WEST SDL_CONTROLLER_BUTTON_X
+#define SDL_GAMEPAD_BUTTON_NORTH SDL_CONTROLLER_BUTTON_Y
+
 #define SDL_INIT_GAMEPAD SDL_INIT_GAMECONTROLLER
 
 #define SDL_EVENT_GAMEPAD_ADDED SDL_CONTROLLERDEVICEADDED
@@ -41,6 +46,7 @@ typedef SDL_ControllerSensorEvent SDL_GamepadSensorEvent;
 
 #define SDL_GetGamepadJoystick SDL_GameControllerGetJoystick
 #define SDL_GetGamepadSerial SDL_GameControllerGetSerial
+#define SDL_GetGamepadFirmwareVersion SDL_GameControllerGetFirmwareVersion
 #define SDL_GetGamepadPlayerIndex SDL_GameControllerGetPlayerIndex
 #define SDL_SetGamepadPlayerIndex SDL_GameControllerSetPlayerIndex
 #define SDL_GetGamepadType SDL_GameControllerGetType

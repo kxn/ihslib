@@ -37,12 +37,14 @@
 typedef struct UnmanagedEnumerationAllocArg {
     const IHS_HIDProviderSDLDeviceList *list;
     void *listContext;
+    IHS_HIDSdlIdentity identity;
 } UnmanagedEnumerationAllocArg;
 
 typedef struct UnmanagedEnumeration {
     GameControllerEnumeration base;
     const IHS_HIDProviderSDLDeviceList *list;
     void *listContext;
+    IHS_HIDSdlIdentity identity;
 } UnmanagedEnumeration;
 
 static IHS_Enumeration *EnumerationAlloc(const IHS_EnumerationClass *cls, void *arg);
@@ -72,13 +74,14 @@ const static IHS_HIDDeviceSDLEnumerationClass UnmanagedEnumerationClass = {
         .getInfo = EnumerationGetInfo,
 };
 
-IHS_Enumeration *IHS_HIDDeviceSDLEnumerateUnmanaged(const IHS_HIDProviderSDLDeviceList *list, void *listContext) {
+IHS_Enumeration *IHS_HIDDeviceSDLEnumerateUnmanaged(const IHS_HIDProviderSDLDeviceList *list,
+                                                void *listContext, IHS_HIDSdlIdentity identity) {
     assert(list != NULL);
     assert(list->count != NULL);
     assert(list->index != NULL);
     assert(list->instanceId != NULL);
     assert(list->controller != NULL);
-    UnmanagedEnumerationAllocArg arg = {.list = list, .listContext =listContext};
+    UnmanagedEnumerationAllocArg arg = {.list = list, .listContext = listContext, .identity = identity};
     return IHS_EnumerationCreate((const IHS_EnumerationClass *) &UnmanagedEnumerationClass, &arg);
 }
 
@@ -88,6 +91,7 @@ static IHS_Enumeration *EnumerationAlloc(const IHS_EnumerationClass *cls, void *
     UnmanagedEnumerationAllocArg *ua = arg;
     enumeration->list = ua->list;
     enumeration->listContext = ua->listContext;
+    enumeration->identity = ua->identity;
     EnumerationReset((IHS_Enumeration *) enumeration);
     return (IHS_Enumeration *) enumeration;
 }
@@ -160,9 +164,18 @@ static bool EnumerationGetInfo(IHS_Enumeration *enumeration, IHS_HIDDeviceInfo *
     strncpy(gce->temp.product_string, "Nintendo Switch Pro Controller", 63);
     gce->temp.product_string[63] = '\0';
 #endif
+    if (ue->identity == IHS_HIDSdlIdentityDualSense) {
+        info->vendor_id = 0x054c;
+        info->product_id = 0x0ce6;
+        info->product_version = 0x0001;
+        strcpy(gce->temp.product_string, "DualSense Wireless Controller");
+    }
     info->path = gce->temp.path;
     info->product_string = gce->temp.product_string;
-    info->native_haptic_pulse = ue->list->output && ue->list->supportsNativeHaptics &&
+    if (ue->identity != IHS_HIDSdlIdentityDualSense || SDL_GetGamepadType(controller) == SDL_GAMEPAD_TYPE_PS5)
+        info->serial_number = SDL_GetGamepadSerial(controller);
+    info->native_haptic_pulse = ue->identity != IHS_HIDSdlIdentityDualSense &&
+        ue->list->output && ue->list->supportsNativeHaptics &&
         ue->list->supportsNativeHaptics(instanceId, ue->listContext);
     return true;
 }

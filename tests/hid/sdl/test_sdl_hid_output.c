@@ -32,6 +32,10 @@ typedef struct fixture {
 static uint32_t advertised_caps;
 static uint16_t expected_vendor, expected_product;
 static unsigned advertisements;
+static unsigned feature_replies;
+static uint8_t expected_feature_id;
+static int expected_feature_size;
+static bool expect_sony_detail;
 bool __real_IHS_SessionChannelControlSend(IHS_SessionChannel *, EStreamControlMessage,
                                           const ProtobufCMessage *, int32_t);
 bool __wrap_IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamControlMessage type,
@@ -41,6 +45,37 @@ bool __wrap_IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamCo
     const CRemoteHIDMsg *wrapped = (const void *)message;
     CHIDMessageFromRemote *hid = chidmessage_from_remote__unpack(NULL, wrapped->data.len, wrapped->data.data);
     assert(hid);
+    if (hid->command_case == CHIDMESSAGE_FROM_REMOTE__COMMAND_RESPONSE && hid->response->request_id == 123) {
+        const CHIDMessageFromRemote__RequestResponse *reply = hid->response;
+        assert(reply->has_result && reply->result == expected_feature_size);
+        if (expected_feature_size > 0) {
+            assert(reply->has_data && reply->data.len == (size_t)expected_feature_size);
+            assert(reply->data.data[0] == expected_feature_id);
+            if (expected_feature_id == 0x04) {
+                assert(reply->data.data[1] == 1);
+                assert((reply->data.data[7] & 0xf8) == 0x08);
+                assert(reply->data.data[8] == 0 && reply->data.data[9] == 0 && reply->data.data[10] == 0);
+                if (expect_sony_detail) {
+                    const uint8_t sony_type[] = {45, 0, 0, 0};
+                    const uint8_t sony_detail[] = {1, 0, 0, 0, 0xff, 0x5b, 0x83, 0x02};
+                    assert(!memcmp(reply->data.data + 3, sony_type, sizeof(sony_type)));
+                    assert(!memcmp(reply->data.data + 12, sony_detail, sizeof(sony_detail)));
+                }
+            }
+            if (expected_feature_id == 0x0c) {
+                for (size_t i = 1; i < reply->data.len; ++i) assert(reply->data.data[i] == 0);
+            }
+            if (expected_feature_id == 0x10) {
+                assert(reply->data.data[1] == 1);
+                for (size_t i = 2; i < reply->data.len; ++i) assert(reply->data.data[i] == 0);
+            }
+        } else {
+            assert(!reply->has_data);
+        }
+        ++feature_replies;
+        chidmessage_from_remote__free_unpacked(hid, NULL);
+        return true;
+    }
     if (hid->command_case != CHIDMESSAGE_FROM_REMOTE__COMMAND_UPDATE_DEVICE_LIST) {
         chidmessage_from_remote__free_unpacked(hid, NULL);
         return __real_IHS_SessionChannelControlSend(channel, type, message, packet_id);
@@ -49,6 +84,9 @@ bool __wrap_IHS_SessionChannelControlSend(IHS_SessionChannel *channel, EStreamCo
     const CHIDDeviceInfo *device = hid->update_device_list->devices[0];
     assert(device->is_generic_gamepad && device->vendor_id == expected_vendor &&
            device->product_id == expected_product);
+    if (expected_vendor == 0x054c && expected_product == 0x0ce6) {
+        assert(device->has_caps_bits2 && device->caps_bits2 == 0);
+    }
     advertised_caps = device->caps_bits;
     ++advertisements;
     chidmessage_from_remote__free_unpacked(hid, NULL);
@@ -78,6 +116,30 @@ static void *write_while_owner_locked(void *p) {
     watch_clock = false;
     return NULL;
 }
+
+static void check_feature_reply(IHS_Session *session, uint32_t device, uint8_t id, uint32_t requested,
+                                uint8_t response_id, int size) {
+    CHIDMessageToRemote__DeviceGetFeatureReport query = CHIDMESSAGE_TO_REMOTE__DEVICE_GET_FEATURE_REPORT__INIT;
+    query.device = device;
+    query.length = requested;
+    query.report_number.data = &id;
+    query.report_number.len = 1;
+    CHIDMessageToRemote message = CHIDMESSAGE_TO_REMOTE__INIT;
+    message.request_id = 123;
+    message.command_case = CHIDMESSAGE_TO_REMOTE__COMMAND_DEVICE_GET_FEATURE_REPORT;
+    message.device_get_feature_report = &query;
+    const int connection = session->state.connectionState;
+    const bool input = session->state.streamingInput;
+    session->state.connectionState = IHS_SessionConnectionStateConnected;
+    session->state.streamingInput = true;
+    expected_feature_id = response_id;
+    expected_feature_size = size;
+    const unsigned before = feature_replies;
+    IHS_SessionChannelControlOnHIDMsg(IHS_SessionChannelFor(session, IHS_SessionChannelIdControl), &message);
+    assert(feature_replies == before + 1);
+    session->state.connectionState = connection;
+    session->state.streamingInput = input;
+}
 #endif
 static int device_count(void *p) { (void)p; return 1; }
 static int device_index(SDL_JoystickID id, void *p) { return ((fixture *)p)->id == id ? 0 : -1; }
@@ -106,7 +168,9 @@ static void check_capability(IHS_HIDProvider *provider, IHS_Session *session, bo
     session->state.streamingInput = true;
     assert(IHS_SessionHIDNotifyDeviceChange(session));
     assert(advertisements == before + 1);
-    assert(advertised_caps == (0x8343ffu | (expected ? 0x2000u : 0)));
+    uint32_t mask = expected_vendor == 0x054c && expected_product == 0x0ce6 ?
+        0x02835bffu : 0x008343ffu;
+    assert(advertised_caps == (mask | (expected ? 0x2000u : 0)));
     session->state.connectionState = previous_state;
     session->state.streamingInput = previous_input;
 #else
@@ -189,6 +253,13 @@ static void check(bool native, bool notify_gap) {
     snprintf(path, sizeof(path), "sdl://%d", f.id);
     IHS_HIDManagedDevice *managed = IHS_HIDManagerOpenDevice(session->hidManager, path);
     assert(managed);
+#ifdef IHS_TEST_CLOCK_WRAP
+    check_feature_reply(session, managed->id, 0x04, 21, 0x04, 21);
+    check_feature_reply(session, managed->id, 0x0c, 21, 0x0c, 21);
+    check_feature_reply(session, managed->id, 0x0c, 3, 0x0c, 3);
+    check_feature_reply(session, managed->id, 0x10, 21, 0x10, 21);
+    check_feature_reply(session, managed->id, 0x04, 0, 0, -1);
+#endif
     uint8_t command[69] = {13, 10, 0, 0, 0, 0x10, 0,
         0, 1, 0x40, 0x40, 0, 0, 5, 0xc0};
     uint8_t original[69];
@@ -281,6 +352,25 @@ static void check(bool native, bool notify_gap) {
     }
 #endif
     IHS_SessionDestroy(session);
+#ifdef IHS_TEST_CLOCK_WRAP
+    if (notify_gap) {
+        IHS_HIDProviderSDLSetRemoteProfile(provider, IHS_HIDSdlIdentityDualSense, true);
+        session = IHS_TestSessionCreate();
+        IHS_SessionHIDAddProvider(session, provider);
+        check_capability(provider, session, false);
+        managed = IHS_HIDManagerOpenDevice(session->hidManager, path);
+        assert(managed);
+        expect_sony_detail = true;
+        check_feature_reply(session, managed->id, 0x04, 21, 0x04, 21);
+        check_feature_reply(session, managed->id, 0x07, 21, 0x07, 21);
+        check_feature_reply(session, managed->id, 0x0c, 21, 0x0c, 21);
+        check_feature_reply(session, managed->id, 0x0e, 21, 0x0e, 21);
+        check_feature_reply(session, managed->id, 0x0f, 21, 0x0f, 21);
+        check_feature_reply(session, managed->id, 0x10, 21, 0x10, 21);
+        expect_sony_detail = false;
+        IHS_SessionDestroy(session);
+    }
+#endif
     IHS_HIDProviderSDLDestroy(provider);
     SDL_GameControllerClose(f.controller);
     SDL_JoystickDetachVirtual(index);
